@@ -253,13 +253,9 @@ const seasonSchema = new mongoose.Schema({
 
   // Modificateurs reglementaires actifs pour cette saison
   reglement: {
-    fuelMultiplier:       { type: Number, default: 1.0 },   // Voitures lourdes/légères
-    drsCircuits:          [Number],                          // Index circuits avec DRS booste
-    budgetCap:            { type: Number, default: null },   // Plafond budget ecuries (null = pas de cap)
-    drsBanned:            { type: Boolean, default: false }, // DRS supprimé pour la saison
-    tyreWearMultiplier:   { type: Number, default: 1.0 },   // Multiplicateur d'usure des pneus
-    moteurFreeze:         { type: Boolean, default: false }, // Freeze du développement moteur
-    doublePointsFinale:   { type: Number, default: 0 },     // Nb de dernières courses en double points
+    fuelMultiplier:  { type: Number, default: 1.0 },  // Voitures lourdes/légères
+    drsCircuits:     [Number],                          // Index circuits avec DRS booste
+    budgetCap:       { type: Number, default: null },   // Plafond budget ecuries (null = pas de cap)
   },
 
   createdAt: { type: Date, default: Date.now },
@@ -282,32 +278,6 @@ const regVoteSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 });
 const RegVote = mongoose.model('RegVote', regVoteSchema);
-
-// ── Modele GlobalConfig (configuration globale du jeu) ───────────────
-// Stocke l'état inter-saisons : dernière ère réglementaire, compteur, etc.
-const globalConfigSchema = new mongoose.Schema({
-  lastRegChangeSeason:  { type: Number, default: 0 }, // Numéro de la dernière saison ayant eu un changement réglementaire
-  nextRegTriggerIn:     { type: Number, default: 3 }, // Dans combien de saisons après la dernière, le prochain vote se déclenchera (3 ou 4)
-  regHistory: [{
-    seasonNumber:  Number,
-    type:          String,
-    titre:         String,
-    description:   String,
-    winner:        String, // id proposition gagnante (A/B/C)
-    appliedAt:     { type: Date, default: Date.now },
-  }],
-});
-const GlobalConfig = mongoose.model('GlobalConfig', globalConfigSchema);
-
-// Helper : récupère ou crée le GlobalConfig unique
-async function getConfig() {
-  let config = await GlobalConfig.findOne();
-  if (!config) {
-    config = new GlobalConfig({});
-    await config.save();
-  }
-  return config;
-}
 
 // ── Modele Offer (offre de transfert) ──────────────────────────────
 const offerSchema = new mongoose.Schema({
@@ -388,7 +358,7 @@ new SlashCommandBuilder()
 
 new SlashCommandBuilder()
 .setName('upgrade_voiture').setDescription('[ADMIN] Upgrade une stat de voiture avec le budget ecurie.')
-    .addStringOption(o => o.setName('ecurie').setDescription('Nom de l\'ecurie').setRequired(true))\n.addStringOption(o => {\no.setName('stat').setDescription('Stat a ameliorer').setRequired(true);\n['chassis', 'engine', 'reliability', 'pit'].forEach(s => o.addChoices({ name: s, value: s }));\nreturn o;\n})\n.addIntegerOption(o => o.setName('points').setDescription('Nombre de points').setRequired(true).setMinValue(1).setMaxValue(10)),\n\nnew SlashCommandBuilder()\n.setName('classement_ecuries').setDescription('Classement des ecuries.'),\n\nnew SlashCommandBuilder().setName('proposer_reglement').setDescription('[ADMIN] Lance un vote reglementaire.'),\nnew SlashCommandBuilder().setName('vote_reglement').setDescription('Vote pour une proposition.').addStringOption(o => o.setName('choix').setDescription('A, B ou C').setRequired(true).addChoices({ name: 'A', value: 'A' }, { name: 'B', value: 'B' }, { name: 'C', value: 'C' })),\nnew SlashCommandBuilder().setName('cloturer_vote').setDescription('[ADMIN] Cloture le vote en cours.'),\nnew SlashCommandBuilder().setName('reglement_actuel').setDescription('Affiche le reglement en vigueur.'),\nnew SlashCommandBuilder().setName('historique_reglements').setDescription('Historique des changements reglementaires.'),\n];\n\n// ═══════════════════════════════════════════════════════════════════\n//  EVENTS\n// ═══════════════════════════════════════════════════════════════════\n\nclient.once('ready', async () => {\nconsole.log('✅ Connecte en tant que ' + client.user.tag);\nclient.user.setActivity('🏎️ Saison F1 en cours', { type: 4 });\ntry {\nconst rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);\nawait rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: commands.map(c => c.toJSON()) });\nconsole.log('⚙️  Slash commands enregistrees');\n} catch (e) { console.error('❌ Erreur enregistrement :', e); }\n});\n\nclient.on('interactionCreate', async (interaction) => {\n// Gestion des boutons d'offre de contrat (arrives en DM)
+    .addStringOption(o => o.setName('ecurie').setDescription('Nom de l\'ecurie').setRequired(true))\n.addStringOption(o => {\no.setName('stat').setDescription('Stat a ameliorer').setRequired(true);\n['chassis', 'engine', 'reliability', 'pit'].forEach(s => o.addChoices({ name: s, value: s }));\nreturn o;\n})\n.addIntegerOption(o => o.setName('points').setDescription('Nombre de points').setRequired(true).setMinValue(1).setMaxValue(10)),\n\nnew SlashCommandBuilder()\n.setName('classement_ecuries').setDescription('Classement des ecuries.'),\n];\n\n// ═══════════════════════════════════════════════════════════════════\n//  EVENTS\n// ═══════════════════════════════════════════════════════════════════\n\nclient.once('ready', async () => {\nconsole.log('✅ Connecte en tant que ' + client.user.tag);\nclient.user.setActivity('🏎️ Saison F1 en cours', { type: 4 });\ntry {\nconst rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);\nawait rest.put(Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID), { body: commands.map(c => c.toJSON()) });\nconsole.log('⚙️  Slash commands enregistrees');\n} catch (e) { console.error('❌ Erreur enregistrement :', e); }\n});\n\nclient.on('interactionCreate', async (interaction) => {\n// Gestion des boutons d'offre de contrat (arrives en DM)
   if (interaction.isButton()) {
     // Boutons offre de contrat (DM)
     if (interaction.customId.startsWith('offer_')) {
@@ -434,7 +404,6 @@ new SlashCommandBuilder()
     if (interaction.commandName === 'vote_reglement')     await cmdVoteReglement(interaction);
     if (interaction.commandName === 'cloturer_vote')      await cmdCloturerVote(interaction);
     if (interaction.commandName === 'reglement_actuel')   await cmdReglementActuel(interaction);
-    if (interaction.commandName === 'historique_reglements') await cmdHistoriqueReglements(interaction);
   } catch (err) {
     console.error('Erreur sur /' + interaction.commandName + ' :', err);
     const msg = { content: '❌ Une erreur est survenue.', ephemeral: true };
@@ -723,22 +692,11 @@ await sleep(3000);
 
 const fuelMultiplier = season.reglement ? (season.reglement.fuelMultiplier || 1.0) : 1.0;
 // DRS boost : si le circuit est dans la liste DRS, overtakingEase booste de 0.2
-// Mais si DRS est banni cette saison, pas de boost (et réduction de l'overtakingEase)
-const drsBanned = season.reglement && season.reglement.drsBanned;
-const drsBoost = !drsBanned && season.reglement && season.reglement.drsCircuits &&
+const drsBoost = season.reglement && season.reglement.drsCircuits &&
 season.reglement.drsCircuits.includes(season.circuitOrder[season.currentRound]);
-const overtakingModif = drsBanned ? -0.15 : (drsBoost ? 0.2 : 0);
-const circuitEffectif = (overtakingModif !== 0)
-? { ...circuit, overtakingEase: Math.max(0, Math.min(1, circuit.overtakingEase + overtakingModif)) }
+const circuitEffectif = drsBoost
+? { ...circuit, overtakingEase: Math.min(1, circuit.overtakingEase + 0.2) }
 : circuit;
-
-// Multiplicateur d'usure pneus (règlement pneumatiques)
-const tyreWearMultiplier = season.reglement ? (season.reglement.tyreWearMultiplier || 1.0) : 1.0;
-
-// Double points sur les dernières courses ?
-const doublePointsFinale = season.reglement ? (season.reglement.doublePointsFinale || 0) : 0;
-const isDoublePoints = doublePointsFinale > 0 &&
-  (season.circuitOrder.length - season.currentRound) <= doublePointsFinale;
 
 const carState = grid.map(({ driver }) => ({
 driver,
@@ -799,7 +757,7 @@ tyre: 'soft', tyreWear: 0, tyreAge: 0,
       }
 
       state.tyreAge++;
-      const degRate = { soft: 0.018, medium: 0.011, hard: 0.006 }[state.tyre] * circuit.tyreWear * tyreWearMultiplier;
+      const degRate = { soft: 0.018, medium: 0.011, hard: 0.006 }[state.tyre] * circuit.tyreWear;
       const mgmt = (state.driver.stats.tyreManagement - 50) / 100 * 0.3;
       state.tyreWear = Math.min(1, state.tyreWear + degRate - mgmt * degRate);
 
@@ -863,8 +821,7 @@ tyre: 'soft', tyreWear: 0, tyreAge: 0,
   for (let i = 0; i < final.length; i++) {
     const s = final[i];
     const pos = i + 1;
-    const champPtsBase = !s.dnf && pos <= 10 ? POINTS_TABLE[pos - 1] : 0;
-    const champPts = isDoublePoints ? champPtsBase * 2 : champPtsBase;
+    const champPts = !s.dnf && pos <= 10 ? POINTS_TABLE[pos - 1] : 0;
     const coins    = !s.dnf && pos <= 20 ? (PLCOINS_TABLE[pos - 1] || 2) : 5;
     s.driver.totalPoints += champPts;
     if (pos === 1) s.driver.totalWins++;
@@ -899,7 +856,7 @@ tyre: 'soft', tyreWear: 0, tyreAge: 0,
     return '**P' + (i+1) + '** #' + s.driver.number + ' ' + s.driver.name + pen + ' — +' + s._champPts + ' pts | +' + s._coins + ' PLcoins' + extrasStr;
   });
 
-  await channel.send({ embeds: [new EmbedBuilder().setTitle('🏆 RESULTATS — ' + circuit.emoji + ' GP de ' + circuit.name).setDescription('🥇 **VAINQUEUR : ' + (winner ? winner.driver.name + ' #' + winner.driver.number : 'Aucun') + '**' + (isDoublePoints ? '\n✨ **DOUBLE POINTS — Manche finale !**' : '') + '\n\n' + resultLines.join('\n')).setColor(0xFFD700).setTimestamp().setFooter({ text: 'Saison ' + season.seasonNumber + ' · Manche ' + (season.currentRound + 1) + '/' + CIRCUITS.length })] });
+  await channel.send({ embeds: [new EmbedBuilder().setTitle('🏆 RESULTATS — ' + circuit.emoji + ' GP de ' + circuit.name).setDescription('🥇 **VAINQUEUR : ' + (winner ? winner.driver.name + ' #' + winner.driver.number : 'Aucun') + '**\n\n' + resultLines.join('\n')).setColor(0xFFD700).setTimestamp().setFooter({ text: 'Saison ' + season.seasonNumber + ' · Manche ' + (season.currentRound + 1) + '/' + CIRCUITS.length })] });
 
 // ── Budget ecuries selon les positions ─────────────────────────────
 const allTeams = await Team.find();
@@ -924,194 +881,13 @@ await channel.send('💰 **' + team.name + '** gagne **' + gained.toLocaleString
   season.elSetups = [];
   if (season.currentRound >= CIRCUITS.length) {
     season.isActive = false;
-    await channel.send('🏁 **FIN DE SAISON !** La treve hivernale commence !\n\nLes ecuries peuvent maintenant upgrader leurs voitures avec le budget accumule grace a /upgrade_voiture.');
+    await channel.send('🏁 **FIN DE SAISON !** La treve hivernale commence !
 
-    // ── Vérification du déclenchement automatique réglementaire ────────
-    await verifierEtDeclencherVoteReglementaire(season, channel);
+Les ecuries peuvent maintenant upgrader leurs voitures avec le budget accumule grace a /upgrade_voiture.');
   }
   await season.save();
 }
 
-// ═══════════════════════════════════════════════════════════════════
-//  SYSTÈME RÉGLEMENTAIRE AUTOMATIQUE — Toutes les 3-4 saisons
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Vérifie si un changement de règlement doit avoir lieu après la fin de saison.
- * Se déclenche automatiquement si (seasonNumber - lastRegChangeSeason) >= nextRegTriggerIn
- * Crée le vote, le poste dans le salon, et programme la clôture automatique après 48h.
- */
-async function verifierEtDeclencherVoteReglementaire(season, channel) {
-  try {
-    const config = await getConfig();
-    const saisonDepuisDernierReg = season.seasonNumber - config.lastRegChangeSeason;
-
-    if (saisonDepuisDernierReg < config.nextRegTriggerIn) {
-      // Pas encore le moment — on annonce combien de saisons il reste
-      const restant = config.nextRegTriggerIn - saisonDepuisDernierReg;
-      await channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('📋 Bilan réglementaire — Saison ' + season.seasonNumber)
-          .setDescription(
-            '🗓️ **' + restant + ' saison(s)** avant le prochain changement réglementaire majeur.\n' +
-            'Dernier changement : Saison ' + (config.lastRegChangeSeason || 'aucun') + ' | Prochain : dans ' + restant + ' saison(s)'
-          )
-          .setColor(0x95A5A6)
-        ]
-      });
-      return;
-    }
-
-    // C'est le moment ! On déclenche le vote réglementaire automatiquement
-    await sleep(3000);
-    await channel.send({
-      embeds: [new EmbedBuilder()
-        .setTitle('⚠️ CHANGEMENT D\'ÈRE RÉGLEMENTAIRE IMMINENT !')
-        .setDescription(
-          '**' + saisonDepuisDernierReg + ' saisons** se sont écoulées depuis le dernier grand changement réglementaire.\n\n' +
-          'La FIA prépare une **révolution des règles** pour la prochaine saison !\n' +
-          'Un vote va s\'ouvrir pour décider de la direction prise...\n\n' +
-          '🗳️ Tous les pilotes auront **48h** pour voter.'
-        )
-        .setColor(0xFF6B35)
-        .setTimestamp()
-      ]
-    });
-    await sleep(4000);
-
-    // Vérifier qu'aucun vote n'est déjà ouvert
-    const existingVote = await RegVote.findOne({ status: 'open' });
-    if (existingVote) {
-      await channel.send('⚠️ Un vote réglementaire est déjà en cours — le déclenchement automatique est annulé. Clôturez-le d\'abord avec /cloturer_vote.');
-      return;
-    }
-
-    // Générer les propositions et créer le vote
-    const proposals = genererPropositions();
-    const expiresAt  = new Date(Date.now() + 48 * 60 * 60 * 1000);
-    const vote = new RegVote({ proposals, expiresAt });
-    await vote.save();
-
-    const desc = proposals.map(p =>
-      '**Proposition ' + p.id + ' — ' + p.titre + '**\n' + p.description + '\n'
-    ).join('\n');
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('reg_vote_A').setLabel('Voter A').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('reg_vote_B').setLabel('Voter B').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('reg_vote_C').setLabel('Voter C').setStyle(ButtonStyle.Primary),
-    );
-
-    const msg = await channel.send({
-      embeds: [new EmbedBuilder()
-        .setTitle('🗳️ VOTE RÉGLEMENTAIRE AUTOMATIQUE — Saison ' + (season.seasonNumber + 1))
-        .setDescription(desc + '\n⏰ Vote ouvert **48h** — utilisez les boutons ou `/vote_reglement`\n\n📌 Clôture automatique dans 48h.')
-        .setColor(0xFF6B35)
-        .setTimestamp()
-        .setFooter({ text: 'Vote auto déclenché · ID : ' + vote._id })
-      ],
-      components: [row],
-    });
-
-    // Collecteur boutons (48h)
-    const collector = msg.createMessageComponentCollector({ time: 48 * 60 * 60 * 1000 });
-    collector.on('collect', async (btn) => {
-      if (!btn.customId.startsWith('reg_vote_')) return;
-      const choix = btn.customId.replace('reg_vote_', '');
-      await enregistrerVote(btn.user.id, choix, vote._id, btn);
-    });
-    collector.on('end', async () => {
-      // Clôture automatique à l'expiration du collecteur
-      const voteActuel = await RegVote.findById(vote._id);
-      if (voteActuel && voteActuel.status === 'open') {
-        await cloturerVoteAuto(voteActuel, channel, season.seasonNumber + 1);
-      }
-    });
-
-    // Mettre à jour le trigger pour la PROCHAINE fois (3 ou 4 saisons de manière aléatoire)
-    config.nextRegTriggerIn = randInt(3, 4);
-    await config.save();
-
-    console.log('✅ Vote réglementaire automatique lancé pour la saison ' + (season.seasonNumber + 1) + '. Prochain dans ' + config.nextRegTriggerIn + ' saisons.');
-
-  } catch (err) {
-    console.error('❌ Erreur lors du déclenchement réglementaire auto :', err);
-  }
-}
-
-/**
- * Clôture automatique d'un vote (après expiration 48h).
- * Même logique que cmdCloturerVote mais sans interaction Discord.
- */
-async function cloturerVoteAuto(vote, channel, prochaineSaison) {
-  try {
-    const counts = { A: 0, B: 0, C: 0 };
-    vote.votes.forEach(v => { if (counts[v.proposalId] !== undefined) counts[v.proposalId]++; });
-
-    const totalVotes = counts.A + counts.B + counts.C;
-
-    // Si personne n'a voté → tirage au sort complet
-    const maxVotes = Math.max(...Object.values(counts));
-    const winners  = totalVotes === 0
-      ? ['A', 'B', 'C']
-      : Object.keys(counts).filter(k => counts[k] === maxVotes);
-    const winnerId = winners[randInt(0, winners.length - 1)];
-    const winner   = vote.proposals.find(p => p.id === winnerId);
-
-    vote.status = 'closed';
-    vote.winner = winnerId;
-    await vote.save();
-
-    const egaliteNote = winners.length > 1 && totalVotes > 0 ? '⚡ Égalité ! Tirage au sort...\n\n' : '';
-    const aucunVoteNote = totalVotes === 0 ? '📭 Aucun vote reçu — tirage au sort aléatoire !\n\n' : '';
-
-    await channel.send({
-      embeds: [new EmbedBuilder()
-        .setTitle('🗳️ Résultats du vote réglementaire !')
-        .setDescription(
-          '**A:** ' + counts.A + ' vote(s) | **B:** ' + counts.B + ' vote(s) | **C:** ' + counts.C + ' vote(s)\n\n' +
-          aucunVoteNote + egaliteNote +
-          '🏆 **GAGNANT : Proposition ' + winnerId + ' — ' + winner.titre + '**\n' + winner.description
-        )
-        .setColor(0xFFD700)
-        .setTimestamp()
-      ]
-    });
-
-    await sleep(2000);
-
-    // Appliquer le règlement sur la prochaine saison active (ou la créer au moment voulu)
-    // Pour l'instant : on stocke le winner dans GlobalConfig.regHistory et on l'applique à la nouvelle saison au /nouvelle_saison
-    const config = await getConfig();
-    config.lastRegChangeSeason = prochaineSaison || (await Season.countDocuments());
-    config.regHistory.push({
-      seasonNumber: prochaineSaison || config.lastRegChangeSeason,
-      type:         winner.type,
-      titre:        winner.titre,
-      description:  winner.description,
-      winner:       winnerId,
-    });
-    await config.save();
-
-    // Applique immédiatement sur la saison active s'il y en a une
-    const activeSeason = await Season.findOne({ isActive: true });
-    const regType = REG_TYPES[winner.type];
-    if (regType) {
-      await regType.appliquer(winner.params, activeSeason, channel);
-      if (activeSeason) await activeSeason.save();
-    }
-
-    await channel.send({
-      embeds: [new EmbedBuilder()
-        .setTitle('✅ Règlement appliqué pour la saison ' + (prochaineSaison || 'prochaine') + ' !')
-        .setDescription('Le changement prendra pleinement effet dès le début de la prochaine saison.\n\nUtilisez `/reglement_actuel` pour consulter les règles en vigueur.')
-        .setColor(0x2ECC71)
-      ]
-    });
-  } catch (err) {
-    console.error('❌ Erreur clôture automatique vote :', err);
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════════
 //  COMMANDES ECURIES
@@ -1907,165 +1683,6 @@ type: 'MOTEUR_HOMOLOGUE',
       });
     },
   },
-
-  // ────────────────────────────────────────────────────────────────────
-  //  NOUVEAUX TYPES RÉGLEMENTAIRES — Révolutions d'ères
-  // ────────────────────────────────────────────────────────────────────
-
-  RESET_AERODYNAMIQUE: {
-    type: 'RESET_AERODYNAMIQUE',
-    titre: '🔄 Révolution Aérodynamique',
-    description: 'La FIA impose un règlement technique RADICAL. Toutes les écuries repartent quasi de zéro côté châssis — les années de développement sont effacées. Une nouvelle ère commence !',
-    genererParams: () => ({
-      baseReset:   randInt(40, 58),   // Valeur de reset du chassis
-      variance:    randInt(4, 10),    // Variance autour de la base
-      engineTouch: chance(0.5),       // Si true, le moteur est aussi partiellement réinitialisé
-    }),
-    appliquer: async (params, season, channel) => {
-      const teams = await Team.find();
-      const changes = [];
-      for (const team of teams) {
-        const avantChassis = team.car.chassis;
-        const avantEngine  = team.car.engine;
-        team.car.chassis = Math.max(30, Math.min(95, params.baseReset + randInt(-params.variance, params.variance)));
-        if (params.engineTouch) {
-          team.car.engine = Math.max(30, Math.min(95, Math.round(team.car.engine * 0.8 + params.baseReset * 0.2)));
-        }
-        // Réinitialise aussi la fiabilité (nouvelles voitures = fiabilité incertaine)
-        team.car.reliability = Math.max(50, Math.min(85, randInt(55, 75)));
-        await team.save();
-        changes.push({ name: team.name, avantChassis, apresChassis: team.car.chassis, avantEngine, apresEngine: team.car.engine, engineTouche: params.engineTouch });
-      }
-      const lines = changes.map(c => {
-        const dChassis = c.apresChassis - c.avantChassis;
-        const signC = dChassis >= 0 ? '+' : '';
-        const iconC = dChassis > 0 ? '📈' : dChassis < 0 ? '📉' : '➡️';
-        let line = iconC + ' **' + c.name + '** Châssis : ' + c.avantChassis + ' → **' + c.apresChassis + '** (' + signC + dChassis + ')';
-        if (c.engineTouche) {
-          const dEngine = c.apresEngine - c.avantEngine;
-          const signE = dEngine >= 0 ? '+' : '';
-          line += ' | Moteur : ' + c.avantEngine + ' → **' + c.apresEngine + '** (' + signE + dEngine + ')';
-        }
-        return line;
-      });
-      await channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('🔄 Révolution Aérodynamique — Nouvelle ère !')
-          .setDescription('**CHANGEMENT MAJEUR DE RÈGLEMENT !**\n\nToutes les écuries reprennent avec un châssis réinitialisé à la base **' + params.baseReset + '** (±' + params.variance + ') :\n\n' + lines.join('\n') + '\n\n⚠️ La fiabilité est également incertaine sur les nouvelles voitures. Tout est à refaire !')
-          .setColor(0xFF6B35)
-          .setTimestamp()
-        ]
-      });
-    },
-  },
-
-  INTERDICTION_DRS: {
-    type: 'INTERDICTION_DRS',
-    titre: '🚫 Suppression du DRS',
-    description: 'La FIA supprime le DRS pour favoriser des dépassements plus "naturels". Les dépassements deviennent plus rares — le racecraft et la défense priment sur tout !',
-    genererParams: () => ({
-      reductionOvertaking: +(0.10 + randInt(5, 20) / 100).toFixed(2), // Réduction de overtakingEase sur tous les circuits
-    }),
-    appliquer: async (params, season, channel) => {
-      // On stocke dans le règlement de saison un flag DRS banned
-      // On applique via un override dans calcLapTime en stockant dans season.reglement
-      if (season) {
-        season.reglement.drsCircuits = []; // Aucun circuit DRS boosté
-        season.reglement.drsBanned = true; // Nouveau flag
-        await season.save();
-      }
-      await channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('🚫 DRS Supprimé pour cette saison !')
-          .setDescription('La FIA a décidé de supprimer le DRS sur **TOUS les circuits**.\n\n📉 Réduction de facilité de dépassement : **-' + Math.round(params.reductionOvertaking * 100) + '%**\n\nLes pilotes avec un bon **🛡️ Défense** et **🏎️ Racecraft** seront clairement avantagés !\nAttends-toi à des courses plus disputées et moins de dépassements.')
-          .setColor(0xE74C3C)
-        ]
-      });
-    },
-  },
-
-  PNEUMATIQUES_EXPERIMENTAL: {
-    type: 'PNEUMATIQUES_EXPERIMENTAL',
-    titre: '🔴 Nouveaux Composés Pneus',
-    description: 'Le fournisseur de pneus introduit des composés révolutionnaires. La dégradation change radicalement — la gestion des pneus devient l\'arme secrète !',
-    genererParams: () => {
-      const mode = ['ultra_degradation', 'ultra_durable', 'impredictible'][randInt(0, 2)];
-      return {
-        mode,
-        facteurWear: mode === 'ultra_degradation' ? +(1.4 + rand(0, 0.3)).toFixed(2)
-                   : mode === 'ultra_durable'     ? +(0.5 + rand(0, 0.2)).toFixed(2)
-                   : +(0.8 + rand(0, 0.6)).toFixed(2), // impredictible : aléatoire par course
-      };
-    },
-    appliquer: async (params, season, channel) => {
-      if (season) {
-        season.reglement.tyreWearMultiplier = params.facteurWear;
-        await season.save();
-      }
-      const modeTexte = {
-        ultra_degradation: '🔴 **Ultra-Dégradation** — Les pneus s\'usent ' + Math.round((params.facteurWear - 1) * 100) + '% plus vite ! Les stratégies 3 arrêts deviennent envisageables.',
-        ultra_durable:     '⚪ **Ultra-Durables** — Les pneus durent ' + Math.round((1 - params.facteurWear) * 100) + '% plus longtemps. Les stratégies 1 arrêt domineront.',
-        impredictible:     '🟡 **Imprévisibles** — La dégradation varie race par race. Adaptabilité requise !',
-      }[params.mode];
-      await channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('🔴 Nouveau Composé Pneus — Révolution !')
-          .setDescription('**' + modeTexte + '**\n\nMultiplicateur d\'usure global : **x' + params.facteurWear + '**\nLes pilotes avec un bon **🔧 Gestion Pneus** et **🔄 Adaptabilité** seront les grands gagnants !')
-          .setColor(0xF39C12)
-        ]
-      });
-    },
-  },
-
-  FREEZE_MOTEUR: {
-    type: 'FREEZE_MOTEUR',
-    titre: '❄️ Freeze Moteur',
-    description: 'La FIA gèle le développement moteur ! Aucune écurie ne peut améliorer son moteur cette saison. Les petites écuries bénéficient d\'une prime de compensation.',
-    genererParams: () => ({
-      compensationPetites: randInt(500, 1500), // Budget offert aux 3 dernières écuries
-    }),
-    appliquer: async (params, season, channel) => {
-      if (season) {
-        season.reglement.moteurFreeze = true;
-        await season.save();
-      }
-      const teams = await Team.find().sort({ 'car.engine': 1 }); // Les plus faibles en premier
-      const petites = teams.slice(0, Math.min(3, teams.length));
-      for (const team of petites) {
-        team.budget += params.compensationPetites;
-        team.totalBudget += params.compensationPetites;
-        await team.save();
-      }
-      const noms = petites.map(t => '**' + t.name + '**').join(', ');
-      await channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('❄️ Freeze Moteur !')
-          .setDescription('**Aucune amélioration moteur autorisée cette saison !**\n\nLes avantages moteur actuels sont figés.\n\n💰 Prime de compensation de **' + params.compensationPetites.toLocaleString() + ' budget** pour les écuries en difficulté : ' + noms)
-          .setColor(0x74B9FF)
-        ]
-      });
-    },
-  },
-
-  DOUBLE_POINTS_FINALE: {
-    type: 'DOUBLE_POINTS_FINALE',
-    titre: '✨ Double Points au Grand Final',
-    description: 'La FIA instaure les double points sur la dernière manche de la saison. Tout peut basculer jusqu\'au dernier tour — le suspense est garanti !',
-    genererParams: () => ({ nbCourses: randInt(1, 2) }), // 1 ou 2 dernières courses en double points
-    appliquer: async (params, season, channel) => {
-      if (season) {
-        season.reglement.doublePointsFinale = params.nbCourses;
-        await season.save();
-      }
-      await channel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('✨ Double Points sur les ' + params.nbCourses + ' dernière(s) manche(s) !')
-          .setDescription('La FIA instaure les **points doublés** sur ' + (params.nbCourses === 1 ? 'la dernière course' : 'les 2 dernières courses') + ' de la saison !\n\nTout peut encore basculer jusqu\'à Abu Dhabi. Préparez-vous pour un final épique ! 🏆')
-          .setColor(0xFFD700)
-        ]
-      });
-    },
-  },
 };
 
 // ── Genere 3 propositions aleatoires distinctes ──────────────────────
@@ -2184,11 +1801,10 @@ async function cmdCloturerVote(interaction) {
   vote.votes.forEach(v => { if (counts[v.proposalId] !== undefined) counts[v.proposalId]++; });
 
   // Departage : si egalite, tirage au sort parmi les ex-aequo
-  const totalVotes = counts.A + counts.B + counts.C;
-  const maxVotes   = Math.max(...Object.values(counts));
-  const winners    = totalVotes === 0 ? ['A', 'B', 'C'] : Object.keys(counts).filter(k => counts[k] === maxVotes);
-  const winnerId   = winners[randInt(0, winners.length - 1)];
-  const winner     = vote.proposals.find(p => p.id === winnerId);
+  const maxVotes  = Math.max(...Object.values(counts));
+  const winners   = Object.keys(counts).filter(k => counts[k] === maxVotes);
+  const winnerId  = winners[randInt(0, winners.length - 1)];
+  const winner    = vote.proposals.find(p => p.id === winnerId);
 
   vote.status = 'closed';
   vote.winner = winnerId;
@@ -2199,12 +1815,16 @@ async function cmdCloturerVote(interaction) {
 
   await channel.send({
     embeds: [new EmbedBuilder()
-      .setTitle('🗳️ Résultats du vote réglementaire !')
+      .setTitle('🗳️ Resultats du vote !')
       .setDescription(
-        '**A:** ' + counts.A + ' vote(s) | **B:** ' + counts.B + ' vote(s) | **C:** ' + counts.C + ' vote(s)\n\n' +
-        (totalVotes === 0 ? '📭 Aucun vote — tirage au sort !\n\n' : '') +
-        (winners.length > 1 && totalVotes > 0 ? '⚡ Égalité ! Tirage au sort...\n\n' : '') +
-        '🏆 **GAGNANT : Proposition ' + winnerId + ' — ' + winner.titre + '**\n' + winner.description
+        '**A:** ' + counts.A + ' vote(s) | **B:** ' + counts.B + ' vote(s) | **C:** ' + counts.C + ' vote(s)
+
+' +
+        (winners.length > 1 ? '⚡ Egalite ! Tirage au sort...
+
+' : '') +
+        '🏆 **GAGNANT : Proposition ' + winnerId + ' — ' + winner.titre + '**
+' + winner.description
       )
       .setColor(0xFFD700)
     ]
@@ -2216,24 +1836,9 @@ async function cmdCloturerVote(interaction) {
   const regType = REG_TYPES[winner.type];
   if (regType) {
     await regType.appliquer(winner.params, season, channel);
-    if (season) await season.save();
   }
 
-  // Enregistrer dans GlobalConfig
-  const config = await getConfig();
-  const currentSeason = season ? season.seasonNumber : (await Season.countDocuments());
-  config.lastRegChangeSeason = currentSeason;
-  config.nextRegTriggerIn    = randInt(3, 4); // Prochaine fois dans 3 ou 4 saisons
-  config.regHistory.push({
-    seasonNumber: currentSeason,
-    type:         winner.type,
-    titre:        winner.titre,
-    description:  winner.description,
-    winner:       winnerId,
-  });
-  await config.save();
-
-  await interaction.reply({ content: '✅ Vote clôturé ! Prochain changement réglementaire dans **' + config.nextRegTriggerIn + '** saisons.', ephemeral: true });
+  await interaction.reply({ content: '✅ Vote cloture, reglement applique !', ephemeral: true });
 }
 
 // ── /reglement_actuel ────────────────────────────────────────────────
@@ -2244,68 +1849,19 @@ async function cmdReglementActuel(interaction) {
   const r = season.reglement;
   const drsNoms = (r.drsCircuits && r.drsCircuits.length)
     ? r.drsCircuits.map(i => CIRCUITS[i] ? CIRCUITS[i].emoji + ' ' + CIRCUITS[i].name : '?').join(', ')
-    : 'Aucune zone supplémentaire';
-
-  const config = await getConfig();
-  const saisonsDepuis = season.seasonNumber - config.lastRegChangeSeason;
-  const prochainDans  = Math.max(0, config.nextRegTriggerIn - saisonsDepuis);
-
-  const lignes = [
-    '**⚖️ Poids voitures :** ' + (r.fuelMultiplier !== 1.0 ? 'x' + r.fuelMultiplier + ' (' + (r.fuelMultiplier > 1 ? 'plus lourdes 📈' : 'plus légères 📉') + ')' : 'Standard'),
-    '**💰 Budget cap :** ' + (r.budgetCap ? r.budgetCap.toLocaleString() + ' max' : 'Aucun'),
-    '**💨 DRS :** ' + (r.drsBanned ? '🚫 Supprimé cette saison !' : 'Zones bonus : ' + drsNoms),
-    '**🔴 Pneus :** ' + (r.tyreWearMultiplier && r.tyreWearMultiplier !== 1.0 ? 'Usure x' + r.tyreWearMultiplier : 'Standard'),
-    '**❄️ Moteur :** ' + (r.moteurFreeze ? 'Développement gelé !' : 'Développement libre'),
-    '**✨ Double points :** ' + (r.doublePointsFinale > 0 ? 'Sur les ' + r.doublePointsFinale + ' dernière(s) manche(s)' : 'Non'),
-    '',
-    '🗓️ **Prochain changement réglementaire majeur :** dans **' + prochainDans + '** saison(s)',
-    '_(Dernier changement : Saison ' + (config.lastRegChangeSeason || 'aucun') + ')_',
-  ];
+    : 'Aucune zone supplementaire';
 
   await interaction.reply({
     embeds: [new EmbedBuilder()
-      .setTitle('📋 Règlement en vigueur — Saison ' + season.seasonNumber)
-      .setDescription(lignes.join('\n'))
-      .setColor(0x5865F2)
-      .setTimestamp()
-    ],
-    ephemeral: true,
-  });
-}
-
-// ── /historique_reglements ───────────────────────────────────────────
-async function cmdHistoriqueReglements(interaction) {
-  const config = await getConfig();
-
-  if (!config.regHistory || config.regHistory.length === 0) {
-    return interaction.reply({ content: '📋 Aucun changement réglementaire majeur n\'a encore eu lieu.', ephemeral: true });
-  }
-
-  const lignes = config.regHistory
-    .sort((a, b) => a.seasonNumber - b.seasonNumber)
-    .map(h => {
-      const regType = REG_TYPES[h.type];
-      const emoji   = regType ? regType.titre.split(' ')[0] : '📋';
-      return '**Saison ' + h.seasonNumber + '** — ' + emoji + ' **' + h.titre + '**\n> ' + h.description.slice(0, 100) + (h.description.length > 100 ? '...' : '');
-    });
-
-  // Info sur le prochain
-  const activeSeason  = await Season.findOne({ isActive: true });
-  const currentNum    = activeSeason ? activeSeason.seasonNumber : (await Season.countDocuments());
-  const saisonsDepuis = currentNum - config.lastRegChangeSeason;
-  const prochainDans  = Math.max(0, config.nextRegTriggerIn - saisonsDepuis);
-
-  await interaction.reply({
-    embeds: [new EmbedBuilder()
-      .setTitle('📚 Historique Réglementaire — Toutes les ères')
+      .setTitle('📋 Reglement — Saison ' + season.seasonNumber)
       .setDescription(
-        lignes.join('\n\n') +
-        '\n\n──────────────────────\n' +
-        '🗓️ **Prochain changement dans :** ' + prochainDans + ' saison(s)\n' +
-        '_(Intervalles : 3 ou 4 saisons, tiré aléatoirement)_'
+        '**⚖️ Poids voitures :** ' + (r.fuelMultiplier !== 1.0 ? 'x' + r.fuelMultiplier + ' carburant (voitures ' + (r.fuelMultiplier > 1 ? 'plus lourdes' : 'plus légères') + ')' : 'Standard') + '
+' +
+        '**💰 Budget cap :** ' + (r.budgetCap ? r.budgetCap.toLocaleString() : 'Aucun') + '
+' +
+        '**💨 Zones DRS bonus :** ' + drsNoms
       )
-      .setColor(0x9B59B6)
-      .setTimestamp()
+      .setColor(0x5865F2)
     ],
     ephemeral: true,
   });
@@ -2318,25 +1874,6 @@ async function cmdHistoriqueReglements(interaction) {
 cron.schedule('0 11 * * *', lancerEssaisLibres,   { timezone: 'Europe/Paris' });
 cron.schedule('0 15 * * *', lancerQualifications, { timezone: 'Europe/Paris' });
 cron.schedule('0 18 * * *', lancerCourse,         { timezone: 'Europe/Paris' });
-
-// ── Cron : clôture automatique des votes réglementaires expirés ──────
-// Vérifie toutes les heures si un vote ouvert a expiré
-cron.schedule('0 * * * *', async () => {
-  try {
-    const vote = await RegVote.findOne({ status: 'open', expiresAt: { $lte: new Date() } });
-    if (!vote) return;
-
-    console.log('⏰ Clôture automatique du vote réglementaire expiré :', vote._id);
-    const channel = client.channels.cache.get(process.env.RACE_CHANNEL_ID);
-    if (!channel) return console.error('❌ RACE_CHANNEL_ID introuvable pour clôture auto vote.');
-
-    const config = await getConfig();
-    const prochaineSaison = (config.lastRegChangeSeason || 0) + config.nextRegTriggerIn;
-    await cloturerVoteAuto(vote, channel, prochaineSaison);
-  } catch (err) {
-    console.error('❌ Erreur cron clôture vote :', err);
-  }
-}, { timezone: 'Europe/Paris' });
 
 // ═══════════════════════════════════════════════════════════════════
 //  KEEP ALIVE
