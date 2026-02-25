@@ -559,6 +559,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   const weather   = pick(['DRY','DRY','DRY','DRY','WET','INTER','HOT']);
   const gpStyle   = race.gpStyle;
 
+  const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+  const weatherLabels = { DRY:'Sec ☀️', WET:'Pluie 🌧️', INTER:'Mixte 🌦️', HOT:'Canicule 🔥' };
+
   let drivers = grid.map((g, idx) => {
     const pilot = pilots.find(p => String(p._id) === String(g.pilotId));
     const team  = teams.find(t => String(t._id) === String(pilot?.teamId));
@@ -567,12 +570,15 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     return {
       pilot, team,
       pos          : idx + 1,
+      startPos     : idx + 1,
+      lastPos      : idx + 1,
       totalTime    : idx * 200,
       tireCompound : startCompound,
       tireWear     : 0,
       tireAge      : 0,
       usedCompounds: [startCompound],
       pitStops     : 0,
+      pittedThisLap: false,
       dnf          : false,
       dnfLap       : null,
       dnfReason    : '',
@@ -580,139 +586,353 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     };
   }).filter(Boolean);
 
-  let scState             = { state: 'NONE', lapsLeft: 0 };
-  let fastestLapMs        = Infinity;
-  let fastestLapHolder    = null;
+  let scState          = { state: 'NONE', lapsLeft: 0 };
+  let fastestLapMs     = Infinity;
+  let fastestLapHolder = null;
 
   const send = async (msg) => {
     if (!channel) return;
-    try { await channel.send(msg); } catch(e) {}
-    await sleep(2800);
+    // Discord limit: 2000 chars per message
+    if (msg.length > 1950) msg = msg.slice(0, 1947) + '…';
+    try { await channel.send(msg); } catch(e) { console.error('send error:', e.message); }
+    await sleep(2500);
   };
 
-  // ── Annonce départ ──────────────────────────────────────
-  const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+  const sendEmbed = async (embed) => {
+    if (!channel) return;
+    try { await channel.send({ embeds: [embed] }); } catch(e) {}
+    await sleep(2500);
+  };
+
+  // ══════════════════════════════════════════════════════════
+  // PRE-RACE — Grille de départ complète
+  // ══════════════════════════════════════════════════════════
+  const gridLines = drivers.map((d, i) => {
+    const ov   = overallRating(d.pilot);
+    const tier = ratingTier(ov);
+    const pos  = String(i + 1).padStart(2, ' ');
+    return `\`P${pos}\` ${d.team.emoji} **${d.pilot.name}** ${tier.badge}**${ov}** — ${TIRE[d.tireCompound].emoji} ${TIRE[d.tireCompound].label}`;
+  });
+
+  // Discord embed description limit 4096 — split grid if needed
+  const half      = Math.ceil(drivers.length / 2);
+  const gridLeft  = gridLines.slice(0, half).join('\n');
+  const gridRight = gridLines.slice(half).join('\n');
+
+  const gridEmbed = new EmbedBuilder()
+    .setTitle(`🏎️ GRILLE DE DÉPART — ${race.emoji} ${race.circuit}`)
+    .setColor('#FF1801')
+    .setDescription(`${styleEmojis[gpStyle]} **${gpStyle.toUpperCase()}** · ${weatherLabels[weather]} · **${totalLaps} tours**`)
+    .addFields(
+      { name: '📋 Positions 1–' + half,       value: gridLeft  || '—', inline: true },
+      { name: '📋 Positions ' + (half+1) + '–' + drivers.length, value: gridRight || '—', inline: true },
+    );
+  await sendEmbed(gridEmbed);
+  await sleep(3000);
+
+  // Formation lap narrative
   await send(
-    `🏁 **DÉPART — ${race.circuit.toUpperCase()}** ${race.emoji}\n` +
-    `📋 Style : **${gpStyle.toUpperCase()}** ${styleEmojis[gpStyle]} | Météo : **${weather}** | ${totalLaps} tours\n` +
-    `🔝 Top 5 grille : ${drivers.slice(0,5).map(d => `${d.team.emoji}${d.pilot.name}`).join(' › ')}`
+    `🟢 **TOUR DE FORMATION** — ${race.emoji} ${race.circuit.toUpperCase()}\n` +
+    `Les monoplaces prennent position sur la grille... La tension est à son comble.\n` +
+    `🔴🔴🔴🔴🔴  Les feux s'allument un à un...`
   );
+  await sleep(4000);
+  await send(`🟢⚫ **EXTINCTION DES FEUX — C'EST PARTI !!** 🏁`);
 
-  // ── Boucle course ───────────────────────────────────────
+  // ══════════════════════════════════════════════════════════
+  // BOUCLE PRINCIPALE
+  // ══════════════════════════════════════════════════════════
   for (let lap = 1; lap <= totalLaps; lap++) {
-    const lapsRemaining  = totalLaps - lap;
-    const trackEvo       = (lap / totalLaps) * 100;
-    const alive          = drivers.filter(d => !d.dnf);
-    const dnfCount       = drivers.filter(d => d.dnf).length;
+    const lapsRemaining = totalLaps - lap;
+    const trackEvo      = (lap / totalLaps) * 100;
+    drivers.forEach(d => { d.pittedThisLap = false; });
+    const alive    = drivers.filter(d => !d.dnf);
+    const dnfCount = drivers.filter(d => d.dnf).length;
 
+    // Snapshot des positions avant ce tour
+    alive.forEach(d => { d.lastPos = d.pos; });
+
+    // Safety car
+    const prevScState = scState.state;
     scState = checkSafetyCar(scState, dnfCount);
     const scActive = scState.state !== 'NONE';
 
-    let lapMsg = '';
+    const events = []; // { priority: number, text: string }
 
-    // Départ : réactions influencent les positions du 1er tour
-    if (lap === 1) {
-      const startSwaps = [];
-      for (let i = 1; i < drivers.length; i++) {
-        const d = drivers[i];
-        const ahead = drivers[i-1];
-        const reactDiff = d.pilot.reactions - ahead.pilot.reactions;
-        if (reactDiff > 15 && Math.random() > 0.55) {
-          // Ce pilote réagit mieux au départ et double le pilote devant
-          drivers[i-1] = d;
-          drivers[i]   = ahead;
-          drivers[i-1].pos = i;
-          drivers[i].pos   = i + 1;
-          startSwaps.push(`${d.team.emoji}${d.pilot.name} devant ${ahead.team.emoji}${ahead.pilot.name}`);
-        }
-      }
-      if (startSwaps.length) lapMsg += `\n🚦 **DÉPART** : ${startSwaps.slice(0,3).join(', ')}`;
+    // SC/VSC transitions
+    if (scState.state !== 'NONE' && prevScState === 'NONE') {
+      const scMsg = scState.state === 'SC'
+        ? `🚨 **SAFETY CAR !** Tour ${lap} — Le peloton se reforme. Tous les écarts s'effacent !`
+        : `🟡 **VIRTUAL SAFETY CAR** déployé au tour ${lap} — Tout le monde ralentit.`;
+      events.push({ priority: 10, text: scMsg });
+    }
+    if (prevScState !== 'NONE' && scState.state === 'NONE') {
+      const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+      const top3 = ranked.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}${d.pilot.name}`).join(' · ');
+      events.push({ priority: 10, text: `🟢 **GREEN FLAG !** Tour ${lap} — La course reprend ! ${top3}` });
     }
 
+    // ── Tour 1 : bagarre au départ ──────────────────────────
+    if (lap === 1) {
+      const startSwaps = [];
+      // Trier par réactions et appliquer des swaps réalistes
+      for (let i = drivers.length - 1; i > 0; i--) {
+        const d     = drivers[i];
+        const ahead = drivers[i - 1];
+        if (!d || !ahead) continue;
+        const reactDiff = d.pilot.reactions - ahead.pilot.reactions;
+        if (reactDiff > 12 && Math.random() > 0.52) {
+          [drivers[i], drivers[i - 1]] = [drivers[i - 1], drivers[i]];
+          drivers[i].pos     = i + 1;
+          drivers[i - 1].pos = i;
+          startSwaps.push(`${d.team.emoji}**${d.pilot.name}** P${i+1}→**P${i}** dépasse ${ahead.team.emoji}**${ahead.pilot.name}**`);
+        }
+      }
+      drivers.sort((a,b) => a.pos - b.pos).forEach((d,i) => d.pos = i+1);
+      alive.forEach(d => { d.lastPos = d.pos; }); // refresh snapshot post-start
+
+      const startLeader = drivers.sort((a,b) => a.pos - b.pos)[0];
+      if (startSwaps.length) {
+        events.push({
+          priority: 9,
+          text: `🚦 **BAGARRE AU PREMIER VIRAGE !**\n${startSwaps.slice(0,4).map(s => `  › ${s}`).join('\n')}\n  › **${startLeader.team.emoji}${startLeader.pilot.name}** mène !`,
+        });
+      } else {
+        events.push({
+          priority: 9,
+          text: `🚦 **DÉPART PROPRE !** ${startLeader.team.emoji} **${startLeader.pilot.name}** conserve la tête en sortant de la ligne droite.`,
+        });
+      }
+    }
+
+    // ── Tour final dramatique ───────────────────────────────
+    if (lap === totalLaps) {
+      const leader = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime)[0];
+      if (leader) {
+        const flavors = [
+          `🏁 **DERNIER TOUR !** ${leader.team.emoji} **${leader.pilot.name}** en tête — à quoi va ressembler le podium ?`,
+          `🏁 **TOUR FINAL !** Le public est debout. ${leader.team.emoji} **${leader.pilot.name}** voit le bout du tunnel !`,
+          `🏁 **TOUR ${totalLaps} — LE DERNIER !** ${leader.team.emoji} **${leader.pilot.name}** à quelques kilomètres de la victoire !`,
+        ];
+        events.push({ priority: 9, text: pick(flavors) });
+      }
+    }
+
+    // ── Calcul temps au tour + incidents ────────────────────
     for (const driver of alive) {
       // Incident ?
       const incident = checkIncident(driver.pilot, driver.team);
       if (incident) {
-        driver.dnf       = true;
-        driver.dnfLap    = lap;
-        driver.dnfReason = incident.type;
-        lapMsg += `\n${incident.msg} — **${driver.pilot.name}** (${driver.team.emoji}) au tour ${lap}`;
+        // Collision : chercher un partenaire proche
+        const sorted   = alive.filter(d => !d.dnf && String(d.pilot._id) !== String(driver.pilot._id));
+        const byProximity = [...sorted].sort((a,b) =>
+          Math.abs(a.totalTime - driver.totalTime) - Math.abs(b.totalTime - driver.totalTime)
+        );
+        const nearbyPartner = byProximity[0];
+
+        let incidentText = '';
+
+        if (incident.type === 'CRASH' && nearbyPartner && Math.abs(nearbyPartner.totalTime - driver.totalTime) < 1200) {
+          // Collision avec un pilote proche
+          const partnerDnf = Math.random() > 0.45;
+          const damage     = randInt(3000, 9000);
+
+          incidentText =
+            `💥 **CONTACT !** T${lap} — **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}) percute **${nearbyPartner.team.emoji}${nearbyPartner.pilot.name}** (P${nearbyPartner.pos}) !\n`;
+
+          driver.dnf       = true;
+          driver.dnfLap    = lap;
+          driver.dnfReason = 'CRASH';
+          incidentText += `  ❌ **${driver.pilot.name}** — abandon immédiat (DNF)\n`;
+
+          if (partnerDnf) {
+            nearbyPartner.dnf       = true;
+            nearbyPartner.dnfLap    = lap;
+            nearbyPartner.dnfReason = 'CRASH';
+            incidentText += `  ❌ **${nearbyPartner.pilot.name}** — retire aussi la voiture (DNF)`;
+          } else {
+            nearbyPartner.totalTime += damage;
+            incidentText += `  ⚠️ **${nearbyPartner.pilot.name}** — continue avec des dommages (+${(damage/1000).toFixed(1)}s perdus)`;
+          }
+        } else if (incident.type === 'MECHANICAL') {
+          driver.dnf       = true;
+          driver.dnfLap    = lap;
+          driver.dnfReason = 'MECHANICAL';
+          const mechFlavors = [
+            `🔩 T${lap} — **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}) se range sur le bas-côté, fumée dans l'habitacle. ❌ **DNF mécanique.**`,
+            `💨 T${lap} — **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}) lâche de la puissance et abandonne lentement. Le moteur est mort. ❌ **DNF.**`,
+            `🔥 T${lap} — Problème moteur pour **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}). Le muret l'appelle au garage. ❌ **DNF.**`,
+          ];
+          incidentText = pick(mechFlavors);
+        } else if (incident.type === 'PUNCTURE') {
+          driver.dnf       = true;
+          driver.dnfLap    = lap;
+          driver.dnfReason = 'PUNCTURE';
+          const puncFlavors = [
+            `🫧 T${lap} — Crevaison pour **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}) ! Il se traîne sur la jante jusqu'aux stands. ❌ **DNF.**`,
+            `🫧 T${lap} — Pneu explosé pour **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}) — la voiture est inconduisible. ❌ **DNF.**`,
+          ];
+          incidentText = pick(puncFlavors);
+        } else {
+          // CRASH solo
+          driver.dnf       = true;
+          driver.dnfLap    = lap;
+          driver.dnfReason = 'CRASH';
+          const crashFlavors = [
+            `💥 T${lap} — **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}) part à la faute et finit dans les barrières ! ❌ **DNF.**`,
+            `🚗 T${lap} — **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}) perd l'arrière dans la chicane et tape le mur. ❌ **DNF.**`,
+            `💥 T${lap} — Sortie de piste violente pour **${driver.team.emoji}${driver.pilot.name}** (P${driver.pos}). ❌ **DNF.**`,
+          ];
+          incidentText = pick(crashFlavors);
+        }
+
+        events.push({ priority: 8, text: incidentText });
         continue;
       }
 
       // Temps au tour
-      let lt = calcLapTime(driver.pilot, driver.team, driver.tireCompound, driver.tireWear, weather, trackEvo, gpStyle, driver.pos);
+      let lt = calcLapTime(
+        driver.pilot, driver.team,
+        driver.tireCompound, driver.tireWear,
+        weather, trackEvo, gpStyle, driver.pos
+      );
       if (scActive) lt = Math.round(lt * (scState.state === 'SC' ? 1.35 : 1.18));
 
-      driver.totalTime    += lt;
-      driver.tireWear     += 1;
-      driver.tireAge      += 1;
+      driver.totalTime += lt;
+      driver.tireWear  += 1;
+      driver.tireAge   += 1;
       if (lt < driver.fastestLap) driver.fastestLap = lt;
       if (lt < fastestLapMs) { fastestLapMs = lt; fastestLapHolder = driver; }
+    }
 
-      // Gap avec voiture devant
-      const sorted  = alive.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
-      const myIdx   = sorted.findIndex(d => String(d.pilot._id) === String(driver.pilot._id));
-      const gapAhead = myIdx > 0 ? driver.totalTime - sorted[myIdx-1].totalTime : null;
+    // ── Pit stops (après calcul des temps) ──────────────────
+    const aliveNow = drivers.filter(d => !d.dnf);
+    aliveNow.sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
 
-      // Tentative de dépassement en piste (stat depassement vs defense)
-      if (myIdx > 0 && gapAhead !== null && gapAhead < 800 && !scActive) {
-        const attacker = driver;
-        const defender = sorted[myIdx - 1];
-        // DRS bonus en ligne droite (piste rapide)
-        const drsBonus = gpStyle === 'rapide' ? (attacker.team.drs - 70) * 0.003 : 0;
-        const attackScore = (attacker.pilot.depassement / 100) + drsBonus + Math.random() * 0.3;
-        const defScore    = (defender.pilot.defense / 100) + Math.random() * 0.25;
-        if (attackScore > defScore) {
-          // Dépassement réussi
-          const tmpTime = attacker.totalTime;
-          attacker.totalTime = defender.totalTime - randInt(50, 300);
-          lapMsg += `\n⚔️ **${attacker.team.emoji}${attacker.pilot.name}** double **${defender.team.emoji}${defender.pilot.name}** !`;
-        }
-      }
-
-      // Pit stop
+    for (const driver of aliveNow) {
+      const myIdx    = aliveNow.findIndex(d => String(d.pilot._id) === String(driver.pilot._id));
+      const gapAhead = myIdx > 0 ? driver.totalTime - aliveNow[myIdx - 1].totalTime : null;
       const { pit, reason } = shouldPit(driver, lapsRemaining, gapAhead);
+
       if (pit && driver.pitStops < 3 && lapsRemaining > 5) {
-        const newCompound = choosePitCompound(driver.tireCompound, lapsRemaining, driver.usedCompounds);
-        const pitTime     = randInt(19_000, 24_000);
-        driver.totalTime  += pitTime;
+        const posIn      = driver.pos;
+        const oldTire    = driver.tireCompound;
+        const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds);
+        const pitTime    = randInt(19_000, 24_000);
+
+        driver.totalTime   += pitTime;
         driver.tireCompound = newCompound;
-        driver.tireWear    = 0;
-        driver.tireAge     = 0;
-        driver.pitStops   += 1;
+        driver.tireWear     = 0;
+        driver.tireAge      = 0;
+        driver.pitStops    += 1;
+        driver.pittedThisLap = true;
         if (!driver.usedCompounds.includes(newCompound)) driver.usedCompounds.push(newCompound);
-        lapMsg += `\n🔧 **${driver.pilot.name}** pit stop → ${TIRE[newCompound].emoji}${TIRE[newCompound].label}` +
-                  (reason === 'undercut' ? ' *(undercut !)*' : '');
+
+        // Re-rank pour avoir la position de sortie
+        aliveNow.sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+        const posOut  = driver.pos;
+        const pitDur  = (pitTime / 1000).toFixed(1);
+        const ucStr   = reason === 'undercut' ? ' *(undercut !)*' : '';
+        const stratStr = reason === 'undercut'
+          ? `Tentative d'undercut — chaussage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}**`
+          : `${TIRE[oldTire].emoji}${TIRE[oldTire].label} usés — passage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}**`;
+
+        events.push({
+          priority: 7,
+          text: `🔧 T${lap} — **${driver.team.emoji}${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${ucStr}\n  › ${stratStr} · Arrêt : **${pitDur}s** · Ressort **P${posOut}**`,
+        });
       }
     }
 
-    // Reclasser
+    // ── Reclassement final du tour ───────────────────────────
     drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+    const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
 
-    // Messages
-    if (lap === 1 || lap % 8 === 0 || lap === totalLaps || scActive || lapMsg) {
-      const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
-      let msg = `**Tour ${lap}/${totalLaps}**`;
-      if (scState.state === 'SC')  msg += ` 🚨 **SAFETY CAR**`;
-      if (scState.state === 'VSC') msg += ` 🟡 **VSC**`;
-      msg += lapMsg;
+    // ── Détection des dépassements ───────────────────────────
+    for (const driver of ranked) {
+      // Position améliorée ET pas de pit ET pas de SC
+      if (driver.pos < driver.lastPos && !driver.pittedThisLap && !scActive && lap > 1) {
+        // Trouver qui a été dépassé (était P${driver.pos} avant)
+        const passed = ranked.find(d =>
+          d.pos === driver.lastPos &&
+          !d.pittedThisLap &&
+          String(d.pilot._id) !== String(driver.pilot._id)
+        );
+        if (passed) {
+          const gapMs  = Math.abs(driver.totalTime - passed.totalTime);
+          const gapStr = gapMs < 1000 ? `${gapMs}ms` : `${(gapMs/1000).toFixed(3)}s`;
+          const drsStr = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
 
-      if (lap % 8 === 0 || lap === totalLaps) {
-        msg += '\n' + ranked.slice(0,3).map((d,i) => {
-          const gap = i === 0 ? 'LEADER' : `+${((d.totalTime - ranked[0].totalTime)/1000).toFixed(1)}s`;
-          return `**P${i+1}** ${d.team.emoji} ${d.pilot.name} (${gap}) ${TIRE[d.tireCompound].emoji}`;
-        }).join('\n');
+          const overtakeFlavors = [
+            `⚔️ T${lap} — **${driver.team.emoji}${driver.pilot.name}** passe **${passed.team.emoji}${passed.pilot.name}** ! P${driver.lastPos} → **P${driver.pos}**${drsStr} (écart : ${gapStr})`,
+            `🔥 T${lap} — Beau dépassement ! **${driver.team.emoji}${driver.pilot.name}** déborde **${passed.team.emoji}${passed.pilot.name}** — **P${driver.pos}**${drsStr}`,
+            `📈 T${lap} — **${driver.team.emoji}${driver.pilot.name}** s'empare de la **P${driver.pos}** sur **${passed.team.emoji}${passed.pilot.name}**${drsStr} — gap : ${gapStr}`,
+          ];
+          events.push({ priority: 6, text: pick(overtakeFlavors) });
+        }
       }
+    }
 
-      if (msg.trim() !== `**Tour ${lap}/${totalLaps}**`) await send(msg);
+    // ── Nouveau fastest lap ──────────────────────────────────
+    if (fastestLapHolder && lap > 5) {
+      // Annonce uniquement si changement ce tour
+      const prevHolder = fastestLapHolder;
+      // (fastestLapHolder est mis à jour dans la boucle driver, on check juste si ce tour en est l'auteur)
+      const thisLapFl = ranked.find(d =>
+        fastestLapHolder &&
+        String(d.pilot._id) === String(fastestLapHolder.pilot._id) &&
+        d.fastestLap === fastestLapMs &&
+        d.tireAge === 1  // vient de pitter ou nouveau pneu — heuristique simple
+      );
+      // On évite de spammer — on ne l'annonce que ponctuellement
+    }
+
+    // ── Composition du message du tour ──────────────────────
+    events.sort((a,b) => b.priority - a.priority);
+    const eventsText = events.map(e => e.text).join('\n');
+
+    // Fréquence des récaps classement
+    const showFullStandings = (lap % 10 === 0) || lap === totalLaps;
+    const showTop5          = (lap % 5 === 0 && !showFullStandings) || (scActive && prevScState !== 'NONE');
+    const hasEvents         = events.length > 0;
+
+    let standingsText = '';
+
+    if (showFullStandings) {
+      const dnfLines = drivers.filter(d => d.dnf);
+      standingsText = '\n\n📋 **CLASSEMENT — Tour ' + lap + '/' + totalLaps + '**\n' +
+        ranked.map((d, i) => {
+          const gapMs = i === 0 ? null : d.totalTime - ranked[0].totalTime;
+          const gapStr = i === 0 ? '⏱ LEADER' : `+${(gapMs/1000).toFixed(3)}s`;
+          return `**P${String(i+1).padStart(2,' ')}** ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${TIRE[d.tireCompound].emoji} (${d.pitStops} arr.)`;
+        }).join('\n') +
+        (dnfLines.length ? '\n' + dnfLines.map(d => `~~${d.team.emoji}${d.pilot.name}~~ ❌ T${d.dnfLap}`).join(' · ') : '');
+    } else if (showTop5 || (scActive && events.length > 0)) {
+      standingsText = '\n\n🏎️ **Classement Top ' + Math.min(5, ranked.length) + ' — T' + lap + '**\n' +
+        ranked.slice(0, 5).map((d, i) => {
+          const gapMs  = i === 0 ? null : d.totalTime - ranked[0].totalTime;
+          const gapStr = i === 0 ? 'LEADER' : `+${(gapMs/1000).toFixed(3)}s`;
+          return `**P${i+1}** ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${TIRE[d.tireCompound].emoji}`;
+        }).join('\n');
+    }
+
+    // N'envoyer que si on a quelque chose à dire
+    if (hasEvents || showFullStandings || showTop5 || lap === 1) {
+      const headerTire = `**⏱ Tour ${lap}/${totalLaps}**` +
+        (scState.state === 'SC'  ? ` 🚨 **SAFETY CAR**` : '') +
+        (scState.state === 'VSC' ? ` 🟡 **VSC**`         : '');
+
+      const parts = [headerTire, eventsText, standingsText].filter(Boolean);
+      await send(parts.join('\n'));
     }
   }
 
-  // ── Résultats finaux ─────────────────────────────────────
+  // ══════════════════════════════════════════════════════════
+  // RÉSULTATS FINAUX
+  // ══════════════════════════════════════════════════════════
   const finalRanked = [
     ...drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime),
-    ...drivers.filter(d => d.dnf).sort((a,b) => (b.dnfLap||0) - (a.dnfLap||0)),
+    ...drivers.filter(d =>  d.dnf).sort((a,b) => (b.dnfLap||0) - (a.dnfLap||0)),
   ];
   finalRanked.forEach((d,i) => d.pos = i+1);
 
@@ -728,20 +948,46 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     const coins    = Math.round((pts * 20 + (driver.dnf ? 0 : 50)) * multi + salary + primeV + primeP + (fl ? 30 : 0));
 
     results.push({
-      pilotId: driver.pilot._id,
-      teamId : driver.team._id,
-      pos: driver.pos, dnf: driver.dnf, dnfReason: driver.dnfReason,
+      pilotId   : driver.pilot._id,
+      teamId    : driver.team._id,
+      pos       : driver.pos,
+      dnf       : driver.dnf,
+      dnfReason : driver.dnfReason,
       coins, fastestLap: fl,
     });
   }
 
-  // Podium
-  const podium = finalRanked.slice(0,3);
-  await send(
-    `🏆 **PODIUM — ${race.circuit.toUpperCase()}**\n` +
-    podium.map((d,i) => `${['🥇','🥈','🥉'][i]} **${d.pilot.name}** (${d.team.emoji} ${d.team.name})`).join('\n') +
-    (fastestLapHolder ? `\n\n⚡ **Meilleur tour** : ${fastestLapHolder.pilot.name} — ${msToLapStr(fastestLapMs)}` : '')
-  );
+  // ── Drapeau à damier ────────────────────────────────────
+  const winner = finalRanked[0];
+  const winFlavors = [
+    `🏁 **DRAPEAU À DAMIER !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** remporte le Grand Prix !`,
+    `🏁 **C'EST FINI !** ${race.emoji} ${race.circuit}\n🏆 Victoire de **${winner.team.emoji} ${winner.pilot.name}** — une course magistrale !`,
+    `🏁 **FIN DE COURSE !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** franchit la ligne en vainqueur !`,
+  ];
+  await send(pick(winFlavors));
+
+  // ── Embed podium ─────────────────────────────────────────
+  const dnfDrivers = drivers.filter(d => d.dnf);
+  const dnfStr = dnfDrivers.length
+    ? dnfDrivers.map(d => {
+        const reasonLabels = { CRASH:'💥 Accident', MECHANICAL:'🔩 Mécanique', PUNCTURE:'🫧 Crevaison' };
+        return `❌ ${d.team.emoji} **${d.pilot.name}** — ${reasonLabels[d.dnfReason]||'DNF'} (T${d.dnfLap})`;
+      }).join('\n')
+    : '*Aucun abandon — course propre !*';
+
+  const podiumEmbed = new EmbedBuilder()
+    .setTitle(`🏆 PODIUM OFFICIEL — ${race.emoji} ${race.circuit}`)
+    .setColor('#FFD700')
+    .setDescription(
+      finalRanked.slice(0, 3).map((d, i) => {
+        const gapMs  = i === 0 ? null : d.totalTime - finalRanked[0].totalTime;
+        const gapStr = i === 0 ? '' : ` (+${(gapMs/1000).toFixed(3)}s)`;
+        return `${['🥇','🥈','🥉'][i]} **${d.team.emoji} ${d.pilot.name}** — ${d.team.name}${gapStr}`;
+      }).join('\n') +
+      '\n\u200B\n**Abandons :**\n' + dnfStr +
+      (fastestLapHolder ? `\n\u200B\n⚡ **Meilleur tour :** ${fastestLapHolder.team.emoji} **${fastestLapHolder.pilot.name}** — ${msToLapStr(fastestLapMs)}` : '')
+    );
+  await sendEmbed(podiumEmbed);
 
   return results;
 }
