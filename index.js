@@ -96,6 +96,8 @@ const PilotSchema = new mongoose.Schema({
   // Économie
   plcoins      : { type: Number, default: 500 },
   totalEarned  : { type: Number, default: 0 },
+  // Photo de profil (URL définie par un admin via /admin_set_photo)
+  photoUrl     : { type: String, default: null },
   // État
   teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
   createdAt    : { type: Date, default: Date.now },
@@ -1015,6 +1017,11 @@ const commands = [
   new SlashCommandBuilder().setName('pilotes')
     .setDescription('Liste tous les pilotes classés par note générale (style FIFA)'),
 
+  new SlashCommandBuilder().setName('admin_set_photo')
+    .setDescription('[ADMIN] Définit la photo de profil d\'un pilote')
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible').setRequired(true))
+    .addStringOption(o => o.setName('url').setDescription('URL directe de l\'image (jpg/png/gif)').setRequired(true)),
+
   new SlashCommandBuilder().setName('admin_draft_start')
     .setDescription('[ADMIN] Lance le draft snake — chaque joueur choisit son écurie'),
 
@@ -1214,44 +1221,6 @@ client.on('interactionCreate', async (interaction) => {
     });
   }
 
-  // Draft select menu handler
-  if (interaction.isStringSelectMenu() && interaction.customId.startsWith('draft_pick_')) {
-    const draftId = interaction.customId.replace('draft_pick_', '');
-    let draft; try { draft = await DraftSession.findById(draftId); } catch(e) {}
-    if (!draft || draft.status !== 'active')
-      return interaction.reply({ content: 'Draft introuvable ou termine.', ephemeral: true });
-    const curPilotId = String(draftPilotAtIndex(draft.pilotOrder, draft.currentPickIndex));
-    const curPilot   = await Pilot.findById(curPilotId);
-    if (!curPilot || curPilot.discordId !== interaction.user.id)
-      return interaction.reply({ content: 'Ce n est pas ton tour ! C est a **'+(curPilot?.name||'?')+'** de choisir.', ephemeral: true });
-    const teamId = interaction.values[0];
-    if (draft.picks.some(pk => String(pk.teamId) === teamId))
-      return interaction.reply({ content: 'Cette ecurie est deja prise !', ephemeral: true });
-    const team = await Team.findById(teamId);
-    if (!team) return interaction.reply({ content: 'Ecurie introuvable.', ephemeral: true });
-    await Pilot.findByIdAndUpdate(curPilot._id, { teamId: team._id });
-    const existing = await Contract.findOne({ pilotId: curPilot._id, active: true });
-    if (!existing) await Contract.create({ pilotId: curPilot._id, teamId: team._id, seasonsDuration:1, seasonsRemaining:1, coinMultiplier:1.0, primeVictoire:0, primePodium:0, salaireBase:100, active:true });
-    draft.picks.push({ teamId: team._id, pilotId: curPilot._id });
-    draft.currentPickIndex += 1;
-    const ov = overallRating(curPilot); const tier = ratingTier(ov);
-    const msg = tier.badge+' **'+ov+' '+curPilot.name+'** rejoint **'+team.emoji+' '+team.name+'** !';
-    if (draft.currentPickIndex >= draft.totalPicks) {
-      draft.status = 'done'; await draft.save();
-      return interaction.update({ content: msg+'\n\n🏁 **Draft termine !** Bonne saison 🏎️', components: [] });
-    }
-    await draft.save();
-    const nextPilotId = String(draftPilotAtIndex(draft.pilotOrder, draft.currentPickIndex));
-    const nextPilot   = await Pilot.findById(nextPilotId);
-    const pickedTeamIds = draft.picks.map(pk => String(pk.teamId));
-    const freeTeams = await Team.find({ _id: { $nin: pickedTeamIds } }).sort({ budget: -1 });
-    const n = draft.pilotOrder.length;
-    const round = Math.floor(draft.currentPickIndex/n)+1;
-    const pickN = (draft.currentPickIndex%n)+1;
-    const ovN = overallRating(nextPilot); const tierN = ratingTier(ovN);
-    if (!freeTeams.length) { draft.status='done'; await draft.save(); return interaction.update({ content: msg+'\n\n🏁 Draft termine !', components: [] }); }
-    return interaction.update({ content: msg+'\n\n**Round '+round+' — Pick '+pickN+'/'+n+'** : <@'+nextPilot.discordId+'> ('+tierN.badge+' **'+ovN+'** '+nextPilot.name+'), a toi !', components: [buildTeamSelectMenu(freeTeams, String(draft._id))] });
-  }
   if (interaction.isStringSelectMenu()) return;
 
   if (!interaction.isChatInputCommand()) return;
@@ -1282,7 +1251,6 @@ client.on('interactionCreate', async (interaction) => {
         .setColor(tierCr.color)
         .setDescription(
           `## ${tierCr.badge} **${ovCreate}** — ${tierCr.label}\n\n` +
-          `## ${tierCr.badge} **${ovCr}** — ${tierCr.label}\n\n` +
           `\`Dépassement  \` ${bar(pilot.depassement)}  **${pilot.depassement}**\n` +
           `\`Freinage     \` ${bar(pilot.freinage)}  **${pilot.freinage}**\n` +
           `\`Défense      \` ${bar(pilot.defense)}  **${pilot.defense}**\n` +
@@ -1314,8 +1282,8 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder()
       .setTitle(`${team?.emoji || '🏎️'} ${pilot.name}`)
       .setColor(tier.color)
+      .setThumbnail(pilot.photoUrl || null)
       .setDescription(
-        `## ${tier.badge} **${ov}** — ${tier.label}\n` +
         `## ${tier.badge} **${ov}** — ${tier.label}\n` +
         (team ? `**${team.name}**` : '🔴 *Sans écurie*') +
         (contract ? `  |  ×${contract.coinMultiplier} · ${contract.seasonsRemaining} saison(s) restante(s)` : '') + '\n\n' +
@@ -1685,6 +1653,35 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   // ── /pilotes ──────────────────────────────────────────────
+
+  // ── /admin_set_photo ─────────────────────────────────────
+  if (commandName === 'admin_set_photo') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const target = interaction.options.getUser('joueur');
+    const url    = interaction.options.getString('url').trim();
+
+    // Vérification basique que c'est une URL valide
+    try { new URL(url); } catch {
+      return interaction.reply({ content: '❌ URL invalide.', ephemeral: true });
+    }
+
+    const pilot = await Pilot.findOneAndUpdate(
+      { discordId: target.id },
+      { photoUrl: url },
+      { new: true }
+    );
+    if (!pilot) return interaction.reply({ content: `❌ Aucun pilote trouvé pour <@${target.id}>.`, ephemeral: true });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📸 Photo mise à jour — ${pilot.name}`)
+      .setColor('#FFD700')
+      .setThumbnail(url)
+      .setDescription(`La photo de profil de **${pilot.name}** a été définie.\nElle apparaîtra dans \`/profil\`, \`/historique\` et \`/pilotes\`.`);
+
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
 
   // ── /admin_draft_start ────────────────────────────────────
   if (commandName === 'admin_draft_start') {
@@ -2126,6 +2123,117 @@ async function runQualifying(override) {
   if (channel) await channel.send({ embeds: [embed] });
 }
 
+// ── Cérémonie de fin de saison ────────────────────────────
+async function sendSeasonCeremony(season, channel) {
+  // Classements pilotes
+  const standings = await Standing.find({ seasonId: season._id }).sort({ points: -1 });
+  const allPilots = await Pilot.find();
+  const allTeams  = await Team.find();
+  const pilotMap  = new Map(allPilots.map(p => [String(p._id), p]));
+  const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
+
+  // Champion pilote
+  const champStanding = standings[0];
+  const champ         = champStanding ? pilotMap.get(String(champStanding.pilotId)) : null;
+  const champTeam     = champ?.teamId ? teamMap.get(String(champ.teamId)) : null;
+
+  // Classement constructeurs
+  const constrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
+  const champConstr     = constrStandings[0] ? teamMap.get(String(constrStandings[0].teamId)) : null;
+
+  // Stats marquantes : meilleur ratio victoires, roi des podiums, roi des DNF, meilleure progression
+  const mostWins   = standings.reduce((best, s) => (!best || s.wins > best.wins) ? s : best, null);
+  const mostPodiums= standings.reduce((best, s) => (!best || s.podiums > best.podiums) ? s : best, null);
+  const mostDnfs   = standings.reduce((best, s) => (!best || s.dnfs > best.dnfs) ? s : best, null);
+
+  const totalRaces = await Race.countDocuments({ seasonId: season._id });
+
+  // Annonce d'ambiance (délai volontaire pour laisser respirer)
+  await channel.send(
+    '```\n' +
+    '╔══════════════════════════════════════════╗\n' +
+    '║      🏁  FIN DE SAISON  🏁               ║\n' +
+    '╚══════════════════════════════════════════╝\n' +
+    '```'
+  );
+
+  await new Promise(r => setTimeout(r, 3000));
+
+  // Embed champion pilote
+  if (champ) {
+    const ov   = overallRating(champ);
+    const tier = ratingTier(ov);
+    const embed = new EmbedBuilder()
+      .setTitle(`👑 CHAMPION DU MONDE PILOTE — Saison ${season.year}`)
+      .setColor('#FFD700')
+      .setDescription(
+        `# ${champTeam?.emoji || '🏎️'} **${champ.name}**\n` +
+        `${tier.badge} **${ov}** — ${tier.label}` +
+        (champTeam ? ` · ${champTeam.name}` : '') + '\n\n' +
+        `🏆 **${champStanding.points} points** au championnat\n` +
+        `🥇 ${champStanding.wins} victoire(s)  ·  🥈 ${champStanding.podiums} podium(s)  ·  ❌ ${champStanding.dnfs} DNF\n\n` +
+        `*Le titre se mérite sur ${totalRaces} Grands Prix !*`
+      );
+    if (champ.photoUrl) embed.setThumbnail(champ.photoUrl);
+    await channel.send({ embeds: [embed] });
+  }
+
+  await new Promise(r => setTimeout(r, 2000));
+
+  // Embed champion constructeur
+  if (champConstr) {
+    const embed = new EmbedBuilder()
+      .setTitle(`🏗️ CHAMPION DU MONDE CONSTRUCTEUR — Saison ${season.year}`)
+      .setColor(champConstr.color || '#0099FF')
+      .setDescription(
+        `# ${champConstr.emoji} **${champConstr.name}**\n\n` +
+        `🏆 **${constrStandings[0].points} points** constructeurs\n\n` +
+        `**Classement complet :**\n` +
+        constrStandings.slice(0, 10).map((s, i) => {
+          const t = teamMap.get(String(s.teamId));
+          return `${['🥇','🥈','🥉'][i] || `**${i+1}.**`} ${t?.emoji || ''} ${t?.name || '?'} — **${s.points} pts**`;
+        }).join('\n')
+      );
+    await channel.send({ embeds: [embed] });
+  }
+
+  await new Promise(r => setTimeout(r, 2000));
+
+  // Embed top 5 pilotes + stats marquantes
+  const top5 = standings.slice(0, 5);
+  const top5Str = top5.map((s, i) => {
+    const p = pilotMap.get(String(s.pilotId));
+    const t = p?.teamId ? teamMap.get(String(p.teamId)) : null;
+    return `${['🥇','🥈','🥉','4️⃣','5️⃣'][i]} **${p?.name || '?'}** ${t?.emoji || ''} — ${s.points} pts (${s.wins}V / ${s.podiums}P)`;
+  }).join('\n');
+
+  const statsLines = [];
+  if (mostWins   && mostWins.wins   > 0) {
+    const p = pilotMap.get(String(mostWins.pilotId));
+    statsLines.push(`🏆 **Roi des victoires** : ${p?.name || '?'} — ${mostWins.wins} victoire(s)`);
+  }
+  if (mostPodiums && mostPodiums.podiums > 0 && String(mostPodiums.pilotId) !== String(mostWins?.pilotId)) {
+    const p = pilotMap.get(String(mostPodiums.pilotId));
+    statsLines.push(`🥊 **Roi des podiums** : ${p?.name || '?'} — ${mostPodiums.podiums} podium(s)`);
+  }
+  if (mostDnfs && mostDnfs.dnfs > 0) {
+    const p = pilotMap.get(String(mostDnfs.pilotId));
+    statsLines.push(`💀 **Malchance de la saison** : ${p?.name || '?'} — ${mostDnfs.dnfs} DNF`);
+  }
+
+  const recapEmbed = new EmbedBuilder()
+    .setTitle(`📊 Bilan de la Saison ${season.year}`)
+    .setColor('#FF1801')
+    .setDescription(
+      `**${totalRaces} Grands Prix disputés**\n\n` +
+      `**🏎️ Top 5 pilotes :**\n${top5Str || 'Aucun'}\n\n` +
+      (statsLines.length ? `**✨ Distinctions :**\n${statsLines.join('\n')}\n\n` : '') +
+      `\n⏳ *La période de transfert ouvrira dans 24h...*`
+    );
+
+  await channel.send({ embeds: [recapEmbed] });
+}
+
 async function runRace(override) {
   const season = await getActiveSeason(); if (!season) return;
   const race   = await getCurrentRace(season); if (!race || race.status === 'done') return;
@@ -2188,7 +2296,7 @@ async function runRace(override) {
   // Fin de saison ?
   const remaining = await Race.countDocuments({ seasonId: season._id, status: { $ne: 'done' } });
   if (remaining === 0 && channel) {
-    await channel.send('🏆 **FIN DE SAISON !** La période de transfert commencera dans 24h.');
+    await sendSeasonCeremony(season, channel);
     setTimeout(async () => {
       await startTransferPeriod();
       try {
