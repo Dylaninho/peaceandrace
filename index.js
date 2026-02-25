@@ -5,7 +5,8 @@
 
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder,
-        SlashCommandBuilder, REST, Routes } = require('discord.js');
+        SlashCommandBuilder, REST, Routes,
+        ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const mongoose = require('mongoose');
 const cron     = require('node-cron');
 const http     = require('http');   // keep-alive ping
@@ -927,6 +928,10 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_evolve_cars')
     .setDescription('[ADMIN] Affiche l\'évolution des voitures cette saison'),
+
+  new SlashCommandBuilder().setName('historique')
+    .setDescription('Historique de carrière multi-saisons d\'un pilote')
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)')),
 ];
 
 // ============================================================
@@ -976,6 +981,67 @@ const STAT_COST = {
 };
 
 client.on('interactionCreate', async (interaction) => {
+  // ── Handler boutons (offres de transfert) ─────────────────
+  if (interaction.isButton()) {
+    const [, action, offerId] = interaction.customId.split('_');  // offer_accept_<id> / offer_reject_<id>
+    if (action !== 'accept' && action !== 'reject') return;
+
+    const pilot = await Pilot.findOne({ discordId: interaction.user.id });
+    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote trouvé.', ephemeral: true });
+
+    let offer;
+    try { offer = await TransferOffer.findById(offerId); } catch(e) {}
+    if (!offer || String(offer.pilotId) !== String(pilot._id) || offer.status !== 'pending') {
+      return interaction.reply({
+        content: '❌ Cette offre est expirée ou invalide. Utilise `/offres` pour rafraîchir, ou `/accepter_offre <ID>` en secours.',
+        ephemeral: true,
+      });
+    }
+
+    if (action === 'reject') {
+      await TransferOffer.findByIdAndUpdate(offerId, { status: 'rejected' });
+      return interaction.update({ content: '🚫 Offre refusée.', embeds: [], components: [] });
+    }
+
+    // Accepter
+    const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
+    if (activeContract) {
+      return interaction.reply({
+        content: `❌ Contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin pour changer d'écurie.`,
+        ephemeral: true,
+      });
+    }
+
+    const team   = await Team.findById(offer.teamId);
+    const inTeam = await Pilot.countDocuments({ teamId: team._id });
+    if (inTeam >= 2) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
+
+    await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
+    await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
+    await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id });
+    await Contract.create({
+      pilotId: pilot._id, teamId: team._id,
+      seasonsDuration:  offer.seasons, seasonsRemaining: offer.seasons,
+      coinMultiplier:   offer.coinMultiplier,
+      primeVictoire:    offer.primeVictoire,
+      primePodium:      offer.primePodium,
+      salaireBase:      offer.salaireBase,
+      active: true,
+    });
+
+    return interaction.update({
+      content: '',
+      embeds: [new EmbedBuilder().setTitle('✅ Contrat signé !').setColor(team.color)
+        .setDescription(
+          `**${pilot.name}** rejoint **${team.emoji} ${team.name}** !\n\n` +
+          `×${offer.coinMultiplier} | ${offer.seasons} saison(s) | Salaire : ${offer.salaireBase} 🪙/course\n` +
+          `Prime victoire : ${offer.primeVictoire} 🪙 | Prime podium : ${offer.primePodium} 🪙`
+        )
+      ],
+      components: [],
+    });
+  }
+
   if (!interaction.isChatInputCommand()) return;
   const { commandName } = interaction;
 
@@ -1066,7 +1132,7 @@ client.on('interactionCreate', async (interaction) => {
     if (pilot.plcoins < cost) return interaction.reply({ content: `❌ Pas assez de PLcoins (${pilot.plcoins}/${cost}).`, ephemeral: true });
     if (pilot[statKey] >= 99) return interaction.reply({ content: '❌ Stat déjà au max (99) !', ephemeral: true });
 
-    const gain = randInt(1, 3);
+    const gain = 2;
     await Pilot.findByIdAndUpdate(pilot._id, { $inc: { plcoins: -cost, [statKey]: gain } });
     return interaction.reply({
       embeds: [new EmbedBuilder().setTitle('📈 Amélioration !').setColor('#FFD700')
@@ -1123,11 +1189,19 @@ client.on('interactionCreate', async (interaction) => {
 
     const standings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).limit(20);
     const medals    = ['🥇','🥈','🥉'];
+
+    // Batch-fetch pilots & teams pour éviter les requêtes N+1
+    const pilotIds = standings.map(s => s.pilotId);
+    const allPilots = await Pilot.find({ _id: { $in: pilotIds } });
+    const allTeams  = await Team.find();
+    const pilotMap = new Map(allPilots.map(p => [String(p._id), p]));
+    const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
+
     let desc = '';
     for (let i = 0; i < standings.length; i++) {
       const s     = standings[i];
-      const pilot = await Pilot.findById(s.pilotId);
-      const team  = pilot?.teamId ? await Team.findById(pilot.teamId) : null;
+      const pilot = pilotMap.get(String(s.pilotId));
+      const team  = pilot?.teamId ? teamMap.get(String(pilot.teamId)) : null;
       desc += `${medals[i] || `**${i+1}.**`} ${team?.emoji||''} **${pilot?.name||'?'}** — ${s.points} pts (${s.wins}V ${s.podiums}P ${s.dnfs}DNF)\n`;
     }
     return interaction.reply({
@@ -1141,9 +1215,15 @@ client.on('interactionCreate', async (interaction) => {
     if (!season) return interaction.reply({ content: '❌ Aucune saison active.', ephemeral: true });
 
     const standings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
+
+    // Batch-fetch teams
+    const teamIds   = standings.map(s => s.teamId);
+    const allTeams2 = await Team.find({ _id: { $in: teamIds } });
+    const teamMap2  = new Map(allTeams2.map(t => [String(t._id), t]));
+
     let desc = '';
     for (let i = 0; i < standings.length; i++) {
-      const team = await Team.findById(standings[i].teamId);
+      const team = teamMap2.get(String(standings[i].teamId));
       desc += `**${i+1}.** ${team?.emoji||''} **${team?.name||'?'}** — ${standings[i].points} pts\n`;
     }
     return interaction.reply({
@@ -1230,16 +1310,50 @@ client.on('interactionCreate', async (interaction) => {
     const offers = await TransferOffer.find({ pilotId: pilot._id, status: 'pending' });
     if (!offers.length) return interaction.reply({ content: '📭 Aucune offre en attente.', ephemeral: true });
 
-    const embed = new EmbedBuilder().setTitle('📬 Tes offres de contrat').setColor('#FFD700');
-    for (const o of offers) {
+    // Construire un embed + boutons par offre (max 5 offres affichées)
+    const embeds = [];
+    const components = [];
+
+    for (const o of offers.slice(0, 5)) {
       const team = await Team.findById(o.teamId);
-      embed.addFields({
-        name: `${team.emoji} ${team.name}  —  \`${o._id}\``,
-        value: `×${o.coinMultiplier} | ${o.seasons} saison(s) | Salaire : ${o.salaireBase} 🪙/course | Prime V : ${o.primeVictoire} 🪙 | Prime P : ${o.primePodium} 🪙`,
-      });
+      const embed = new EmbedBuilder()
+        .setTitle(`${team.emoji} ${team.name}`)
+        .setColor(team.color)
+        .setDescription(
+          `×**${o.coinMultiplier}** coins | **${o.seasons}** saison(s)\n` +
+          `💰 Salaire : **${o.salaireBase} 🪙**/course\n` +
+          `🏆 Prime V : **${o.primeVictoire} 🪙** | Prime P : **${o.primePodium} 🪙**`
+        )
+        .setFooter({ text: `ID de secours : ${o._id}` });
+      embeds.push(embed);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`offer_accept_${o._id}`)
+          .setLabel(`✅ Rejoindre ${team.name}`)
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`offer_reject_${o._id}`)
+          .setLabel('❌ Refuser')
+          .setStyle(ButtonStyle.Danger),
+      );
+      components.push(row);
     }
-    embed.setFooter({ text: '/accepter_offre <ID>  |  /refuser_offre <ID>' });
-    return interaction.reply({ embeds: [embed], ephemeral: true });
+
+    // Discord limite à 1 embed + 5 rows par message — on envoie en éphémère
+    // On envoie chaque offre séparément si > 1
+    await interaction.reply({
+      content: `📬 **${offers.length} offre(s) en attente.** Les boutons expirent après 10 min — utilise \`/accepter_offre <ID>\` en secours.`,
+      embeds:  [embeds[0]],
+      components: [components[0]],
+      ephemeral: true,
+    });
+
+    // Offres supplémentaires en followUp
+    for (let i = 1; i < embeds.length; i++) {
+      await interaction.followUp({ embeds: [embeds[i]], components: [components[i]], ephemeral: true });
+    }
+    return;
   }
 
   // ── /accepter_offre ───────────────────────────────────────
@@ -1298,6 +1412,56 @@ client.on('interactionCreate', async (interaction) => {
     if (!offer || String(offer.pilotId) !== String(pilot._id)) return interaction.reply({ content: '❌ Offre introuvable.', ephemeral: true });
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'rejected' });
     return interaction.reply({ content: '🚫 Offre refusée.', ephemeral: true });
+  }
+
+  // ── /historique ───────────────────────────────────────────
+  if (commandName === 'historique') {
+    const target = interaction.options.getUser('joueur') || interaction.user;
+    const pilot  = await Pilot.findOne({ discordId: target.id });
+    if (!pilot) return interaction.reply({ content: `❌ Aucun pilote pour <@${target.id}>.`, ephemeral: true });
+
+    // Récupérer tous les standings toutes saisons confondues
+    const allStandings = await Standing.find({ pilotId: pilot._id }).sort({ seasonId: 1 });
+    if (!allStandings.length) return interaction.reply({ content: '📊 Aucune saison jouée pour ce pilote.', ephemeral: true });
+
+    // Batch-fetch les saisons
+    const seasonIds = allStandings.map(s => s.seasonId);
+    const seasons   = await Season.find({ _id: { $in: seasonIds } });
+    const seasonMap = new Map(seasons.map(s => [String(s._id), s]));
+
+    // Calculer les totaux de carrière
+    const totalPts    = allStandings.reduce((a, s) => a + s.points, 0);
+    const totalWins   = allStandings.reduce((a, s) => a + s.wins, 0);
+    const totalPodium = allStandings.reduce((a, s) => a + s.podiums, 0);
+    const totalDnf    = allStandings.reduce((a, s) => a + s.dnfs, 0);
+
+    // Trouver la meilleure saison
+    const bestSeason = allStandings.reduce((best, s) => s.points > (best?.points || 0) ? s : best, null);
+    const bestSeasonObj = bestSeason ? seasonMap.get(String(bestSeason.seasonId)) : null;
+
+    let desc = `**${allStandings.length} saison(s) disputée(s)**\n\n`;
+    desc += `🏆 **Totaux carrière**\n`;
+    desc += `Points : **${totalPts}** | Victoires : **${totalWins}** | Podiums : **${totalPodium}** | DNF : **${totalDnf}**\n\n`;
+    if (bestSeasonObj) {
+      desc += `⭐ **Meilleure saison : ${bestSeasonObj.year}** — ${bestSeason.points} pts (${bestSeason.wins}V ${bestSeason.podiums}P)\n\n`;
+    }
+    desc += `**Détail par saison :**\n`;
+
+    for (const s of allStandings) {
+      const season = seasonMap.get(String(s.seasonId));
+      if (!season) continue;
+      const medal = s.wins > 0 ? '🏆' : s.podiums > 0 ? '🥉' : '📋';
+      desc += `${medal} **${season.year}** — ${s.points} pts · ${s.wins}V ${s.podiums}P ${s.dnfs}DNF\n`;
+    }
+
+    const team    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
+    const embed   = new EmbedBuilder()
+      .setTitle(`📊 Carrière — ${pilot.name}`)
+      .setColor(team?.color || '#888888')
+      .setDescription(desc)
+      .addFields({ name: '💰 Total gagné (carrière)', value: `${pilot.totalEarned} PLcoins`, inline: true });
+
+    return interaction.reply({ embeds: [embed] });
   }
 
   // ── /admin_new_season ─────────────────────────────────────
@@ -1467,6 +1631,24 @@ async function runRace(override) {
   }
   embed.setDescription(desc);
   if (channel) await channel.send({ embeds: [embed] });
+
+  // Classement constructeurs rapide en fin de course
+  if (channel) {
+    const constrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
+    const constrTeamIds   = constrStandings.map(s => s.teamId);
+    const constrTeams     = await Team.find({ _id: { $in: constrTeamIds } });
+    const constrTeamMap   = new Map(constrTeams.map(t => [String(t._id), t]));
+    let constrDesc = '';
+    for (let i = 0; i < constrStandings.length; i++) {
+      const t = constrTeamMap.get(String(constrStandings[i].teamId));
+      constrDesc += `**${i+1}.** ${t?.emoji||''} **${t?.name||'?'}** — ${constrStandings[i].points} pts\n`;
+    }
+    const constrEmbed = new EmbedBuilder()
+      .setTitle('🏗️ Classement Constructeurs — Après cette course')
+      .setColor('#0099FF')
+      .setDescription(constrDesc || 'Aucune donnée');
+    await channel.send({ embeds: [constrEmbed] });
+  }
 
   // Fin de saison ?
   const remaining = await Race.countDocuments({ seasonId: season._id, status: { $ne: 'done' } });
