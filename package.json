@@ -1,0 +1,16 @@
+{
+  "name": "f1bot",
+  "version": "1.0.0",
+  "description": "Bot Discord simulation F1",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "register": "node utils/registerCommands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "mongoose": "^8.2.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.5"
+  }
+}
