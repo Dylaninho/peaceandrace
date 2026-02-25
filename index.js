@@ -709,8 +709,34 @@ function atmosphereLine(ranked, lap, totalLaps, weather, scState) {
 // ─── SIMULATION COURSE COMPLÈTE ───────────────────────────
 async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   const totalLaps = race.laps;
-  const weather   = pick(['DRY','DRY','DRY','DRY','WET','INTER','HOT']);
   const gpStyle   = race.gpStyle;
+
+  // ── Météo dynamique ───────────────────────────────────────
+  // Météo de départ (pondérée vers DRY)
+  let weather = pick(['DRY','DRY','DRY','DRY','WET','INTER','HOT']);
+
+  // Transitions possibles selon la météo courante
+  const WEATHER_TRANSITIONS = {
+    DRY   : [{ to: 'DRY', w:12 }, { to: 'HOT', w:2 }, { to: 'INTER', w:1 }],
+    HOT   : [{ to: 'HOT', w:10 }, { to: 'DRY', w:3 }, { to: 'INTER', w:1 }],
+    INTER : [{ to: 'INTER', w:6 }, { to: 'DRY', w:3 }, { to: 'WET', w:3 }, { to: 'HOT', w:1 }],
+    WET   : [{ to: 'WET', w:8 }, { to: 'INTER', w:4 }, { to: 'DRY', w:1 }],
+  };
+
+  // Résoudre la prochaine météo par tirage pondéré
+  function nextWeather(current) {
+    const options = WEATHER_TRANSITIONS[current] || WEATHER_TRANSITIONS['DRY'];
+    const total   = options.reduce((s, o) => s + o.w, 0);
+    let roll      = Math.random() * total;
+    for (const o of options) { roll -= o.w; if (roll <= 0) return o.to; }
+    return current;
+  }
+
+  // La météo ne change qu'entre certains intervalles (tous les ~10-15 tours)
+  let nextWeatherChangeLap = totalLaps < 30
+    ? Math.floor(totalLaps * 0.4)
+    : randInt(10, 20);
+  let weatherChanged = false; // flag pour n'annoncer qu'une fois par changement
 
   const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
   const weatherLabels = { DRY:'Sec ☀️', WET:'Pluie 🌧️', INTER:'Mixte 🌦️', HOT:'Canicule 🔥' };
@@ -801,6 +827,48 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     drivers.forEach(d => { d.pittedThisLap = false; });
     const alive    = drivers.filter(d => !d.dnf);
     const dnfCount = drivers.filter(d => d.dnf).length;
+
+    // ── Changement de météo dynamique ───────────────────────
+    if (lap === nextWeatherChangeLap && lap < totalLaps - 5) {
+      const prevWeather = weather;
+      weather = nextWeather(weather);
+      // Planifier le prochain changement possible
+      nextWeatherChangeLap = lap + randInt(10, 18);
+      weatherChanged = weather !== prevWeather;
+
+      if (weatherChanged) {
+        // Textes d'annonce selon la transition
+        const weatherLabelsShort = { DRY:'Sec ☀️', WET:'Pluie 🌧️', INTER:'Mixte 🌦️', HOT:'Canicule 🔥' };
+        const transitionMsgs = {
+          'DRY→WET'   : `🌧️ **T${lap} — LA PLUIE ARRIVE !** Les premières gouttes tombent sur la piste — les équipes vont-elles rentrer pour des intermédiaires ? Stratégie cruciale !`,
+          'DRY→INTER' : `🌦️ **T${lap} — Nuages menaçants.** La piste commence à se mouiller par endroits. Les inter' deviennent une option sérieuse.`,
+          'DRY→HOT'   : `🔥 **T${lap} — Canicule !** La température monte en flèche — la gestion des pneus devient critique. Les voitures peu bien refroidies vont souffrir.`,
+          'HOT→INTER' : `🌦️ **T${lap} — Orage soudain !** Un grain éclate sur le circuit — la piste devient traîtresse. Pit lane, tout le monde rentre !`,
+          'HOT→DRY'   : `☀️ **T${lap} — Retour au calme.** Soleil de plomb, conditions sèches normales. Les temps devraient redevenir meilleurs.`,
+          'INTER→DRY' : `☀️ **T${lap} — La piste sèche !** La fenêtre des slicks approche — qui va prendre le risque d'être le premier à rentrer pour des pneus secs ?`,
+          'INTER→WET' : `🌧️ **T${lap} — Déluge !** La pluie se renforce — les inter' ne suffisent plus. Il va falloir basculer sur des pluies full wet.`,
+          'WET→INTER' : `🌦️ **T${lap} — La pluie se calme.** La piste commence à sécher par endroits. Les pilotes les plus courageux vont tenter les inter'...`,
+          'WET→DRY'   : `☀️ **T${lap} — Course folle en vue !** Le temps change radicalement — la piste sèche vite. Stratégie frénétique dans les stands !`,
+        };
+        const key = `${prevWeather}→${weather}`;
+        const msg = transitionMsgs[key] || `🌡️ **T${lap} — Changement météo !** ${weatherLabelsShort[prevWeather]} → ${weatherLabelsShort[weather]}`;
+
+        if (channel) {
+          try { await channel.send(msg); await sleep(2500); } catch(e) {}
+        }
+
+        // Forcer les pilotes sur pneus inadaptés à pit au prochain tour si météo radicale
+        // (DRY→WET, WET→DRY, HOT→INTER) : on augmente leur usure artificiellement pour déclencher shouldPit
+        const forceWear = ['DRY→WET','WET→DRY','HOT→INTER','INTER→WET'].includes(key);
+        if (forceWear) {
+          for (const d of alive) {
+            const needWet  = (weather === 'WET' || weather === 'INTER') && (d.tireCompound === 'SOFT' || d.tireCompound === 'MEDIUM' || d.tireCompound === 'HARD');
+            const needDry  = (weather === 'DRY' || weather === 'HOT')   && (d.tireCompound === 'WET'  || d.tireCompound === 'INTER');
+            if (needWet || needDry) d.tireWear = Math.max(d.tireWear, 38); // forcer shouldPit
+          }
+        }
+      }
+    }
 
     // Snapshot des positions avant ce tour
     alive.forEach(d => { d.lastPos = d.pos; });
@@ -1492,6 +1560,16 @@ const commands = [
   new SlashCommandBuilder().setName('admin_draft_start')
     .setDescription('[ADMIN] Lance le draft snake — chaque joueur choisit son écurie'),
 
+  new SlashCommandBuilder().setName('admin_offer')
+    .setDescription('[ADMIN] Envoie une offre de contrat d\'une écurie à un pilote')
+    .addStringOption(o => o.setName('ecurie').setDescription('Nom de l\'écurie qui fait l\'offre').setRequired(true))
+    .addUserOption(o => o.setName('joueur').setDescription('Pilote ciblé').setRequired(true))
+    .addNumberOption(o => o.setName('multiplicateur').setDescription('Multiplicateur PLcoins (ex: 1.5)').setRequired(true).setMinValue(0.5).setMaxValue(5))
+    .addIntegerOption(o => o.setName('salaire').setDescription('PLcoins fixes par course').setRequired(true).setMinValue(0))
+    .addIntegerOption(o => o.setName('saisons').setDescription('Durée du contrat (1-3 saisons)').setRequired(true).setMinValue(1).setMaxValue(3))
+    .addIntegerOption(o => o.setName('prime_victoire').setDescription('Bonus PLcoins par victoire').setMinValue(0))
+    .addIntegerOption(o => o.setName('prime_podium').setDescription('Bonus PLcoins par podium').setMinValue(0)),
+
   new SlashCommandBuilder().setName('admin_test_race')
     .setDescription('[ADMIN] Simule une course fictive avec pilotes fictifs — test visuel'),
 
@@ -1804,16 +1882,28 @@ async function handleInteraction(interaction) {
     const pilot = await Pilot.findOne({ discordId: interaction.user.id });
     if (!pilot) return interaction.reply({ content: '❌ Crée d\'abord ton pilote.', ephemeral: true });
 
-    const statKey = interaction.options.getString('stat');
-    const cost    = STAT_COST[statKey];
-    if (pilot.plcoins < cost) return interaction.reply({ content: `❌ Pas assez de PLcoins (${pilot.plcoins}/${cost}).`, ephemeral: true });
-    if (pilot[statKey] >= 99) return interaction.reply({ content: '❌ Stat déjà au max (99) !', ephemeral: true });
+    const statKey  = interaction.options.getString('stat');
+    const cost     = STAT_COST[statKey];
+    const current  = pilot[statKey];
+    const MAX_STAT = 99;
 
-    const gain = 2;
-    await Pilot.findByIdAndUpdate(pilot._id, { $inc: { plcoins: -cost, [statKey]: gain } });
+    if (current >= MAX_STAT) return interaction.reply({ content: '❌ Stat déjà au max (99) !', ephemeral: true });
+    if (pilot.plcoins < cost) return interaction.reply({ content: `❌ Pas assez de PLcoins (${pilot.plcoins}/${cost}).`, ephemeral: true });
+
+    // On calcule le vrai gain sans jamais dépasser 99
+    const gain     = Math.min(2, MAX_STAT - current);
+    const newValue = current + gain;
+
+    // Double sécurité : $min garantit que même en cas de race condition, la stat ne dépasse pas 99
+    await Pilot.findByIdAndUpdate(pilot._id, {
+      $inc: { plcoins: -cost },
+      $min: { [statKey]: MAX_STAT },          // si déjà à 99 suite à un race condition, ne bouge pas
+      $set: { [statKey]: newValue },           // valeur calculée côté serveur, plafonnée
+    });
     return interaction.reply({
       embeds: [new EmbedBuilder().setTitle('📈 Amélioration !').setColor('#FFD700')
-        .setDescription(`**${statKey}** : ${pilot[statKey]} → ${Math.min(99, pilot[statKey]+gain)} (+${gain})\n💸 −${cost} PLcoins`)],
+        .setDescription(`**${statKey}** : ${current} → **${newValue}** (+${gain})\n💸 −${cost} PLcoins` +
+          (newValue >= MAX_STAT ? '\n🔒 **Maximum atteint (99)** — cette stat ne peut plus progresser.' : ''))],
     });
   }
 
@@ -2409,6 +2499,7 @@ async function handleInteraction(interaction) {
         { name: '🔄 Transferts & Draft', value: [
           '`/admin_transfer` — Ouvre la période de transfert',
           '`/admin_draft_start` — Lance le draft snake',
+          '`/admin_offer` — Envoie une offre de contrat d\'une écurie à un pilote',
         ].join('\n') },
         { name: '🧪 Test & Debug', value: [
           '`/admin_test_race` — Simule une course fictive (aucune sauvegarde)',
@@ -2644,6 +2735,101 @@ async function handleInteraction(interaction) {
       });
     }
     return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /admin_offer ──────────────────────────────────────────
+  // L'admin envoie une offre au nom d'une écurie à un pilote précis.
+  // Le pilote reçoit alors la notif dans /offres avec boutons Accept/Refuse.
+  if (commandName === 'admin_offer') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const ecurieName   = interaction.options.getString('ecurie');
+    const targetUser   = interaction.options.getUser('joueur');
+    const multiplicateur = interaction.options.getNumber('multiplicateur');
+    const salaire      = interaction.options.getInteger('salaire');
+    const saisons      = interaction.options.getInteger('saisons');
+    const primeV       = interaction.options.getInteger('prime_victoire') ?? 0;
+    const primeP       = interaction.options.getInteger('prime_podium')   ?? 0;
+
+    // Trouver l'écurie
+    const team = await Team.findOne({ name: { $regex: ecurieName, $options: 'i' } });
+    if (!team) return interaction.reply({ content: `❌ Écurie introuvable : **${ecurieName}**. Vérifie le nom avec \`/ecuries\`.`, ephemeral: true });
+
+    // Vérifier que l'écurie n'est pas déjà pleine
+    const inTeam = await Pilot.countDocuments({ teamId: team._id });
+    if (inTeam >= 2) return interaction.reply({ content: `❌ ${team.emoji} **${team.name}** est déjà complète (2/2 pilotes).`, ephemeral: true });
+
+    // Trouver le pilote cible
+    const pilot = await Pilot.findOne({ discordId: targetUser.id });
+    if (!pilot) return interaction.reply({ content: `❌ <@${targetUser.id}> n'a pas encore de pilote.`, ephemeral: true });
+
+    // Vérifier qu'il n'a pas déjà un contrat actif
+    const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
+    if (activeContract) {
+      return interaction.reply({
+        content: `❌ **${pilot.name}** a déjà un contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin de son contrat.`,
+        ephemeral: true,
+      });
+    }
+
+    // Vérifier qu'une offre similaire (même écurie + même pilote) n'est pas déjà pending
+    const existing = await TransferOffer.findOne({ teamId: team._id, pilotId: pilot._id, status: 'pending' });
+    if (existing) return interaction.reply({ content: `⚠️ Une offre de ${team.emoji} **${team.name}** à **${pilot.name}** est déjà en attente !`, ephemeral: true });
+
+    // Créer l'offre (expire dans 7 jours)
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const offer = await TransferOffer.create({
+      teamId: team._id, pilotId: pilot._id,
+      coinMultiplier: multiplicateur,
+      salaireBase:    salaire,
+      primeVictoire:  primeV,
+      primePodium:    primeP,
+      seasons:        saisons,
+      status:         'pending',
+      expiresAt,
+    });
+
+    // Confirmation pour l'admin
+    await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`📨 Offre envoyée — ${team.emoji} ${team.name} → ${pilot.name}`)
+        .setColor(team.color)
+        .setDescription(
+          `**Pilote ciblé :** <@${targetUser.id}> (${pilot.name})\n\n` +
+          `× **${multiplicateur}** multiplicateur PLcoins\n` +
+          `💰 Salaire : **${salaire} 🪙**/course\n` +
+          `🏆 Prime victoire : **${primeV} 🪙** | Prime podium : **${primeP} 🪙**\n` +
+          `📅 Durée : **${saisons} saison(s)**\n` +
+          `⏰ Expire le : <t:${Math.floor(expiresAt.getTime()/1000)}:D>\n\n` +
+          `Le pilote peut voir et accepter l'offre avec \`/offres\`.`
+        )
+        .setFooter({ text: `ID offre : ${offer._id}` })
+      ],
+      ephemeral: true,
+    });
+
+    // Tenter de notifier le pilote en DM
+    try {
+      const dmChannel = await targetUser.createDM();
+      await dmChannel.send({
+        embeds: [new EmbedBuilder()
+          .setTitle(`📬 Nouvelle offre de contrat !`)
+          .setColor(team.color)
+          .setDescription(
+            `${team.emoji} **${team.name}** te propose un contrat !\n\n` +
+            `× **${multiplicateur}** multiplicateur | **${saisons}** saison(s)\n` +
+            `💰 Salaire : **${salaire} 🪙**/course\n` +
+            `🏆 Prime V : **${primeV} 🪙** | Prime P : **${primeP} 🪙**\n\n` +
+            `👉 Réponds avec \`/offres\` dans le serveur pour accepter ou refuser !`
+          )
+        ],
+      });
+    } catch(e) {
+      // DM bloqués — pas grave, le pilote verra avec /offres
+      console.log(`ℹ️  DM bloqué pour ${targetUser.tag} — offre créée quand même.`);
+    }
+    return;
   }
 } // fin handleInteraction
 
