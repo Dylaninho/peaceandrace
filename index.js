@@ -318,32 +318,6 @@ function randInt(min, max)  { return Math.floor(rand(min, max + 1)); }
 function pick(arr)          { return arr[Math.floor(Math.random() * arr.length)]; }
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
-// Note Generale FIFA-style
-function overallRating(pilot) {
-  return Math.round(pilot.freinage*0.17+pilot.controle*0.17+pilot.depassement*0.15+pilot.gestionPneus*0.15+pilot.defense*0.13+pilot.adaptabilite*0.12+pilot.reactions*0.11);
-}
-function ratingTier(r) {
-  if (r >= 90) return { badge: '🟫', label: 'ICONE',    color: '#b07d26' };
-  if (r >= 85) return { badge: '🟨', label: 'ELITE',    color: '#FFD700' };
-  if (r >= 80) return { badge: '🟩', label: 'EXPERT',   color: '#00C851' };
-  if (r >= 72) return { badge: '🟦', label: 'CONFIRME', color: '#0099FF' };
-  if (r >= 64) return { badge: '🟥', label: 'INTERM.',  color: '#CC4444' };
-  return              { badge: '⬜',   label: 'ROOKIE',   color: '#888888' };
-}
-function draftPilotAtIndex(order, idx) {
-  const n = order.length; const round = Math.floor(idx / n); const pos = idx % n;
-  return round % 2 === 0 ? order[pos] : order[n-1-pos];
-}
-function buildTeamSelectMenu(freeTeams, draftId) {
-  const options = freeTeams.slice(0,25).map(t => {
-    const avg = Math.round((t.vitesseMax+t.drs+t.refroidissement+t.dirtyAir+t.conservationPneus+t.vitesseMoyenne)/6);
-    return { label: t.emoji+' '+t.name+'  Perf '+avg+'/100', value: String(t._id), description: 'Budget '+t.budget+'M | VMax '+t.vitesseMax+' | Pneus '+t.conservationPneus };
-  });
-  return new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('draft_pick_'+draftId).setPlaceholder('Choisis ton ecurie...').addOptions(options)
-  );
-}
-
 // ─── Note Générale FIFA-style ─────────────────────────────
 function overallRating(pilot) {
   return Math.round(
@@ -1037,12 +1011,6 @@ const commands = [
   new SlashCommandBuilder().setName('historique')
     .setDescription('Historique de carrière multi-saisons d\'un pilote')
     .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)')),
-
-  new SlashCommandBuilder().setName('pilotes')
-    .setDescription('Liste tous les pilotes classés par note générale (style FIFA)'),
-
-  new SlashCommandBuilder().setName('admin_draft_start')
-    .setDescription('[ADMIN] Lance le draft snake — les écuries choisissent leurs pilotes'),
 
   new SlashCommandBuilder().setName('pilotes')
     .setDescription('Liste tous les pilotes classés par note générale (style FIFA)'),
