@@ -580,127 +580,199 @@ async function simulatePractice(race, pilots, teams) {
 
 // ─── Bibliothèques de narration ───────────────────────────
 
-// Comment un dépassement se produit physiquement, selon le style de GP et les stats
+// Comment un dépassement se produit physiquement — drama selon le rang impliqué
 function overtakeDescription(attacker, defender, gpStyle) {
   const drs      = gpStyle === 'rapide' && attacker.team.drs > 82;
   const freinage = attacker.pilot.freinage > 75;
-  const dep      = attacker.pilot.depassement > 75;
-  const a = attacker.pilot.name;
-  const d = defender.pilot.name;
+  const a  = attacker.pilot.name;
+  const d  = defender.pilot.name;
   const ae = attacker.team.emoji;
   const de = defender.team.emoji;
+  const newPos  = attacker.pos;
+  const lostPos = defender.pos;
+  const forLead   = newPos === 1;
+  const forPodium = newPos <= 3;
+  const isTop3    = newPos <= 3 || lostPos <= 3;
+  const isTop8    = newPos <= 8 || lostPos <= 8;
 
+  if (forLead) {
+    return pick([
+      `***${ae}${a} PREND LA TÊTE !!! INCROYABLE !!!***\n  › Il plonge ${drs ? 'en DRS 📡' : 'au freinage'} — ${de}${d} ne peut RIEN faire. ***LE LEADER A CHANGÉ !***`,
+      `***🔥 ${ae}${a} — P1 !!! IL ARRACHE LA PREMIÈRE PLACE !***\n  › ${de}${d} résiste, résiste... mais c'est imparable. ***LE GP BASCULE !***`,
+      `***⚡ ${ae}${a} PASSE ${de}${d} ET PREND LA TÊTE DU GRAND PRIX !!!***`,
+    ]);
+  }
+  if (forPodium) {
+    return pick([
+      `***🏆 ${ae}${a} S'EMPARE DU PODIUM !!! P${newPos} !!!***\n  › Il passe ${de}${d} ${freinage ? 'au freinage tardif' : drs ? 'sous DRS 📡' : 'en sortie de virage'} — ***LA PLACE SUR LE PODIUM CHANGE DE MAINS !***`,
+      `***💫 DÉPASSEMENT POUR LE PODIUM !*** ${ae}${a} plonge sur ${de}${d} — brutal, propre, implacable. ***P${newPos} !***`,
+    ]);
+  }
+  if (isTop3) {
+    return pick([
+      `***😱 ${de}${d} RÉTROGRADE DU TOP 3 !*** ${ae}${a} le passe ${freinage ? 'au freinage' : drs ? 'en DRS 📡' : 'en sortie de virage'} !`,
+      `***⚡ ${ae}${a} DANS LE TOP 3 !*** Il déborde ${de}${d} — on n'a rien vu venir !`,
+    ]);
+  }
+  if (isTop8) {
+    return pick([
+      `🔥 **${ae}${a}** passe **${de}${d}** ${freinage ? 'au freinage' : drs ? 'en DRS 📡' : 'en sortie de virage'} — il monte dans le classement !`,
+      `👊 **${ae}${a}** déborde **${de}${d}** ${drs ? 'grâce au DRS 📡' : 'à la corde'} — belle opportunité saisie !`,
+    ]);
+  }
   const straights = [
-    `${ae}**${a}** surgit dans la ligne droite${drs ? ' en DRS 📡' : ''} — il passe côté intérieur, ${de}**${d}** ne peut rien faire !`,
-    `${ae}**${a}** prend le sillage de ${de}**${d}**${drs ? ', active le DRS 📡' : ''} et déborde proprement dans la grande ligne droite !`,
-    `Différence de vitesse de pointe énorme — ${ae}**${a}** passe ${de}**${d}** comme si ce dernier était à l'arrêt !`,
+    `${ae}**${a}** surgit dans la ligne droite${drs ? ' en DRS 📡' : ''} — passe côté intérieur, ${de}**${d}** ne peut rien faire.`,
+    `${ae}**${a}** prend le sillage de ${de}**${d}**${drs ? ' et active le DRS 📡' : ''} — déborde proprement.`,
   ];
   const braking = [
-    `${ae}**${a}** freine TRÈS tard au bout de la ligne droite — il plonge à l'intérieur et pique la position à ${de}**${d}** !`,
-    `Freinage tardif audacieux de ${ae}**${a}** — il passe à l'intérieur du virage, ${de}**${d}** est débordé avant même de réagir !`,
-    `${ae}**${a}** joue le tout pour le tout au freinage — une opportunité infime, saisie à la perfection. ${de}**${d}** est passé !`,
+    `${ae}**${a}** freine tard — plonge à l'intérieur et pique la position à ${de}**${d}**.`,
+    `Freinage tardif de ${ae}**${a}** — il passe, ${de}**${d}** est débordé.`,
   ];
   const corner = [
-    `${ae}**${a}** prend l'extérieur avec un culot monstre — il enroule le virage parfaitement et ressort devant ${de}**${d}** !`,
-    `Belle manœuvre à l'extérieur du virage — ${ae}**${a}** a la trajectoire idéale et laisse ${de}**${d}** sur place !`,
-    `${ae}**${a}** passe par l'extérieur en sortie de virage — une manœuvre propre et efficace sur ${de}**${d}** !`,
+    `${ae}**${a}** prend l'extérieur avec du culot — enroule et ressort devant ${de}**${d}**.`,
   ];
   const undercut = [
-    `${ae}**${a}** refait son retard sur piste fraîche — il double ${de}**${d}** qui n'a aucune réponse sur pneus usés !`,
-    `L'undercut paie pour ${ae}**${a}** ! ${de}**${d}** sort du garage derrière — la stratégie fait le travail.`,
+    `${ae}**${a}** refait son retard sur pneus frais — double ${de}**${d}** qui n'a aucune réponse.`,
   ];
-
-  if (drs)       return pick(straights);
-  if (freinage)  return pick(braking);
-  if (dep > 75 && gpStyle === 'urbain') return pick(braking);
+  if (drs)                     return pick(straights);
+  if (freinage)                return pick(braking);
   if (gpStyle === 'technique') return pick(corner);
   if (gpStyle === 'endurance') return pick(undercut);
   return pick([...straights, ...braking, ...corner]);
 }
 
-// Description physique d'un accident solo selon le gpStyle
+// Description physique d'un accident solo — drama selon la position
 function crashSoloDescription(driver, lap, gpStyle) {
-  const n = `**${driver.team.emoji}${driver.pilot.name}**`;
-  const p = `(P${driver.pos})`;
+  const n   = `${driver.team.emoji}**${driver.pilot.name}**`;
+  const pos = driver.pos;
+  const isTop3 = pos <= 3;
+  const isTop8 = pos <= 8;
+
+  if (isTop3) {
+    return pick([
+      `***💥 NON !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} DNF !!! DEPUIS P${pos} !!!***\n  › La voiture perd le contrôle, explose dans les barrières. ***Une course magnifique réduite à néant en une fraction de seconde.*** ❌`,
+      `***🔥 CATASTROPHE !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} ABANDONNE !!!***\n  › Depuis ***P${pos}*** — tête-à-queue, choc violent contre le mur. ***Le Grand Prix lui est volé de la pire des façons.*** ❌`,
+      `***😱 INCROYABLE !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} HORS COURSE !!!***\n  › Il était ***P${pos}***, solide, rapide — et voilà. Une erreur, et tout s'effondre. ***L'écurie est dévastée.*** ❌`,
+    ]);
+  }
+  if (isTop8) {
+    return pick([
+      `💥 **T${lap} — GROS ACCIDENT !** ${n} (P${pos}) perd le contrôle et finit dans les barrières — une belle course qui s'arrête brutalement. ❌ **DNF.**`,
+      `🚨 **T${lap}** — Sortie violente pour ${n} (P${pos}) ! Dommage, il était bien placé. ❌ **DNF.**`,
+    ]);
+  }
   const urbain = [
-    `💥 **T${lap} — ACCIDENT !** ${n} ${p} touche les glissières dans la chicane — la voiture se couche violemment dans les barrières. ❌ **DNF.**`,
-    `🚧 **T${lap} — SORTIE DE PISTE !** ${n} ${p} part à la glisse dans un virage en épingle, percute le mur de l'extérieur et c'est terminé pour lui. ❌ **DNF.**`,
-    `💥 **T${lap}** — ${n} ${p} tape le rail intérieur, les deux roues avant s'arrachent à l'impact. Scène violente mais le pilote est sain et sauf. ❌ **DNF.**`,
+    `💥 **T${lap}** — ${n} (P${pos}) touche les glissières dans la chicane. ❌ **DNF.**`,
+    `🚧 **T${lap}** — ${n} (P${pos}) part à la glisse dans un épingle, percute le mur. ❌ **DNF.**`,
   ];
   const rapide = [
-    `💨 **T${lap} — INCIDENT HAUTE VITESSE !** ${n} ${p} perd le contrôle à pleine vitesse, décollage et choc brutal dans les barrières de pneus. ❌ **DNF.**`,
-    `🚨 **T${lap}** — ${n} ${p} part en tête-à-queue dans la courbe rapide, ne peut pas rattraper le mouvement — fin de course. ❌ **DNF.**`,
-    `💥 **T${lap}** — Survitesse à l'entrée de courbe pour ${n} ${p} — la voiture vole littéralement hors de la piste. Dieu merci le pilote va bien. ❌ **DNF.**`,
+    `💨 **T${lap}** — ${n} (P${pos}) perd le contrôle à pleine vitesse — choc brutal. ❌ **DNF.**`,
+    `🚨 **T${lap}** — ${n} (P${pos}) part en tête-à-queue dans la courbe rapide. ❌ **DNF.**`,
   ];
   const generic = [
-    `💥 **T${lap} — FAUTE DE PILOTAGE !** ${n} ${p} perd l'arrière dans un virage lent, tête-à-queue, et finit dans le bac à graviers. ❌ **DNF.**`,
-    `🚗 **T${lap}** — ${n} ${p} sort large en sortie de virage, accroche le mur à faible vitesse mais les dégâts sont trop importants pour continuer. ❌ **DNF.**`,
-    `💥 **T${lap}** — Erreur inexplicable de ${n} ${p} — la voiture part en travers et finit sa course dans les protections. ❌ **DNF.**`,
+    `💥 **T${lap}** — ${n} (P${pos}) perd l'arrière dans un virage lent, finit dans le bac. ❌ **DNF.**`,
+    `🚗 **T${lap}** — ${n} (P${pos}) sort large, accroche le mur — trop endommagé pour continuer. ❌ **DNF.**`,
   ];
-
   if (gpStyle === 'urbain') return pick(urbain);
   if (gpStyle === 'rapide') return pick(rapide);
   return pick(generic);
 }
 
-// Description d'une collision entre deux pilotes
+// Description d'une collision entre deux pilotes — drama selon le rang
 function collisionDescription(attacker, victim, lap, attackerDnf, victimDnf, damage) {
-  const a = `**${attacker.team.emoji}${attacker.pilot.name}**`;
-  const v = `**${victim.team.emoji}${victim.pilot.name}**`;
-  const ap = `P${attacker.pos}`;
-  const vp = `P${victim.pos}`;
+  const a  = `**${attacker.team.emoji}${attacker.pilot.name}**`;
+  const v  = `**${victim.team.emoji}${victim.pilot.name}**`;
+  const an = attacker.pilot.name;
+  const vn = victim.pilot.name;
+  const ae = attacker.team.emoji;
+  const ve = victim.team.emoji;
+  const ap = attacker.pos;
+  const vp = victim.pos;
+  const isTop3 = ap <= 3 || vp <= 3;
+  const isTop8 = ap <= 8 || vp <= 8;
 
-  const intros = [
-    `💥 **T${lap} — CONTACT !** ${a} (${ap}) plonge à l'intérieur sur ${v} (${vp}) — les deux voitures se touchent !`,
-    `🚨 **T${lap} — ACCROCHAGE !** ${a} (${ap}) arrive trop vite et tape l'arrière de ${v} (${vp}) — les pièces volent !`,
-    `💥 **T${lap}** — Tentative de dépassement de ${a} (${ap}) sur ${v} (${vp}) qui ferme la porte — contact inévitable !`,
-    `🔥 **T${lap} — INCIDENT !** ${a} (${ap}) et ${v} (${vp}) se touchent au freinage — la course tourne au drame pour les deux !`,
-  ];
-
-  let consequence = '\n';
-  if (attackerDnf && victimDnf) {
-    consequence += `  ❌ **Double DNF.** Les deux voitures sont hors course — les commissaires vont se pencher sur la question.`;
-  } else if (attackerDnf && !victimDnf) {
-    consequence += `  ❌ ${a} abandonne immédiatement (DNF).\n  ⚠️ ${v} repart mais avec de gros dommages — **+${(damage/1000).toFixed(1)}s** de pénalité et une voiture abîmée.`;
-  } else if (!attackerDnf && victimDnf) {
-    consequence += `  ❌ ${v} est contraint à l'abandon (DNF).\n  ⚠️ ${a} continue mais endommagé — **+${(damage/1000).toFixed(1)}s** perdus.`;
-  } else {
-    consequence += `  ⚠️ Les deux continuent avec des dommages mais la direction de course prend note.`;
+  // ── DRAMA MAXIMAL : top 3 impliqué ───────────────────────
+  if (isTop3) {
+    if (attackerDnf && victimDnf) {
+      return pick([
+        `***💥 DOUBLE CATASTROPHE !!! T${lap}***\n  › ***${ae}${an}*** et ***${ve}${vn}*** se PERCUTENT violemment — les deux voitures dans le mur !!! ***DOUBLE DNF !!! La course vient de perdre ses plus beaux acteurs.***`,
+        `***🔥 COLLISION MONUMENTALE !!! T${lap}***\n  › ***${ae}${an}*** (P${ap}) plonge sur ***${ve}${vn}*** (P${vp}) — CONTACT INÉVITABLE — ***LES DEUX ABANDONNENT !!! C'est un désastre absolu.***`,
+      ]);
+    } else if (attackerDnf) {
+      return pick([
+        `***💥 ACCROCHAGE EN HAUT DU CLASSEMENT !!! T${lap}***\n  › ***${ae}${an}*** prend trop de risques sur ${v} (P${vp}) — le contact est BRUTAL. ***${a} abandonne sur le champ.*** ❌\n  › ${v} repart endommagé — **+${(damage/1000).toFixed(1)}s** perdus.`,
+      ]);
+    } else {
+      return pick([
+        `***⚠️ CONTACT DANS LE TOP !!! T${lap}***\n  › ${a} (P${ap}) accroche ***${ve}${vn}*** (P${vp}) — ***${v} EXPULSÉ DE LA COURSE !*** ❌ **DNF.**\n  › ${a} continue dans un état lamentable — **+${(damage/1000).toFixed(1)}s**.`,
+      ]);
+    }
   }
 
+  // ── Drama modéré : top 8 ──────────────────────────────────
+  if (isTop8) {
+    const intro = pick([
+      `🚨 **T${lap} — ACCROCHAGE !** ${a} (P${ap}) et ${v} (P${vp}) se touchent — les pièces volent !`,
+      `💥 **T${lap} — CONTACT !** ${a} plonge sur ${v} — impact violent pour les deux.`,
+    ]);
+    let consequence = '\n';
+    if (attackerDnf && victimDnf) consequence += `  ❌ **Double DNF.** Les deux hors course.`;
+    else if (attackerDnf)         consequence += `  ❌ ${a} abandonne (DNF).\n  ⚠️ ${v} repart abîmé — **+${(damage/1000).toFixed(1)}s**.`;
+    else if (victimDnf)           consequence += `  ❌ ${v} hors course (DNF).\n  ⚠️ ${a} continue endommagé.`;
+    else                          consequence += `  ⚠️ Les deux continuent avec des dégâts.`;
+    return intro + consequence;
+  }
+
+  // ── Sobre : fond de grille ────────────────────────────────
+  const intros = [
+    `💥 **T${lap} — CONTACT !** ${a} (P${ap}) plonge sur ${v} (P${vp}) — les deux se touchent.`,
+    `🚨 **T${lap}** — ${a} (P${ap}) accroche l'arrière de ${v} (P${vp}).`,
+  ];
+  let consequence = '\n';
+  if (attackerDnf && victimDnf) consequence += `  ❌ **Double DNF.**`;
+  else if (attackerDnf)         consequence += `  ❌ ${a} abandonne (DNF). ⚠️ ${v} continue abîmé — **+${(damage/1000).toFixed(1)}s**.`;
+  else if (victimDnf)           consequence += `  ❌ ${v} hors course (DNF). ⚠️ ${a} continue endommagé.`;
+  else                          consequence += `  ⚠️ Les deux continuent — les commissaires prennent note.`;
   return pick(intros) + consequence;
 }
 
-// Ambiance aléatoire play-by-play (commentaires sans event)
+// Ambiance aléatoire play-by-play — drama uniquement si ça concerne le haut du classement
 function atmosphereLine(ranked, lap, totalLaps, weather, scState) {
   if (!ranked.length) return null;
-  const leader   = ranked[0];
-  const second   = ranked[1];
-  const pct      = lap / totalLaps;
-
-  if (scState.state !== 'NONE') return null; // pas pendant SC
+  const leader = ranked[0];
+  const second = ranked[1];
+  const third  = ranked[2];
+  const pct    = lap / totalLaps;
+  if (scState.state !== 'NONE') return null;
 
   const lines = [];
 
-  // Gap en tête serré
   if (second) {
     const gapTop = (second.totalTime - leader.totalTime) / 1000;
-    if (gapTop < 1.5) {
-      lines.push(`👀 Moins d'une seconde entre ${leader.team.emoji}**${leader.pilot.name}** et ${second.team.emoji}**${second.pilot.name}** — c'est du couteau !`);
-      lines.push(`😤 ${second.team.emoji}**${second.pilot.name}** colle aux roues de ${leader.team.emoji}**${leader.pilot.name}** — la pression est maximale !`);
-    }
-    if (gapTop > 15) {
-      lines.push(`🏃 ${leader.team.emoji}**${leader.pilot.name}** file à l'anglaise — **${gapTop.toFixed(1)}s** d'avance sur son dauphin.`);
+    if (gapTop < 0.5) {
+      lines.push(`***👀 MOINS D'UNE DEMI-SECONDE !!! ${second.team.emoji}${second.pilot.name} EST DANS LE DRS DE ${leader.team.emoji}${leader.pilot.name} !!! RIEN N'EST JOUÉ !***`);
+      lines.push(`***🔥 ${second.team.emoji}${second.pilot.name} EST COLLÉ !!! ${gapTop.toFixed(3)}s — ÇA VA EXPLOSER !!!***`);
+    } else if (gapTop < 1.5) {
+      lines.push(`***⚡ Moins d'une seconde entre ${leader.team.emoji}${leader.pilot.name} et ${second.team.emoji}${second.pilot.name}*** — la pression est ***MAXIMALE*** en tête !`);
+      lines.push(`😤 ${second.team.emoji}**${second.pilot.name}** colle aux roues de ${leader.team.emoji}**${leader.pilot.name}** — ça va exploser d'une seconde à l'autre !`);
+    } else if (gapTop < 3 && third) {
+      const gap3 = (third.totalTime - second.totalTime) / 1000;
+      if (gap3 < 2) lines.push(`🏎️ Bagarre à trois ! ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tout le monde dans le même peloton !`);
+    } else if (gapTop > 15) {
+      lines.push(`🏃 ${leader.team.emoji}**${leader.pilot.name}** file seul en tête — **${gapTop.toFixed(1)}s** d'avance. La course semble pliée...`);
     }
   }
 
-  // Ambiance météo
-  if (weather === 'WET') lines.push(`🌧️ La piste est toujours glissante — chaque virage est une loterie par ce temps.`);
-  if (weather === 'HOT') lines.push(`🔥 La chaleur est intense — les pneus souffrent énormément sur ce circuit.`);
+  if (weather === 'WET')   lines.push(`🌧️ La piste est toujours glissante — chaque virage est une loterie par ce temps.`);
+  if (weather === 'HOT')   lines.push(`🔥 La chaleur est intense — les pneus souffrent énormément.`);
+  if (weather === 'INTER') lines.push(`🌦️ Piste mixte délicate — la moindre erreur et c'est dans le mur.`);
 
-  // Phase de course
-  if (pct > 0.45 && pct < 0.55) lines.push(`⏱ Mi-course franchie — le classement commence à se stabiliser. Qui va attaquer ?`);
-  if (pct > 0.75) lines.push(`🏁 Dernier quart de course — les stratégies se dévoilent, le jeu des positions bat son plein.`);
+  if (pct > 0.45 && pct < 0.55) lines.push(`⏱ Mi-course franchie — les stratèges ont les yeux rivés sur les données. Qui va bouger ?`);
+  if (pct > 0.75 && second) {
+    const gap = (second.totalTime - leader.totalTime) / 1000;
+    if (gap < 5) lines.push(`***🏁 Dernier quart — ${leader.team.emoji}${leader.pilot.name} en tête mais ${second.team.emoji}${second.pilot.name} à ${gap.toFixed(1)}s... C'est pas encore joué !***`);
+    else         lines.push(`🏁 Dernier quart de course — les positions semblent figées. Il faudrait un miracle maintenant.`);
+  }
 
   if (!lines.length) return null;
   return pick(lines);
@@ -915,12 +987,19 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
     // ── Tour final ──────────────────────────────────────────
     if (lap === totalLaps) {
-      const leader = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime)[0];
-      if (leader) {
-        const finalFlavors = [
-          `🏁 **DERNIER TOUR !** ${leader.team.emoji} **${leader.pilot.name}** en tête — le public est debout, les écuries retiennent leur souffle !`,
-          `🏁 **TOUR ${totalLaps} — LE DERNIER !** ${leader.team.emoji} **${leader.pilot.name}** à quelques kilomètres d'une victoire qui s'annonce méritée !`,
-          `🏁 **ALERTE LAST LAP !** ${leader.team.emoji} **${leader.pilot.name}** mène — mais rien n'est fait tant que le drapeau à damier n'a pas agité !`,
+      const leaderFinal  = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime)[0];
+      const secondFinal  = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime)[1];
+      if (leaderFinal) {
+        const gapFinal = secondFinal ? (secondFinal.totalTime - leaderFinal.totalTime) / 1000 : 999;
+        const finalFlavors = gapFinal < 1 ? [
+          `***🏁 DERNIER TOUR !!! ${leaderFinal.team.emoji}${leaderFinal.pilot.name} EN TÊTE — MAIS ${secondFinal?.team.emoji}${secondFinal?.pilot.name} EST À ${gapFinal.toFixed(3)}s !!! TOUT PEUT ENCORE BASCULER !!!***`,
+          `***⚡ LAST LAP !!! ${leaderFinal.team.emoji}${leaderFinal.pilot.name} devant — ${secondFinal?.team.emoji}${secondFinal?.pilot.name} dans son DRS !!! C'EST INSENSÉ !!!***`,
+        ] : gapFinal < 5 ? [
+          `***🏁 DERNIER TOUR !*** ${leaderFinal.team.emoji}**${leaderFinal.pilot.name}** en tête — **+${gapFinal.toFixed(1)}s** sur ${secondFinal?.team.emoji}**${secondFinal?.pilot.name}**... Serré. Il faut tenir !`,
+          `🏁 **LAST LAP !** ${leaderFinal.team.emoji}**${leaderFinal.pilot.name}** à quelques kilomètres de la victoire — mais ${secondFinal?.team.emoji}**${secondFinal?.pilot.name}** n'a pas dit son dernier mot !`,
+        ] : [
+          `🏁 **DERNIER TOUR !** ${leaderFinal.team.emoji} **${leaderFinal.pilot.name}** en tête — le public est debout, les écuries retiennent leur souffle !`,
+          `🏁 **TOUR ${totalLaps} — LE DERNIER !** ${leaderFinal.team.emoji} **${leaderFinal.pilot.name}** à quelques kilomètres d'une victoire méritée !`,
         ];
         events.push({ priority: 9, text: pick(finalFlavors) });
       }
@@ -979,12 +1058,21 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         driver.dnfReason = 'MECHANICAL';
         lapDnfs.push({ driver, reason: 'MECHANICAL' });
         lapIncidents.push({ type: 'MECHANICAL' }); // pas de SC pour mécanique
-        const mechFlavors = [
-          `🔩 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) se range sur le bas-côté, fumée blanche qui s'échappe du moteur. L'équipe le rappelle au garage. ❌ **DNF mécanique.**`,
-          `💨 **T${lap}** — Le moteur de ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) rend l'âme dans une ligne droite. La voiture ralentit, ralentit... et s'arrête. ❌ **DNF.**`,
-          `🔥 **T${lap}** — Température moteur dans le rouge pour ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}). La radio grésille, le muret dit "Rentre au garage". Abandon. ❌ **DNF.**`,
-          `⚙️ **T${lap}** — Problème de transmission pour ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) — il ne passe plus les vitesses. La course est terminée. ❌ **DNF.**`,
-          `💥 **T${lap}** — Explosion mécanique soudaine pour ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) ! Les débris jonchent la piste — voiture irrécupérable. ❌ **DNF.**`,
+        const pos     = driver.pos;
+        const isTop3m = pos <= 3;
+        const isTop8m = pos <= 8;
+        const nm      = `${driver.team.emoji}**${driver.pilot.name}**`;
+        const mechFlavors = isTop3m ? [
+          `***🔥 PANNE MÉCANIQUE !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} — P${pos} — DNF !!!***\n  › La fumée envahit l'habitacle depuis ***P${pos}*** — la radio crache : *"Rentre au garage."* ***Une course magnifique réduite à néant.*** ❌`,
+          `***💨 LE MOTEUR DE ${driver.team.emoji}${driver.pilot.name.toUpperCase()} LÂCHE !!! P${pos} !!!***\n  › Il ralentit, ralentit... et s'arrête. ***L'écurie est sous le choc. Le Grand Prix lui échappe de la pire des façons.*** ❌`,
+          `***⚙️ CATASTROPHE MÉCANIQUE !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} ABANDONNE !!!***\n  › ***P${pos}*** — solide, rapide — et voilà que la mécanique trahit tout. ***CRUEL.*** ❌`,
+        ] : isTop8m ? [
+          `🔥 **T${lap} — ABANDON MÉCANIQUE** pour ${nm} (P${pos}) — fumée, le muret dit *"box"*. Dommage, il était bien placé. ❌ **DNF.**`,
+          `⚙️ **T${lap}** — Problème technique sévère pour ${nm} (P${pos}) — c'est terminé pour lui. ❌ **DNF.**`,
+        ] : [
+          `🔩 **T${lap}** — ${nm} (P${pos}) se range sur le bas-côté, fumée blanche. L'équipe le rappelle. ❌ **DNF mécanique.**`,
+          `💨 **T${lap}** — Le moteur de ${nm} (P${pos}) rend l'âme dans une ligne droite. ❌ **DNF.**`,
+          `⚙️ **T${lap}** — Problème de transmission pour ${nm} (P${pos}) — il ne passe plus les vitesses. ❌ **DNF.**`,
         ];
         incidentText = pick(mechFlavors);
 
@@ -994,10 +1082,19 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         driver.dnfReason = 'PUNCTURE';
         lapDnfs.push({ driver, reason: 'PUNCTURE' });
         lapIncidents.push({ type: 'PUNCTURE' });
-        const puncFlavors = [
-          `🫧 **T${lap}** — CREVAISON ! ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) perd un pneu à haute vitesse — la voiture devient inconduisible. Il rentre en se traînant sur la jante. ❌ **DNF.**`,
-          `🫧 **T${lap}** — Pneu avant gauche qui explose pour ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) ! La voiture part en travers, il tient le choc mais ne peut pas continuer. ❌ **DNF.**`,
-          `🫧 **T${lap}** — Délamination catastrophique sur la voiture de ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) — les caoutchoucs arrachés détruisent la carrosserie. ❌ **DNF.**`,
+        const posp    = driver.pos;
+        const isTop3p = posp <= 3;
+        const isTop8p = posp <= 8;
+        const np      = `${driver.team.emoji}**${driver.pilot.name}**`;
+        const puncFlavors = isTop3p ? [
+          `***🫧 CREVAISON !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} — P${posp} — DNF !!!***\n  › Le pneu explose à haute vitesse — la voiture devient incontrôlable depuis ***P${posp}***. Il rentre sur la jante, impuissant. ***Tout s'effondre en une fraction de seconde.*** ❌`,
+          `***💥 NON !!! CREVAISON POUR ${driver.team.emoji}${driver.pilot.name.toUpperCase()} !!!***\n  › ***P${posp}*** — et un pneu explose. ***La course lui est volée par la malchance pure.*** ❌ **DNF.**`,
+        ] : isTop8p ? [
+          `🫧 **T${lap} — CREVAISON !** ${np} (P${posp}) perd un pneu à pleine vitesse — il rentre sur la jante. Impossible de continuer. ❌ **DNF.**`,
+          `💥 **T${lap}** — Explosion de pneu pour ${np} (P${posp}) — la voiture part en travers. ❌ **DNF.**`,
+        ] : [
+          `🫧 **T${lap}** — Crevaison pour ${np} (P${posp}), il rentre sur la jante. ❌ **DNF.**`,
+          `🫧 **T${lap}** — Délamination sur la voiture de ${np} (P${posp}) — c'est fini. ❌ **DNF.**`,
         ];
         incidentText = pick(puncFlavors);
       }
@@ -1140,9 +1237,19 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
       const drsTag  = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
       const howDesc = overtakeDescription(driver, passed, gpStyle);
 
+      const ovNewPos  = driver.pos;
+      const ovLostPos = passed.pos;
+      const ovForLead = ovNewPos === 1;
+      const ovIsTop3  = ovNewPos <= 3 || ovLostPos <= 3;
+      const ovHeader  = ovForLead
+        ? `***🏆 T${lap} — CHANGEMENT EN TÊTE !!!***${drsTag}`
+        : ovIsTop3
+          ? `***⚔️ T${lap} — DÉPASSEMENT DANS LE TOP 3 !***${drsTag}`
+          : `⚔️ **T${lap} — DÉPASSEMENT !** P${driver.lastPos} → **P${driver.pos}**${drsTag}`;
+
       events.push({
-        priority: 6,
-        text: `⚔️ **T${lap} — DÉPASSEMENT !** P${driver.lastPos} → **P${driver.pos}**${drsTag}\n  › ${howDesc}\n  › Écart : **${gapStr}**${gapOnLeader}`,
+        priority: ovForLead ? 9 : ovIsTop3 ? 8 : 6,
+        text: `${ovHeader}\n  › ${howDesc}\n  › Écart : **${gapStr}**${gapOnLeader}`,
       });
     }
 
@@ -1218,9 +1325,18 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   }
 
   // ── Drapeau à damier ────────────────────────────────────
-  const winner = finalRanked[0];
-  const winFlavors = [
-    `🏁 **DRAPEAU À DAMIER !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** remporte le Grand Prix !`,
+  const winner    = finalRanked[0];
+  const runnerUp  = finalRanked[1];
+  const gapWin    = runnerUp && !runnerUp.dnf ? (runnerUp.totalTime - winner.totalTime) / 1000 : null;
+  const hadTop3Dnf = finalRanked.slice(0,3).some(d => d.dnf);
+  const winFlavors = gapWin && gapWin < 1 ? [
+    `***🏁🏁🏁 DRAPEAU À DAMIER !!! ${race.emoji} ${race.circuit}***\n***🏆 ${winner.team.emoji}${winner.pilot.name} GAGNE !!! À ${gapWin.toFixed(3)}s !!! QUELLE COURSE INCROYABLE !!!***`,
+    `***🏁 C'EST FINI !!! VICTOIRE DE ${winner.team.emoji}${winner.pilot.name.toUpperCase()} !!! +${gapWin.toFixed(3)}s — ON A TOUT VU !!!***`,
+  ] : hadTop3Dnf ? [
+    `🏁 **DRAPEAU À DAMIER !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** remporte une victoire marquée par le drame — pas celle qu'on attendait, mais totalement méritée.`,
+    `🏁 **VICTOIRE SOUS LE CHAOS !** ${race.emoji}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** profite des incidents pour s'imposer. Le sport est cruel et merveilleux à la fois.`,
+  ] : [
+    `🏁 **DRAPEAU À DAMIER !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** remporte le Grand Prix — une victoire convaincante de bout en bout !`,
     `🏁 **C'EST FINI !** ${race.emoji} ${race.circuit}\n🏆 Victoire de **${winner.team.emoji} ${winner.pilot.name}** — une course magistrale !`,
     `🏁 **FIN DE COURSE !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** franchit la ligne en vainqueur !`,
   ];
