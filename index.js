@@ -6,7 +6,8 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder,
         SlashCommandBuilder, REST, Routes,
-        ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+        ActionRowBuilder, ButtonBuilder, ButtonStyle,
+        StringSelectMenuBuilder } = require('discord.js');
 const mongoose = require('mongoose');
 const cron     = require('node-cron');
 const http     = require('http');   // keep-alive ping
@@ -193,6 +194,18 @@ const ConstructorSchema = new mongoose.Schema({
 });
 const ConstructorStanding = mongoose.model('ConstructorStanding', ConstructorSchema);
 
+// ── DraftSession ─────────────────────────────────────────────
+// Snake draft : round 1 = ordre ASC budget, round 2 = inversé
+const DraftSchema = new mongoose.Schema({
+  status           : { type: String, enum: ['active','done'], default: 'active' },
+  order            : [{ type: mongoose.Schema.Types.ObjectId, ref: 'Team' }],
+  picks            : [{ teamId: mongoose.Schema.Types.ObjectId, pilotId: mongoose.Schema.Types.ObjectId }],
+  currentPickIndex : { type: Number, default: 0 },
+  totalPicks       : { type: Number, default: 0 },
+  createdAt        : { type: Date, default: Date.now },
+});
+const DraftSession = mongoose.model('DraftSession', DraftSchema);
+
 // ============================================================
 // ████████╗███████╗ █████╗ ███╗   ███╗███████╗     ██████╗  █████╗ ████████╗ █████╗
 // ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██╔════╝    ██╔══██╗██╔══██╗╚══██╔══╝██╔══██╗
@@ -303,6 +316,50 @@ function rand(min, max)     { return Math.random() * (max - min) + min; }
 function randInt(min, max)  { return Math.floor(rand(min, max + 1)); }
 function pick(arr)          { return arr[Math.floor(Math.random() * arr.length)]; }
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+// ─── Note Générale FIFA-style ─────────────────────────────
+function overallRating(pilot) {
+  return Math.round(
+    pilot.freinage     * 0.17 +
+    pilot.controle     * 0.17 +
+    pilot.depassement  * 0.15 +
+    pilot.gestionPneus * 0.15 +
+    pilot.defense      * 0.13 +
+    pilot.adaptabilite * 0.12 +
+    pilot.reactions    * 0.11
+  );
+}
+function ratingTier(r) {
+  if (r >= 90) return { badge: '🟫', label: 'ICÔNE',          color: '#b07d26' };
+  if (r >= 85) return { badge: '🟨', label: 'ÉLITE',          color: '#FFD700' };
+  if (r >= 80) return { badge: '🟩', label: 'EXPERT',         color: '#00C851' };
+  if (r >= 72) return { badge: '🟦', label: 'CONFIRMÉ',       color: '#0099FF' };
+  if (r >= 64) return { badge: '🟥', label: 'INTERMÉDIAIRE',  color: '#CC4444' };
+  return              { badge: '⬜', label: 'ROOKIE',          color: '#888888' };
+}
+
+// Snake draft : quel teamId pick à l'index donné ?
+function draftTeamAtIndex(order, idx) {
+  const n = order.length;
+  const round = Math.floor(idx / n);
+  const pos   = idx % n;
+  return round % 2 === 0 ? order[pos] : order[n - 1 - pos];
+}
+
+// Construit le select menu des pilotes disponibles pour le draft
+function buildDraftSelectMenu(freePilots, draftId) {
+  const options = freePilots.slice(0, 25).map(p => {
+    const ov = overallRating(p);
+    const t  = ratingTier(ov);
+    return { label: `${t.badge} ${ov} — ${p.name}`, value: String(p._id), description: `Frein ${p.freinage} | Ctrl ${p.controle} | Dep ${p.depassement}` };
+  });
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`draft_pick_${draftId}`)
+      .setPlaceholder('Choisissez un pilote...')
+      .addOptions(options)
+  );
+}
 
 // ─── Score voiture pondéré selon le style de GP ───────────
 // Retourne un score 0-100 représentant la performance de la voiture sur ce circuit
@@ -954,6 +1011,12 @@ const commands = [
     .setDescription('Historique de carrière multi-saisons d\'un pilote')
     .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)')),
 
+  new SlashCommandBuilder().setName('pilotes')
+    .setDescription('Liste tous les pilotes classés par note générale (style FIFA)'),
+
+  new SlashCommandBuilder().setName('admin_draft_start')
+    .setDescription('[ADMIN] Lance le draft snake — les écuries choisissent leurs pilotes'),
+
   new SlashCommandBuilder().setName('concept')
     .setDescription('Présentation complète du jeu F1 PL — pour les nouveaux !'),
 ];
@@ -1006,6 +1069,81 @@ const STAT_COST = {
 
 client.on('interactionCreate', async (interaction) => {
   // ── Handler boutons (offres de transfert) ─────────────────
+  // ── Handler select menu (draft) ──────────────────────────
+  if (interaction.isStringSelectMenu()) {
+    if (interaction.customId.startsWith('draft_pick_')) {
+      if (!interaction.member.permissions.has('Administrator'))
+        return interaction.reply({ content: '❌ Seul un admin peut valider le pick.', ephemeral: true });
+
+      const draftId  = interaction.customId.replace('draft_pick_', '');
+      const pilotId  = interaction.values[0];
+      let draft;
+      try { draft = await DraftSession.findById(draftId); } catch(e) {}
+      if (!draft || draft.status !== 'active')
+        return interaction.reply({ content: '❌ Draft introuvable ou terminé.', ephemeral: true });
+
+      // Vérifier que ce pilote n'est pas déjà pické
+      if (draft.picks.some(pk => String(pk.pilotId) === pilotId))
+        return interaction.reply({ content: '❌ Ce pilote a déjà été sélectionné !', ephemeral: true });
+
+      const teamId   = String(draftTeamAtIndex(draft.order, draft.currentPickIndex));
+      const team     = await Team.findById(teamId);
+      const pilot    = await Pilot.findById(pilotId);
+      if (!team || !pilot) return interaction.reply({ content: '❌ Données introuvables.', ephemeral: true });
+
+      // Assigner le pilote à l'écurie + créer contrat de base
+      await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id });
+      const existingContract = await Contract.findOne({ pilotId: pilot._id, active: true });
+      if (!existingContract) {
+        await Contract.create({
+          pilotId: pilot._id, teamId: team._id,
+          seasonsDuration: 1, seasonsRemaining: 1,
+          coinMultiplier: 1.0, primeVictoire: 0,
+          primePodium: 0, salaireBase: 100, active: true,
+        });
+      }
+
+      // Sauvegarder le pick
+      draft.picks.push({ teamId: team._id, pilotId: pilot._id });
+      draft.currentPickIndex += 1;
+
+      const ov   = overallRating(pilot);
+      const tier = ratingTier(ov);
+      let msg = `✅ **${team.emoji} ${team.name}** choisit **${tier.badge} ${ov} ${pilot.name}** !`;
+
+      if (draft.currentPickIndex >= draft.totalPicks) {
+        // Draft terminé
+        draft.status = 'done';
+        await draft.save();
+        await interaction.update({ content: msg + '\n\n🏁 **Draft terminé !** Toutes les écuries sont composées.', components: [] });
+      } else {
+        await draft.save();
+        // Prochain pick
+        const nextTeamId = draftTeamAtIndex(draft.order, draft.currentPickIndex);
+        const nextTeam   = await Team.findById(nextTeamId);
+        const pickedIds  = draft.picks.map(pk => String(pk.pilotId));
+        const freePilots = await Pilot.find({ _id: { $nin: pickedIds } }).sort({ freinage: -1 });
+
+        const round  = Math.floor(draft.currentPickIndex / draft.order.length) + 1;
+        const pickN  = (draft.currentPickIndex % draft.order.length) + 1;
+        const totalN = draft.order.length;
+
+        if (!freePilots.length) {
+          draft.status = 'done';
+          await draft.save();
+          await interaction.update({ content: msg + '\n\n🏁 **Draft terminé !** Plus de pilotes disponibles.', components: [] });
+        } else {
+          const selectRow = buildDraftSelectMenu(freePilots, String(draft._id));
+          await interaction.update({
+            content: msg + `\n\n**Round ${round} — Pick ${pickN}/${totalN}** : au tour de **${nextTeam.emoji} ${nextTeam.name}**`,
+            components: [selectRow],
+          });
+        }
+      }
+      return;
+    }
+  }
+
   if (interaction.isButton()) {
     const [, action, offerId] = interaction.customId.split('_');  // offer_accept_<id> / offer_reject_<id>
     if (action !== 'accept' && action !== 'reject') return;
@@ -1085,12 +1223,15 @@ client.on('interactionCreate', async (interaction) => {
       gestionPneus: randInt(44, 62), plcoins: 500,
     });
 
-    const bar = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10 - Math.round(v/10));
+    const bar      = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10 - Math.round(v/10));
+    const ovCreate = overallRating(pilot);
+    const tierCr   = ratingTier(ovCreate);
     return interaction.reply({
       embeds: [new EmbedBuilder()
         .setTitle(`🏎️ Pilote créé : ${pilot.name}`)
-        .setColor('#00FF88')
+        .setColor(tierCr.color)
         .setDescription(
+          `## ${tierCr.badge} **${ovCreate}** — ${tierCr.label}\n\n` +
           `\`Dépassement  \` ${bar(pilot.depassement)}  **${pilot.depassement}**\n` +
           `\`Freinage     \` ${bar(pilot.freinage)}  **${pilot.freinage}**\n` +
           `\`Défense      \` ${bar(pilot.defense)}  **${pilot.defense}**\n` +
@@ -1100,7 +1241,7 @@ client.on('interactionCreate', async (interaction) => {
           `\`Gestion Pneus\` ${bar(pilot.gestionPneus)}  **${pilot.gestionPneus}**\n\n` +
           `💰 **500 PLcoins** de départ`
         )
-        .setFooter({ text: 'Attends la période de transfert pour rejoindre une écurie !' })
+        .setFooter({ text: 'Attends le draft ou la période de transfert pour rejoindre une écurie !' })
       ],
     });
   }
@@ -1117,10 +1258,13 @@ client.on('interactionCreate', async (interaction) => {
     const standing = season ? await Standing.findOne({ seasonId: season._id, pilotId: pilot._id }) : null;
     const bar      = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10-Math.round(v/10));
 
+    const ov   = overallRating(pilot);
+    const tier = ratingTier(ov);
     const embed = new EmbedBuilder()
       .setTitle(`${team?.emoji || '🏎️'} ${pilot.name}`)
-      .setColor(team?.color || '#888888')
+      .setColor(tier.color)
       .setDescription(
+        `## ${tier.badge} **${ov}** — ${tier.label}\n` +
         (team ? `**${team.name}**` : '🔴 *Sans écurie*') +
         (contract ? `  |  ×${contract.coinMultiplier} · ${contract.seasonsRemaining} saison(s) restante(s)` : '') + '\n\n' +
         `\`Dépassement  \` ${bar(pilot.depassement)}  **${pilot.depassement}**\n` +
@@ -1486,6 +1630,110 @@ client.on('interactionCreate', async (interaction) => {
       .addFields({ name: '💰 Total gagné (carrière)', value: `${pilot.totalEarned} PLcoins`, inline: true });
 
     return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /pilotes ──────────────────────────────────────────────
+  if (commandName === 'pilotes') {
+    const allPilots = await Pilot.find().sort({ createdAt: 1 });
+    if (!allPilots.length) return interaction.reply({ content: '❌ Aucun pilote enregistré.', ephemeral: true });
+
+    const allTeams = await Team.find();
+    const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
+
+    // Trier par note générale décroissante
+    const sorted = allPilots
+      .map(p => ({ pilot: p, ov: overallRating(p) }))
+      .sort((a, b) => b.ov - a.ov);
+
+    const medals = ['🥇','🥈','🥉'];
+    let desc = '';
+    for (let i = 0; i < sorted.length; i++) {
+      const { pilot, ov } = sorted[i];
+      const tier = ratingTier(ov);
+      const team = pilot.teamId ? teamMap.get(String(pilot.teamId)) : null;
+      const rank = medals[i] || `**${i+1}.**`;
+      desc += `${rank} ${tier.badge} **${ov}** ${tier.label.padEnd(14)} — **${pilot.name}** ${team ? `${team.emoji} ${team.name}` : '🔴 *Libre*'}\n`;
+    }
+
+    // Split si trop long (Discord 4096 chars max)
+    const chunks = [];
+    let current = '';
+    for (const line of desc.split('\n')) {
+      if ((current + line).length > 3900) { chunks.push(current); current = ''; }
+      current += line + '\n';
+    }
+    if (current) chunks.push(current);
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏎️ Classement des pilotes — Note Générale')
+      .setColor('#FF1801')
+      .setDescription(chunks[0])
+      .setFooter({ text: `${sorted.length} pilote(s) enregistré(s) · Pondération : Freinage 17% · Contrôle 17% · Dépassement 15% · Pneus 15%...` });
+
+    for (let i = 1; i < chunks.length; i++) embed.addFields({ name: '\u200B', value: chunks[i] });
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /admin_draft_start ────────────────────────────────────
+  if (commandName === 'admin_draft_start') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    // Vérifier qu'il n'y a pas un draft actif
+    const existing = await DraftSession.findOne({ status: 'active' });
+    if (existing) return interaction.reply({ content: '❌ Un draft est déjà en cours !', ephemeral: true });
+
+    // Ordre des teams : budget ASC (plus petite écurie choisit en premier — fair play)
+    const teams = await Team.find().sort({ budget: 1 });
+    if (!teams.length) return interaction.reply({ content: '❌ Aucune écurie trouvée.', ephemeral: true });
+
+    // Pilotes libres (sans équipe), triés par note
+    const freePilots = await Pilot.find({ teamId: null });
+    if (!freePilots.length) return interaction.reply({ content: '❌ Aucun pilote libre pour le draft.', ephemeral: true });
+
+    const totalRounds = 2; // 2 pilotes par écurie
+    const totalPicks  = teams.length * totalRounds;
+
+    const draft = await DraftSession.create({
+      order: teams.map(t => t._id),
+      currentPickIndex: 0,
+      totalPicks,
+      status: 'active',
+    });
+
+    // Afficher l'ordre du draft
+    const orderStr = teams.map((t, i) => `${i+1}. ${t.emoji} ${t.name}`).join('\n');
+    const pilotListStr = freePilots
+      .map(p => { const ov = overallRating(p); const t = ratingTier(ov); return `${t.badge} **${ov}** — ${p.name}`; })
+      .sort((a, b) => {
+        const getOv = s => parseInt(s.match(/\*\*(\d+)\*\*/)?.[1] || '0');
+        return getOv(b) - getOv(a);
+      })
+      .join('\n');
+
+    const infoEmbed = new EmbedBuilder()
+      .setTitle('🎯 DRAFT DES ÉCURIES — Début !')
+      .setColor('#FFD700')
+      .setDescription(
+        '**Format : Snake Draft** (round 1 = ordre ASC budget · round 2 = ordre inversé)\n' +
+        `**${totalPicks} picks au total** (${teams.length} écuries × ${totalRounds} rounds)\n\u200B`
+      )
+      .addFields(
+        { name: '📋 Ordre Round 1', value: orderStr, inline: true },
+        { name: '🏎️ Pilotes disponibles', value: pilotListStr.slice(0, 1024) || 'Aucun', inline: false },
+      );
+
+    const firstTeamId = draftTeamAtIndex(teams.map(t => t._id), 0);
+    const firstTeam   = teams.find(t => String(t._id) === String(firstTeamId));
+    const sortedFree  = [...freePilots].sort((a, b) => overallRating(b) - overallRating(a));
+    const selectRow   = buildDraftSelectMenu(sortedFree, String(draft._id));
+
+    await interaction.reply({ embeds: [infoEmbed] });
+    await interaction.followUp({
+      content: `**Round 1 — Pick 1/${teams.length}** : au tour de **${firstTeam.emoji} ${firstTeam.name}** de choisir !`,
+      components: [selectRow],
+    });
+    return;
   }
 
   // ── /concept ──────────────────────────────────────────────
