@@ -10,6 +10,7 @@ const { Client, GatewayIntentBits, EmbedBuilder,
 const mongoose = require('mongoose');
 const cron     = require('node-cron');
 const http     = require('http');   // keep-alive ping
+const https    = require('https');  // keep-alive ping (APP_URL https)
 
 // ─── ENV (.env) ──────────────────────────────────────────────
 // DISCORD_TOKEN=...
@@ -17,7 +18,8 @@ const http     = require('http');   // keep-alive ping
 // GUILD_ID=...
 // MONGODB_URI=mongodb://localhost:27017/f1bot
 // RACE_CHANNEL_ID=...
-// PORT=3000   (optionnel, pour le keep-alive)
+// PORT=3000
+// APP_URL=https://ton-app.onrender.com   <- URL publique (OBLIGATOIRE sur Render/Railway)
 // ─────────────────────────────────────────────────────────────
 
 const TOKEN        = process.env.DISCORD_TOKEN;
@@ -26,6 +28,10 @@ const GUILD_ID     = process.env.GUILD_ID;
 const MONGO_URI    = process.env.MONGODB_URI || 'mongodb://localhost:27017/f1bot';
 const RACE_CHANNEL = process.env.RACE_CHANNEL_ID;
 const PORT         = process.env.PORT || 3000;
+// Ping URL : utilise l'URL publique si disponible (localhost echoue sur Render/Railway)
+const PING_URL     = process.env.APP_URL
+  ? `${process.env.APP_URL}/ping`
+  : `http://localhost:${PORT}/ping`;
 
 // ============================================================
 // ██╗  ██╗███████╗███████╗██████╗      █████╗ ██╗     ██╗██╗   ██╗███████╗
@@ -38,17 +44,32 @@ const PORT         = process.env.PORT || 3000;
 // ============================================================
 
 const server = http.createServer((req, res) => {
-  res.writeHead(200);
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('F1 Bot is alive 🏎️');
 });
-server.listen(PORT, () => console.log(`✅ Keep-alive server sur port ${PORT}`));
+server.listen(PORT, () => console.log(`✅ Keep-alive server sur port ${PORT} — ping : ${PING_URL}`));
 
-// Auto-ping toutes les 15 minutes pour éviter la mise en veille (ex: Render/Railway)
-cron.schedule('*/15 * * * *', () => {
-  http.get(`http://localhost:${PORT}/ping`, (res) => {
-    console.log(`🔔 Keep-alive ping — ${new Date().toLocaleTimeString()}`);
-  }).on('error', () => {});
-});
+// ── Self-ping toutes les 8 min ────────────────────────────────
+// ⚠️  Render/Railway endorment après ~10 min sans requête.
+//     15 min était trop lent — 8 min laisse une marge de sécurité.
+//     Ajoute APP_URL dans ton .env si localhost ne suffit pas.
+function selfPing() {
+  const url  = new URL(PING_URL);
+  const mod  = url.protocol === 'https:' ? require('https') : http;
+  const req  = mod.get(PING_URL, (res) => {
+    console.log(`🔔 Keep-alive ping OK [${res.statusCode}] — ${new Date().toLocaleTimeString()}`);
+    res.resume(); // vider la réponse pour éviter memory leak
+  });
+  req.on('error', (err) => {
+    console.warn(`⚠️  Keep-alive ping FAILED : ${err.message} — URL : ${PING_URL}`);
+  });
+  req.setTimeout(8000, () => {
+    console.warn(`⚠️  Keep-alive ping TIMEOUT — ${PING_URL}`);
+    req.destroy();
+  });
+}
+
+cron.schedule('*/8 * * * *', selfPing, { timezone: 'Europe/Paris' });
 
 // ============================================================
 // ███████╗ ██████╗██╗  ██╗███████╗███╗   ███╗ █████╗ ███████╗
@@ -932,6 +953,9 @@ const commands = [
   new SlashCommandBuilder().setName('historique')
     .setDescription('Historique de carrière multi-saisons d\'un pilote')
     .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)')),
+
+  new SlashCommandBuilder().setName('concept')
+    .setDescription('Présentation complète du jeu F1 PL — pour les nouveaux !'),
 ];
 
 // ============================================================
@@ -1464,6 +1488,133 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [embed] });
   }
 
+  // ── /concept ──────────────────────────────────────────────
+  if (commandName === 'concept') {
+    const embed1 = new EmbedBuilder()
+      .setTitle('\u{1F3CE}\uFE0F  Bienvenue dans F1 PL \u2014 Le championnat entre potes !')
+      .setColor('#FF1801')
+      .setDescription(
+        'Chaque joueur incarne un **pilote de F1** dans un championnat simul\u00e9 automatiquement.\n' +
+        'Les courses tournent toutes seules, mais **tes choix de d\u00e9veloppement et de contrat font toute la diff\u00e9rence**.\n\n' +
+        '**Pas besoin d\u2019\u00eatre l\u00e0 \u00e0 chaque course** \u2014 le bot s\u2019en charge. Tu suis les r\u00e9sultats ici et tu g\u00e8res ta carri\u00e8re entre les courses.\n\u200B'
+      )
+      .addFields(
+        {
+          name: '\u{1F5D3}\uFE0F  Un week-end de course = 3 \u00e9v\u00e9nements automatiques',
+          value:
+            '`11h00` \u{1F527} **Essais Libres** \u2014 classement indicatif, d\u00e9couverte du circuit\n' +
+            '`15h00` \u23F1\uFE0F **Qualifications** \u2014 d\u00e9termine ta place sur la grille de d\u00e9part\n' +
+            '`18h00` \u{1F3C1} **Course** \u2014 simulation tour par tour avec incidents, SC, pneus...',
+          inline: false,
+        },
+        {
+          name: '\u{1F4C5}  Calendrier',
+          value:
+            '**24 GP** dans la saison \u2014 Bahr\u00e9\u00efn, Monaco, Monza, Silverstone... Les vrais circuits F1.\n' +
+            'Chaque circuit a un **style** qui valorise certaines stats :\n' +
+            '\u{1F3D9}\uFE0F Urbain \u00b7 \u{1F4A8} Rapide \u00b7 \u2699\uFE0F Technique \u00b7 \u{1F500} Mixte \u00b7 \u{1F50B} Endurance',
+          inline: false,
+        },
+      );
+
+    const embed2 = new EmbedBuilder()
+      .setTitle('\u{1F9EC}  Ton pilote \u2014 Stats & Progression')
+      .setColor('#FFD700')
+      .setDescription('Tu personnalises ton pilote avec **7 stats** (0\u201399), am\u00e9liorables avec les PLcoins gagn\u00e9s en course.')
+      .addFields(
+        {
+          name: '\u{1F3AF}  Les 7 stats pilote',
+          value:
+            '`D\u00e9passement`  \u2192 Attaque en piste, DRS, undercut agressif\n' +
+            '`Freinage`     \u2192 Performance en Q et en zones de freinage\n' +
+            '`D\u00e9fense`      \u2192 R\u00e9sistance aux tentatives de d\u00e9passement\n' +
+            '`Adaptabilit\u00e9` \u2192 M\u00e9t\u00e9o changeante, Safety Car, conditions\n' +
+            '`R\u00e9actions`    \u2192 D\u00e9part, opportunisme, gestion des incidents\n' +
+            '`Contr\u00f4le`     \u2192 Consistance, gestion des limites de piste\n' +
+            '`Gestion Pneus`\u2192 Pr\u00e9servation, fen\u00eatre de fonctionnement',
+          inline: false,
+        },
+        {
+          name: '\u{1F4B0}  PLcoins \u2014 La monnaie du jeu',
+          value:
+            'Tu gagnes des **PLcoins** \u00e0 chaque course (points + salaire contrat + primes).\n' +
+            'Tu les d\u00e9penses pour **am\u00e9liorer tes stats** (+2 garanti \u00e0 chaque fois).\n' +
+            'Objectif\u00a0: construire le pilote parfait pour ton style de jeu.',
+          inline: false,
+        },
+      );
+
+    const embed3 = new EmbedBuilder()
+      .setTitle('\u{1F697}  Les \u00c9curies \u2014 Contrats & Transferts')
+      .setColor('#0099FF')
+      .setDescription('**10 \u00e9curies** du bas de grille au top, chacune avec des **stats voiture** qui \u00e9voluent en cours de saison.')
+      .addFields(
+        {
+          name: '\u{1F527}  Stats voiture (\u00e9voluent chaque course)',
+          value:
+            '`Vitesse Max` \u00b7 `DRS` \u00b7 `Refroidissement`\n`Dirty Air` \u00b7 `Conservation Pneus` \u00b7 `Vitesse Moyenne`\n' +
+            '\u2192 Les \u00e9curies qui marquent des points **d\u00e9veloppent plus vite**. La hi\u00e9rarchie bouge\u00a0!',
+          inline: false,
+        },
+        {
+          name: '\u{1F4CB}  Contrats',
+          value:
+            'Chaque contrat a\u00a0: **multiplicateur PLcoins \u00d7 \u00b7 salaire de base \u00b7 prime victoire \u00b7 prime podium \u00b7 dur\u00e9e**.\n' +
+            'Un contrat est **irr\u00e9vocable** jusqu\u2019\u00e0 son terme \u2014 choisis bien\u00a0!\n' +
+            '\u00c0 la fin de saison \u2192 **p\u00e9riode de transfert** \u2192 nouvelles offres des \u00e9curies.',
+          inline: false,
+        },
+        {
+          name: '\u{1F504}  P\u00e9riode de transfert',
+          value:
+            'Entre deux saisons, les \u00e9curies font des offres automatiques aux pilotes libres.\n' +
+            'Utilise `/offres` pour les voir et les accepter **directement avec les boutons**.',
+          inline: false,
+        },
+      );
+
+    const embed4 = new EmbedBuilder()
+      .setTitle('\u{1F680}  Comment d\u00e9marrer\u00a0?')
+      .setColor('#00FF88')
+      .addFields(
+        {
+          name: '1\uFE0F\u20E3  Cr\u00e9e ton pilote',
+          value: '`/create_pilot nom:TonNom`\nTes stats de d\u00e9part sont al\u00e9atoires entre 44 et 62.',
+          inline: false,
+        },
+        {
+          name: '2\uFE0F\u20E3  Attends la p\u00e9riode de transfert',
+          value: 'Les \u00e9curies t\u2019enverront des offres. Utilise `/offres` pour les accepter avec les boutons.',
+          inline: false,
+        },
+        {
+          name: '3\uFE0F\u20E3  Suis tes courses',
+          value: 'Les r\u00e9sultats tombent ici automatiquement. `/profil` \u00b7 `/classement` \u00b7 `/calendrier`',
+          inline: false,
+        },
+        {
+          name: '4\uFE0F\u20E3  Investis tes PLcoins',
+          value: '`/ameliorer` pour booster une stat (+2 garanti \u00e0 chaque fois).',
+          inline: false,
+        },
+        {
+          name: '\u{1F4D6}  Commandes utiles',
+          value:
+            '`/profil` \u2014 Tes stats & classement saison\n' +
+            '`/historique` \u2014 Ta carri\u00e8re compl\u00e8te\n' +
+            '`/ecurie` \u2014 Stats d\u2019une \u00e9curie\n' +
+            '`/classement` \u2014 Championnat pilotes\n' +
+            '`/classement_constructeurs` \u2014 Championnat \u00e9curies\n' +
+            '`/calendrier` \u2014 Prochains GP\n' +
+            '`/resultats` \u2014 Derni\u00e8re course',
+          inline: false,
+        },
+      )
+      .setFooter({ text: 'Bonne saison \u00e0 tous \u{1F3CE}\uFE0F\u{1F4A8}' });
+
+    return interaction.reply({ embeds: [embed1, embed2, embed3, embed4] });
+  }
+
   // ── /admin_new_season ─────────────────────────────────────
   if (commandName === 'admin_new_season') {
     await interaction.deferReply();
@@ -1698,6 +1849,7 @@ npm install discord.js mongoose node-cron dotenv
   MONGODB_URI=mongodb://localhost:27017/f1bot
   RACE_CHANNEL_ID=...
   PORT=3000
+  APP_URL=https://ton-app.onrender.com   ← IMPORTANT pour le keep-alive sur Render/Railway
 
 node index.js
 
