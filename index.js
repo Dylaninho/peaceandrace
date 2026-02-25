@@ -500,17 +500,42 @@ function choosePitCompound(currentCompound, lapsRemaining, usedCompounds) {
 }
 
 // ─── Safety Car / VSC ─────────────────────────────────────
-function checkSafetyCar(scState, dnfCount) {
+// Ne se déclenche QUE sur un incident dangereux (CRASH ou PUNCTURE sur piste)
+// lapIncidents = tableau des incidents du tour courant { type: 'CRASH'|'PUNCTURE'|'MECHANICAL', onTrack: bool }
+function resolveSafetyCar(scState, lapIncidents) {
+  // Si SC/VSC déjà actif : décrémenter
   if (scState.state !== 'NONE') {
     const newLeft = scState.lapsLeft - 1;
     if (newLeft <= 0) return { state: 'NONE', lapsLeft: 0 };
     return { ...scState, lapsLeft: newLeft };
   }
-  const base = 0.03 + dnfCount * 0.01;
+
+  // Un SC/VSC ne peut se déclencher que si un accident/crevaison bloque la piste
+  // (MECHANICAL = voiture qui se range, pas de danger immédiat → pas de SC)
+  const dangerousOnTrack = lapIncidents.filter(i => i.type === 'CRASH' || i.type === 'PUNCTURE');
+  if (!dangerousOnTrack.length) return { state: 'NONE', lapsLeft: 0 };
+
+  // Plus il y a de voitures accidentées sur la piste, plus le SC est probable
+  const nDangerous = dangerousOnTrack.length;
   const roll = Math.random();
-  if (roll < base * 0.4) return { state: 'SC',  lapsLeft: randInt(2,4) };
-  if (roll < base)       return { state: 'VSC', lapsLeft: randInt(1,3) };
-  return { state: 'NONE', lapsLeft: 0 };
+
+  // Crash → SC (70%) ou VSC (30%)
+  // Crevaison solo → VSC (60%) ou rien (40%)
+  const hasCrash = dangerousOnTrack.some(i => i.type === 'CRASH');
+  if (hasCrash) {
+    if (nDangerous >= 2) {
+      // Double incident ou collision → SC quasi-certain
+      if (roll < 0.85) return { state: 'SC',  lapsLeft: randInt(3, 5) };
+      return { state: 'VSC', lapsLeft: randInt(2, 3) };
+    }
+    if (roll < 0.55) return { state: 'SC',  lapsLeft: randInt(2, 4) };
+    if (roll < 0.80) return { state: 'VSC', lapsLeft: randInt(1, 3) };
+    return { state: 'NONE', lapsLeft: 0 }; // crash solo qui se range sans bloquer
+  } else {
+    // Crevaison uniquement
+    if (roll < 0.35) return { state: 'VSC', lapsLeft: randInt(1, 2) };
+    return { state: 'NONE', lapsLeft: 0 };
+  }
 }
 
 // ─── Incidents ────────────────────────────────────────────
@@ -782,6 +807,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
     const events    = []; // { priority, text }
     const lapDnfs   = []; // DNFs survenus CE tour — pour expliquer le SC
+    const lapIncidents = []; // incidents ce tour pour SC logic
+
+    // ── Snapshot des temps AVANT calcul du tour ──────────────
+    // Clé = String(pilot._id), valeur = totalTime avant ce tour
+    const preLapTimes = new Map(alive.map(d => [String(d.pilot._id), d.totalTime]));
 
     // ── Tour 1 : bagarre au départ ──────────────────────────
     if (lap === 1) {
@@ -852,12 +882,14 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           driver.dnfLap    = lap;
           driver.dnfReason = 'CRASH';
           lapDnfs.push({ driver, reason: 'CRASH' });
+          lapIncidents.push({ type: 'CRASH' });
 
           if (victimDnf) {
             nearest.dnf       = true;
             nearest.dnfLap    = lap;
             nearest.dnfReason = 'CRASH';
             lapDnfs.push({ driver: nearest, reason: 'CRASH' });
+            lapIncidents.push({ type: 'CRASH' });
             incidentText = collisionDescription(driver, nearest, lap, true, true, 0);
           } else {
             nearest.totalTime += damage;
@@ -869,6 +901,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           driver.dnfLap    = lap;
           driver.dnfReason = 'CRASH';
           lapDnfs.push({ driver, reason: 'CRASH' });
+          lapIncidents.push({ type: 'CRASH' });
           incidentText = crashSoloDescription(driver, lap, gpStyle);
         }
 
@@ -877,6 +910,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         driver.dnfLap    = lap;
         driver.dnfReason = 'MECHANICAL';
         lapDnfs.push({ driver, reason: 'MECHANICAL' });
+        lapIncidents.push({ type: 'MECHANICAL' }); // pas de SC pour mécanique
         const mechFlavors = [
           `🔩 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) se range sur le bas-côté, fumée blanche qui s'échappe du moteur. L'équipe le rappelle au garage. ❌ **DNF mécanique.**`,
           `💨 **T${lap}** — Le moteur de ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) rend l'âme dans une ligne droite. La voiture ralentit, ralentit... et s'arrête. ❌ **DNF.**`,
@@ -891,6 +925,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         driver.dnfLap    = lap;
         driver.dnfReason = 'PUNCTURE';
         lapDnfs.push({ driver, reason: 'PUNCTURE' });
+        lapIncidents.push({ type: 'PUNCTURE' });
         const puncFlavors = [
           `🫧 **T${lap}** — CREVAISON ! ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) perd un pneu à haute vitesse — la voiture devient inconduisible. Il rentre en se traînant sur la jante. ❌ **DNF.**`,
           `🫧 **T${lap}** — Pneu avant gauche qui explose pour ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) ! La voiture part en travers, il tient le choc mais ne peut pas continuer. ❌ **DNF.**`,
@@ -904,7 +939,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
     // ── Safety Car (APRÈS les incidents — on peut citer la cause) ──
     const prevScState = scState.state;
-    scState = checkSafetyCar(scState, drivers.filter(d => d.dnf).length);
+    scState = resolveSafetyCar(scState, lapIncidents);
     const scActive = scState.state !== 'NONE';
 
     if (scState.state !== 'NONE' && prevScState === 'NONE') {
@@ -999,36 +1034,48 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
 
     // ── Dépassements ─────────────────────────────────────────
+    // Un dépassement en piste ne peut se produire que si les deux pilotes
+    // étaient PROCHES avant ce tour (gap pré-tour < 4s). Sinon c'est un
+    // artefact de simulation (pit mal classifié, écart trop grand).
     for (const driver of ranked) {
-      if (driver.pos < driver.lastPos && !driver.pittedThisLap && !scActive && lap > 1) {
-        // Qui a été dépassé ?
-        const passed = ranked.find(d =>
-          d.pos === driver.lastPos &&
-          !d.pittedThisLap &&
-          String(d.pilot._id) !== String(driver.pilot._id)
-        );
-        if (!passed) continue;
+      if (driver.pos >= driver.lastPos) continue;          // pas progressé
+      if (driver.pittedThisLap) continue;                  // position due au pit
+      if (scActive) continue;                              // pas pendant SC
+      if (lap <= 1) continue;
 
-        // Gap par rapport au pilote maintenant devant (ex-défenseur désormais derrière)
-        const gapMs    = driver.totalTime - passed.totalTime; // négatif = driver devant
-        const gapOnPassed = Math.abs(gapMs);
-        const gapStr   = gapOnPassed < 1000
-          ? `${gapOnPassed}ms sur ${passed.pilot.name}`
-          : `+${(gapOnPassed/1000).toFixed(3)}s sur ${passed.pilot.name}`;
+      // Trouver le pilote "passé" : celui qui occupait driver.lastPos
+      // et qui n'a pas lui-même pité
+      const passed = ranked.find(d =>
+        d.pos === driver.lastPos &&
+        !d.pittedThisLap &&
+        String(d.pilot._id) !== String(driver.pilot._id)
+      );
+      if (!passed) continue;
 
-        // Gap par rapport au leader si pas en tête
-        const gapOnLeader = driver.pos > 1
-          ? ` · ${(( driver.totalTime - ranked[0].totalTime)/1000).toFixed(3)}s du leader`
-          : '';
+      // Vérifier que le gap PRÉ-tour entre les deux était réaliste
+      // pour un vrai dépassement en piste (max ~4 secondes)
+      const preLapDriver = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
+      const preLapPassed = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
+      const preLapGapMs  = Math.abs(preLapPassed - preLapDriver);
+      if (preLapGapMs > 4000) continue; // trop loin l'un de l'autre — pas un vrai dépassement
 
-        const drsTag = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
-        const howDesc = overtakeDescription(driver, passed, gpStyle);
+      // Gap APRÈS le tour (écart résultant)
+      const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
+      const gapStr    = postGapMs < 1000
+        ? `${postGapMs}ms sur ${passed.pilot.name}`
+        : `+${(postGapMs / 1000).toFixed(3)}s sur ${passed.pilot.name}`;
 
-        events.push({
-          priority: 6,
-          text: `⚔️ **T${lap} — DÉPASSEMENT !** P${driver.lastPos} → **P${driver.pos}**${drsTag}\n  › ${howDesc}\n  › Écart : **${gapStr}**${gapOnLeader}`,
-        });
-      }
+      const gapOnLeader = driver.pos > 1
+        ? ` · ${((driver.totalTime - ranked[0].totalTime) / 1000).toFixed(3)}s du leader`
+        : '';
+
+      const drsTag  = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
+      const howDesc = overtakeDescription(driver, passed, gpStyle);
+
+      events.push({
+        priority: 6,
+        text: `⚔️ **T${lap} — DÉPASSEMENT !** P${driver.lastPos} → **P${driver.pos}**${drsTag}\n  › ${howDesc}\n  › Écart : **${gapStr}**${gapOnLeader}`,
+      });
     }
 
     // ── Atmosphère play-by-play (tous les 3 tours si pas d'events) ──
@@ -1135,6 +1182,35 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   await sendEmbed(podiumEmbed);
 
   return results;
+}
+
+// ─── Fixtures de test (pilotes/équipes fictifs réutilisés par admin_test_*) ──
+function buildTestFixtures() {
+  const ObjectId = require('mongoose').Types.ObjectId;
+  const testTeamDefs = [
+    { name:'Red Horizon TEST',  emoji:'🔵', color:'#1E3A5F', budget:160, vitesseMax:95, drs:95, refroidissement:90, dirtyAir:88, conservationPneus:88, vitesseMoyenne:93, devPoints:0 },
+    { name:'Scuderia TEST',     emoji:'🔴', color:'#DC143C', budget:150, vitesseMax:92, drs:90, refroidissement:88, dirtyAir:85, conservationPneus:85, vitesseMoyenne:90, devPoints:0 },
+    { name:'Silver Arrow TEST', emoji:'⚪', color:'#C0C0C0', budget:145, vitesseMax:90, drs:88, refroidissement:92, dirtyAir:82, conservationPneus:87, vitesseMoyenne:88, devPoints:0 },
+    { name:'McLaren TEST',      emoji:'🟠', color:'#FF7722', budget:130, vitesseMax:85, drs:84, refroidissement:82, dirtyAir:80, conservationPneus:83, vitesseMoyenne:85, devPoints:0 },
+    { name:'Alpine TEST',       emoji:'💙', color:'#0066CC', budget:110, vitesseMax:75, drs:76, refroidissement:78, dirtyAir:75, conservationPneus:76, vitesseMoyenne:76, devPoints:0 },
+  ];
+  const testNames = ['Verstappen PL','Hamilton PL','Leclerc PL','Norris PL','Sainz PL','Russell PL','Alonso PL','Perez PL','Piastri PL','Albon PL'];
+  const testTeams  = testTeamDefs.map(t => ({ ...t, _id: new ObjectId() }));
+  const testPilots = testNames.map((name, i) => ({
+    _id: new ObjectId(), name, discordId: 'bot',
+    teamId: testTeams[Math.floor(i / 2)]._id,
+    depassement: randInt(52, 92), freinage: randInt(52, 92),
+    defense: randInt(48, 88),     adaptabilite: randInt(48, 88),
+    reactions: randInt(50, 90),   controle: randInt(52, 92),
+    gestionPneus: randInt(48, 88), plcoins: 0, totalEarned: 0,
+  }));
+  const testRace = {
+    _id: new ObjectId(), circuit: 'Circuit Test PL', emoji: '🧪',
+    laps: 30,
+    gpStyle: pick(['mixte','rapide','technique','urbain','endurance']),
+    status: 'upcoming',
+  };
+  return { testTeams, testPilots, testRace };
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -1418,6 +1494,12 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_test_race')
     .setDescription('[ADMIN] Simule une course fictive avec pilotes fictifs — test visuel'),
+
+  new SlashCommandBuilder().setName('admin_test_practice')
+    .setDescription('[ADMIN] Simule des essais libres fictifs — test narration'),
+
+  new SlashCommandBuilder().setName('admin_test_quali')
+    .setDescription('[ADMIN] Simule des qualifications fictives — test narration'),
 
   new SlashCommandBuilder().setName('admin_help')
     .setDescription('[ADMIN] Liste toutes les commandes administrateur'),
@@ -2177,31 +2259,23 @@ async function handleInteraction(interaction) {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: 'Commande réservée aux admins.', ephemeral: true });
 
-    const ObjectId = require('mongoose').Types.ObjectId;
-    const testTeamDefs = [
-      { name:'Red Horizon TEST',  emoji:'🔵', color:'#1E3A5F', budget:160, vitesseMax:95, drs:95, refroidissement:90, dirtyAir:88, conservationPneus:88, vitesseMoyenne:93, devPoints:0 },
-      { name:'Scuderia TEST',     emoji:'🔴', color:'#DC143C', budget:150, vitesseMax:92, drs:90, refroidissement:88, dirtyAir:85, conservationPneus:85, vitesseMoyenne:90, devPoints:0 },
-      { name:'Silver Arrow TEST', emoji:'⚪', color:'#C0C0C0', budget:145, vitesseMax:90, drs:88, refroidissement:92, dirtyAir:82, conservationPneus:87, vitesseMoyenne:88, devPoints:0 },
-      { name:'McLaren TEST',      emoji:'🟠', color:'#FF7722', budget:130, vitesseMax:85, drs:84, refroidissement:82, dirtyAir:80, conservationPneus:83, vitesseMoyenne:85, devPoints:0 },
-      { name:'Alpine TEST',       emoji:'💙', color:'#0066CC', budget:110, vitesseMax:75, drs:76, refroidissement:78, dirtyAir:75, conservationPneus:76, vitesseMoyenne:76, devPoints:0 },
-    ];
-    const testNames  = ['Verstappen PL','Hamilton PL','Leclerc PL','Norris PL','Sainz PL','Russell PL','Alonso PL','Perez PL','Piastri PL','Albon PL'];
-    const testTeams  = testTeamDefs.map(t => ({ ...t, _id: new ObjectId() }));
-    const testPilots = testNames.map((name,i) => ({ _id:new ObjectId(), name, discordId:'bot', teamId:testTeams[Math.floor(i/2)]._id, depassement:randInt(52,92), freinage:randInt(52,92), defense:randInt(48,88), adaptabilite:randInt(48,88), reactions:randInt(50,90), controle:randInt(52,92), gestionPneus:randInt(48,88), plcoins:0, totalEarned:0 }));
-    const testRace   = { _id:new ObjectId(), circuit:'Circuit Test PL', emoji:'🧪', laps:30, gpStyle:pick(['mixte','rapide','technique','urbain','endurance']), status:'upcoming' };
-    const testQt     = testPilots.map(p => { const t=testTeams.find(t=>String(t._id)===String(p.teamId)); return { pilotId:p._id, time:calcQualiTime(p,t,'DRY',testRace.gpStyle) }; }).sort((a,b)=>a.time-b.time);
+    const { testTeams, testPilots, testRace } = buildTestFixtures();
+    const testQt = testPilots.map(p => {
+      const t = testTeams.find(t => String(t._id) === String(p.teamId));
+      return { pilotId: p._id, time: calcQualiTime(p, t, 'DRY', testRace.gpStyle) };
+    }).sort((a,b) => a.time - b.time);
 
-    // Répondre IMMÉDIATEMENT — la simulation tourne en background
     await interaction.reply({ content: `🧪 **Course de test** — style **${testRace.gpStyle.toUpperCase()}** · ${testRace.laps} tours — résultats en cours dans ce channel !`, ephemeral: true });
 
-    // Background — pas d'await sur l'interaction
     ;(async () => {
       const testResults = await simulateRace(testRace, testQt, testPilots, testTeams, [], interaction.channel);
       const testEmbed = new EmbedBuilder().setTitle('🧪 [TEST] Résultats finaux — Circuit Test PL').setColor('#888888');
       let testDesc = '';
       for (const r of testResults.slice(0,15)) {
-        const p=testPilots.find(x=>String(x._id)===String(r.pilotId)); const t=testTeams.find(x=>String(x._id)===String(r.teamId));
-        const testOv=overallRating(p); const pts=F1_POINTS[r.pos-1]||0; const testRank=['🥇','🥈','🥉'][r.pos-1]||('P'+r.pos);
+        const p = testPilots.find(x => String(x._id) === String(r.pilotId));
+        const t = testTeams.find(x => String(x._id) === String(r.teamId));
+        const testOv = overallRating(p); const pts = F1_POINTS[r.pos-1]||0;
+        const testRank = ['🥇','🥈','🥉'][r.pos-1] || ('P'+r.pos);
         testDesc += testRank+' '+(t?.emoji||'')+' **'+(p?.name||'?')+'** *('+testOv+')* ';
         if (r.dnf) testDesc += '❌ DNF'; else testDesc += '— '+pts+' pts';
         if (r.fastestLap) testDesc += ' ⚡'; testDesc += '\n';
@@ -2209,6 +2283,112 @@ async function handleInteraction(interaction) {
       testEmbed.setDescription(testDesc+'\n*⚠️ Aucune donnée sauvegardée — test uniquement*');
       await interaction.channel.send({ embeds: [testEmbed] });
     })().catch(e => console.error('admin_test_race error:', e.message));
+    return;
+  }
+
+  // -- /admin_test_practice --
+  if (commandName === 'admin_test_practice') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const { testTeams, testPilots, testRace } = buildTestFixtures();
+    await interaction.reply({ content: `🔧 **Essais libres de test** — style **${testRace.gpStyle.toUpperCase()}** · résultats en cours...`, ephemeral: true });
+
+    ;(async () => {
+      const channel = interaction.channel;
+      const { results, weather } = await simulatePractice(testRace, testPilots, testTeams);
+      const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+
+      // Narration EL enrichie
+      await channel.send(
+        `🔧 **ESSAIS LIBRES — ${testRace.emoji} ${testRace.circuit}** *(TEST)*\n` +
+        `${styleEmojis[testRace.gpStyle]} **${testRace.gpStyle.toUpperCase()}** · Météo : **${weather}**\n` +
+        `Les pilotes prennent leurs marques sur le circuit. Chaque équipe cherche son réglage...`
+      );
+      await sleep(2000);
+
+      // Commentaire en cours de session
+      const mid   = Math.floor(results.length / 2);
+      const early = results.slice(0, 3);
+      await channel.send(
+        `📻 *Mi-session :* ${early[0].team.emoji}**${early[0].pilot.name}** signe le meilleur temps provisoire en ${msToLapStr(early[0].time)}.` +
+        (early[1] ? ` ${early[1].team.emoji}**${early[1].pilot.name}** est à **+${((early[1].time - early[0].time)/1000).toFixed(3)}s**.` : '')
+      );
+      await sleep(2000);
+
+      // Embed final EL
+      const embed = new EmbedBuilder()
+        .setTitle(`🔧 Résultats Essais Libres — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
+        .setColor('#888888')
+        .setDescription(
+          `Météo : **${weather}** | Style : **${testRace.gpStyle.toUpperCase()}** ${styleEmojis[testRace.gpStyle]}\n\n` +
+          results.map((r, i) => {
+            const gap = i === 0 ? '⏱ **RÉFÉRENCE**' : `+${((r.time - results[0].time)/1000).toFixed(3)}s`;
+            const ov  = overallRating(r.pilot);
+            return `\`P${String(i+1).padStart(2,' ')}\` ${r.team.emoji} **${r.pilot.name}** *(${ov})* — ${msToLapStr(r.time)} — ${gap}`;
+          }).join('\n') +
+          '\n\n*⚠️ Session fictive — aucune donnée sauvegardée*'
+        );
+      await channel.send({ embeds: [embed] });
+    })().catch(e => console.error('admin_test_practice error:', e.message));
+    return;
+  }
+
+  // -- /admin_test_quali --
+  if (commandName === 'admin_test_quali') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const { testTeams, testPilots, testRace } = buildTestFixtures();
+    await interaction.reply({ content: `⏱️ **Qualifications de test** — style **${testRace.gpStyle.toUpperCase()}** · résultats en cours...`, ephemeral: true });
+
+    ;(async () => {
+      const channel = interaction.channel;
+      const { grid, weather } = await simulateQualifying(testRace, testPilots, testTeams);
+      const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+
+      // Intro Q
+      await channel.send(
+        `⏱️ **QUALIFICATIONS — ${testRace.emoji} ${testRace.circuit}** *(TEST)*\n` +
+        `${styleEmojis[testRace.gpStyle]} **${testRace.gpStyle.toUpperCase()}** · Météo : **${weather}**\n` +
+        `Les pilotes s'élancent pour le tour lancé. Un seul tour, tout donner...`
+      );
+      await sleep(2000);
+
+      // Suspense : annonce les temps progressivement
+      const sorted = [...grid];
+      const mid    = Math.floor(sorted.length / 2);
+
+      // Premier secteur — quelques temps intermédiaires
+      const early3 = sorted.slice(0, 3);
+      await channel.send(
+        `📻 *Q en cours...* ${early3.map((g,i) => `P${i+1} ${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time)}`).join(' · ')}`
+      );
+      await sleep(2500);
+
+      // Embed final grille quali
+      const embed = new EmbedBuilder()
+        .setTitle(`⏱️ Classement Qualifications — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
+        .setColor('#FFD700')
+        .setDescription(
+          `Météo : **${weather}** · **${testRace.gpStyle.toUpperCase()}** ${styleEmojis[testRace.gpStyle]}\n\n` +
+          grid.map((g, i) => {
+            const gap     = i === 0 ? '🏆 **POLE POSITION**' : `+${((g.time - grid[0].time)/1000).toFixed(3)}s`;
+            const medal   = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`P${String(i+1).padStart(2,' ')}\``;
+            return `${medal} ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
+          }).join('\n') +
+          '\n\n*⚠️ Session fictive — aucune donnée sauvegardée*'
+        );
+      await channel.send({ embeds: [embed] });
+
+      // Commentaire pole
+      const poleman = grid[0];
+      const gap2nd  = ((grid[1]?.time - grid[0].time) / 1000).toFixed(3);
+      await channel.send(
+        `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** en **${msToLapStr(poleman.time)}** !` +
+        (grid[1] ? ` **+${gap2nd}s** d'avance sur ${grid[1].teamEmoji}**${grid[1].pilotName}**. Belle performance !` : '')
+      );
+    })().catch(e => console.error('admin_test_quali error:', e.message));
     return;
   }
 
