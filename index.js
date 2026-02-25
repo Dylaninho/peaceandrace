@@ -1331,6 +1331,22 @@ const STAT_COST = {
 };
 
 client.on('interactionCreate', async (interaction) => {
+  try {
+    await handleInteraction(interaction);
+  } catch (err) {
+    console.error('❌ interactionCreate error:', err.message);
+    // Interaction expirée (10062) ou autre erreur Discord — on ne re-crash pas
+    if (err.code === 10062) return; // Unknown interaction — token expiré, rien à faire
+    // Tenter de répondre à l'utilisateur si possible
+    const reply = { content: '❌ Une erreur interne est survenue.', ephemeral: true };
+    try {
+      if (!interaction.replied && !interaction.deferred) await interaction.reply(reply);
+      else if (interaction.deferred) await interaction.editReply(reply);
+    } catch(_) {} // Si même ça échoue, on laisse tomber silencieusement
+  }
+});
+
+async function handleInteraction(interaction) {
   // ── Handler boutons (offres de transfert) ─────────────────
   // ── Handler select menu (draft) ──────────────────────────
   if (interaction.isStringSelectMenu()) {
@@ -2015,7 +2031,7 @@ client.on('interactionCreate', async (interaction) => {
   if (commandName === 'admin_test_race') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: 'Commande réservée aux admins.', ephemeral: true });
-    await interaction.deferReply();
+
     const ObjectId = require('mongoose').Types.ObjectId;
     const testTeamDefs = [
       { name:'Red Horizon TEST',  emoji:'🔵', color:'#1E3A5F', budget:160, vitesseMax:95, drs:95, refroidissement:90, dirtyAir:88, conservationPneus:88, vitesseMoyenne:93, devPoints:0 },
@@ -2024,25 +2040,31 @@ client.on('interactionCreate', async (interaction) => {
       { name:'McLaren TEST',      emoji:'🟠', color:'#FF7722', budget:130, vitesseMax:85, drs:84, refroidissement:82, dirtyAir:80, conservationPneus:83, vitesseMoyenne:85, devPoints:0 },
       { name:'Alpine TEST',       emoji:'💙', color:'#0066CC', budget:110, vitesseMax:75, drs:76, refroidissement:78, dirtyAir:75, conservationPneus:76, vitesseMoyenne:76, devPoints:0 },
     ];
-    const testNames = ['Verstappen PL','Hamilton PL','Leclerc PL','Norris PL','Sainz PL','Russell PL','Alonso PL','Perez PL','Piastri PL','Albon PL'];
+    const testNames  = ['Verstappen PL','Hamilton PL','Leclerc PL','Norris PL','Sainz PL','Russell PL','Alonso PL','Perez PL','Piastri PL','Albon PL'];
     const testTeams  = testTeamDefs.map(t => ({ ...t, _id: new ObjectId() }));
     const testPilots = testNames.map((name,i) => ({ _id:new ObjectId(), name, discordId:'bot', teamId:testTeams[Math.floor(i/2)]._id, depassement:randInt(52,92), freinage:randInt(52,92), defense:randInt(48,88), adaptabilite:randInt(48,88), reactions:randInt(50,90), controle:randInt(52,92), gestionPneus:randInt(48,88), plcoins:0, totalEarned:0 }));
-    const testRace = { _id:new ObjectId(), circuit:'Circuit Test PL', emoji:'🧪', laps:30, gpStyle:pick(['mixte','rapide','technique','urbain','endurance']), status:'upcoming' };
-    const testQt = testPilots.map(p => { const t=testTeams.find(t=>String(t._id)===String(p.teamId)); return { pilotId:p._id, time:calcQualiTime(p,t,'DRY',testRace.gpStyle) }; }).sort((a,b)=>a.time-b.time);
-    await interaction.editReply('🧪 **Course de test** — style **'+testRace.gpStyle.toUpperCase()+'** · '+testRace.laps+' tours — résultats en cours...');
-    const testResults = await simulateRace(testRace, testQt, testPilots, testTeams, [], interaction.channel);
-    const testEmbed = new EmbedBuilder().setTitle('🧪 [TEST] Résultats — Circuit Test PL').setColor('#888888');
-    const testMedals = ['🥇','🥈','🥉'];
-    let testDesc = '';
-    for (const r of testResults.slice(0,15)) {
-      const p=testPilots.find(x=>String(x._id)===String(r.pilotId)); const t=testTeams.find(x=>String(x._id)===String(r.teamId));
-      const testOv=overallRating(p); const pts=F1_POINTS[r.pos-1]||0; const testRank=testMedals[r.pos-1]||('P'+r.pos);
-      testDesc += testRank+' '+(t?.emoji||'')+' **'+(p?.name||'?')+'** *('+testOv+')* ';
-      if (r.dnf) testDesc += '❌ DNF'; else testDesc += '— '+pts+' pts';
-      if (r.fastestLap) testDesc += ' ⚡'; testDesc += '\n';
-    }
-    testEmbed.setDescription(testDesc+'\n*⚠️ Aucune donnée sauvegardée — test uniquement*');
-    return interaction.channel.send({ embeds: [testEmbed] });
+    const testRace   = { _id:new ObjectId(), circuit:'Circuit Test PL', emoji:'🧪', laps:30, gpStyle:pick(['mixte','rapide','technique','urbain','endurance']), status:'upcoming' };
+    const testQt     = testPilots.map(p => { const t=testTeams.find(t=>String(t._id)===String(p.teamId)); return { pilotId:p._id, time:calcQualiTime(p,t,'DRY',testRace.gpStyle) }; }).sort((a,b)=>a.time-b.time);
+
+    // Répondre IMMÉDIATEMENT — la simulation tourne en background
+    await interaction.reply({ content: `🧪 **Course de test** — style **${testRace.gpStyle.toUpperCase()}** · ${testRace.laps} tours — résultats en cours dans ce channel !`, ephemeral: true });
+
+    // Background — pas d'await sur l'interaction
+    ;(async () => {
+      const testResults = await simulateRace(testRace, testQt, testPilots, testTeams, [], interaction.channel);
+      const testEmbed = new EmbedBuilder().setTitle('🧪 [TEST] Résultats finaux — Circuit Test PL').setColor('#888888');
+      let testDesc = '';
+      for (const r of testResults.slice(0,15)) {
+        const p=testPilots.find(x=>String(x._id)===String(r.pilotId)); const t=testTeams.find(x=>String(x._id)===String(r.teamId));
+        const testOv=overallRating(p); const pts=F1_POINTS[r.pos-1]||0; const testRank=['🥇','🥈','🥉'][r.pos-1]||('P'+r.pos);
+        testDesc += testRank+' '+(t?.emoji||'')+' **'+(p?.name||'?')+'** *('+testOv+')* ';
+        if (r.dnf) testDesc += '❌ DNF'; else testDesc += '— '+pts+' pts';
+        if (r.fastestLap) testDesc += ' ⚡'; testDesc += '\n';
+      }
+      testEmbed.setDescription(testDesc+'\n*⚠️ Aucune donnée sauvegardée — test uniquement*');
+      await interaction.channel.send({ embeds: [testEmbed] });
+    })().catch(e => console.error('admin_test_race error:', e.message));
+    return;
   }
 
   // -- /admin_help --
@@ -2252,24 +2274,30 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   if (commandName === 'admin_force_practice') {
-    await interaction.deferReply();
-    await runPractice(interaction.channel);
-    await interaction.editReply('✅ Essais libres lancés !');
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    // Répondre IMMÉDIATEMENT (Discord expire après 3s)
+    await interaction.reply({ content: '✅ Essais libres en cours... Les résultats arrivent dans le channel de course.', ephemeral: true });
+    runPractice(interaction.channel).catch(e => console.error('admin_force_practice error:', e.message));
   }
 
   if (commandName === 'admin_force_quali') {
-    await interaction.deferReply();
-    await runQualifying(interaction.channel);
-    await interaction.editReply('✅ Qualifications lancées !');
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.reply({ content: '✅ Qualifications en cours... Les résultats arrivent dans le channel de course.', ephemeral: true });
+    runQualifying(interaction.channel).catch(e => console.error('admin_force_quali error:', e.message));
   }
 
   if (commandName === 'admin_force_race') {
-    await interaction.deferReply();
-    await runRace(interaction.channel);
-    await interaction.editReply('✅ Course lancée !');
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.reply({ content: '🏁 Course lancée ! Suivez le direct dans le channel de course.', ephemeral: true });
+    runRace(interaction.channel).catch(e => console.error('admin_force_race error:', e.message));
   }
 
   if (commandName === 'admin_transfer') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     await interaction.deferReply();
     const expired = await startTransferPeriod();
     await interaction.editReply(`✅ Période de transfert ouverte ! ${expired} contrat(s) expiré(s).`);
@@ -2292,7 +2320,7 @@ client.on('interactionCreate', async (interaction) => {
     }
     return interaction.reply({ embeds: [embed] });
   }
-});
+} // fin handleInteraction
 
 // ============================================================
 // ███████╗ ██████╗██╗  ██╗███████╗██████╗ ██╗   ██╗██╗     ███████╗██████╗
@@ -2570,6 +2598,17 @@ function startScheduler() {
   console.log('✅ Scheduler : 11h EL · 15h Q · 18h Course (Europe/Paris)');
   console.log('✅ Keep-alive : ping toutes les 15min');
 }
+
+// ── Sécurité globale — empêche le crash sur erreurs non catchées ──
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️  unhandledRejection (bot stable) :', reason?.message || reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('⚠️  uncaughtException (bot stable) :', err.message);
+});
+client.on('error', (err) => {
+  console.error('⚠️  Discord client error :', err.message);
+});
 
 client.login(TOKEN);
 
