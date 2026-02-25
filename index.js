@@ -1424,43 +1424,179 @@ async function applyRegulationChange(season) {
   console.log(`🔄 Changement de réglementation appliqué (saison ${season.year})`);
 }
 
+// ============================================================
+// 🤖  IA DE RECRUTEMENT — Moteur d'offres automatique
+// ============================================================
+//
+// Appelée UNE SEULE FOIS à la fin de chaque saison.
+// Chaque écurie analyse les pilotes disponibles et génère
+// des offres cohérentes avec son budget, son niveau et ses besoins.
+//
+// LOGIQUE PAR ÉCURIE :
+//  1. Calculer les "besoins" : quels slots sont libres ?
+//  2. Scorer chaque pilote libre selon la "philosophie" de l'écurie
+//  3. Générer des offres sur les N meilleurs candidats (avec concurrence)
+//  4. Calibrer le contrat (salaire, durée, primes) selon le budget et la valeur du pilote
+//
+// PHILOSOPHIE D'ÉCURIE (déduite du budget) :
+//  Budget élevé  → cherche les meilleurs profils, offres généreuses, contrats courts (confiance)
+//  Budget moyen  → cherche l'équilibre perf/coût, contrats 2 saisons
+//  Budget faible → mise sur les jeunes (note basse mais potentiel), contrats longs (fidéliser)
+
 async function startTransferPeriod() {
   const season = await getActiveSeason();
   if (!season) return 0;
 
+  // 1. Passer la saison en mode transfert
   await Season.findByIdAndUpdate(season._id, { status: 'transfer' });
+
+  // 2. Décrémenter tous les contrats actifs
   await Contract.updateMany({ active: true }, { $inc: { seasonsRemaining: -1 } });
 
-  const expired = await Contract.find({ seasonsRemaining: 0, active: true });
-  for (const c of expired) {
+  // 3. Expirer les contrats à 0 saison restante → pilote libéré
+  const expiredContracts = await Contract.find({ seasonsRemaining: 0, active: true });
+  for (const c of expiredContracts) {
     await Contract.findByIdAndUpdate(c._id, { active: false });
     await Pilot.findByIdAndUpdate(c.pilotId, { teamId: null });
   }
 
-  // Offres auto des écuries
-  const freePilots = await Pilot.find({ teamId: null });
-  const teams      = await Team.find();
+  // 4. Nettoyer les anciennes offres pending (saison précédente)
+  await TransferOffer.updateMany({ status: 'pending' }, { status: 'expired' });
 
-  for (const pilot of freePilots) {
-    for (const team of teams) {
-      const inTeam = await Pilot.countDocuments({ teamId: team._id });
-      if (inTeam >= 2) continue;
-      if (Math.random() > 0.4) continue;
-      const expiry = new Date();
-      expiry.setDate(expiry.getDate() + 7);
+  // 5. IA de recrutement — chaque écurie fait ses offres
+  const allTeams    = await Team.find();
+  const freePilots  = await Pilot.find({ teamId: null });
+  const allStandings = await Standing.find({ seasonId: season._id });
+
+  if (!freePilots.length) return expiredContracts.length;
+
+  // Classement constructeurs de la saison pour évaluer la force des écuries
+  const constrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
+  const teamRankMap = new Map(constrStandings.map((s, i) => [String(s.teamId), i + 1]));
+  const totalTeams  = allTeams.length;
+
+  for (const team of allTeams) {
+    const slotsAvailable = 2 - await Pilot.countDocuments({ teamId: team._id });
+    if (slotsAvailable <= 0) continue; // écurie pleine
+
+    const teamRank   = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
+    const budgetRatio = team.budget / 160; // 160 = budget max (Red Horizon)
+
+    // ── Philosophie de recrutement selon budget ──────────────
+    // Riche  (>120) : cherche la performance brute, évite les rookies
+    // Milieu (80-120): équilibre perf/coût, ouvert à tout profil
+    // Pauvre (<80)  : mise sur les pilotes en progression (note basse mais stats clés élevées)
+    const prefersPeakPerformers = team.budget >= 120;
+    const prefersYoungTalent    = team.budget < 80;
+
+    // ── Score d'attractivité du pilote pour CETTE écurie ─────
+    function scoreCandidate(pilot) {
+      const ov = overallRating(pilot);
+
+      // Style du pilote par rapport aux circuits à venir
+      // On utilise le score moyen sur les 5 styles comme proxy de polyvalence
+      const polyvalence = (
+        pilotScore(pilot, 'rapide')    +
+        pilotScore(pilot, 'technique') +
+        pilotScore(pilot, 'urbain')    +
+        pilotScore(pilot, 'endurance') +
+        pilotScore(pilot, 'mixte')
+      ) / 5;
+
+      // Statistiques en saison (si le pilote en a)
+      const standing = allStandings.find(s => String(s.pilotId) === String(pilot._id));
+      const seasonScore = standing
+        ? (standing.points * 0.6 + standing.wins * 5 + standing.podiums * 2 - standing.dnfs * 3)
+        : 0;
+
+      // Adéquation voiture ↔ pilote : certaines stats du pilote complètent les faiblesses de la voiture
+      // Ex: voiture faible en Dirty Air → préfère un pilote avec un bon score Dépassement
+      const carWeakStat = ['vitesseMax','drs','refroidissement','dirtyAir','conservationPneus','vitesseMoyenne']
+        .reduce((w, k) => team[k] < team[w] ? k : w, 'vitesseMax');
+      const complementBonus =
+        carWeakStat === 'dirtyAir'          ? pilot.depassement  * 0.1 :
+        carWeakStat === 'conservationPneus' ? pilot.gestionPneus * 0.1 :
+        carWeakStat === 'refroidissement'   ? pilot.adaptabilite * 0.1 :
+        pilot.controle * 0.05;
+
+      // Biais selon la philosophie
+      const philosophyScore =
+        prefersPeakPerformers ? ov * 1.4 + polyvalence * 0.4 :
+        prefersYoungTalent    ? (100 - ov) * 0.3 + polyvalence * 0.8 + complementBonus :
+                                ov * 1.0 + polyvalence * 0.6 + seasonScore * 0.02;
+
+      return Math.round(philosophyScore + complementBonus + seasonScore * 0.015);
+    }
+
+    // Scorer et trier les pilotes libres
+    const ranked = freePilots
+      .map(p => ({ pilot: p, score: scoreCandidate(p) }))
+      .sort((a, b) => b.score - a.score);
+
+    // ── Nombre de candidats ciblés ────────────────────────────
+    // Les riches font des offres plus sélectives (top 3 seulement)
+    // Les pauvres font plus d'offres (ils ont besoin d'espoir que quelqu'un accepte)
+    const offerCount = prefersPeakPerformers
+      ? Math.min(3, ranked.length)
+      : prefersYoungTalent
+        ? Math.min(6, ranked.length)
+        : Math.min(4, ranked.length);
+
+    const targets = ranked.slice(0, offerCount * slotsAvailable); // plus de candidats si 2 slots
+
+    for (const { pilot, score } of targets) {
+      // ── Calibration du contrat ─────────────────────────────
+      const ov = overallRating(pilot);
+
+      // Salaire de base : proportionnel au budget ET à la valeur du pilote
+      // Un pilote noté 80 dans une écurie à 160 budget → ~240 PLcoins/course
+      const salaireBase = Math.round(
+        (budgetRatio * 200) * (ov / 75) * rand(0.85, 1.15)
+      );
+
+      // Multiplicateur : les riches paient mieux en relatif
+      const coinMultiplier = parseFloat(
+        clamp(budgetRatio * rand(1.0, 1.6), 0.8, 2.5).toFixed(2)
+      );
+
+      // Primes : proportionnelles au rang de l'écurie (meilleures écuries = plus grosses primes)
+      const primeVictoire = Math.round(
+        (200 - teamRank * 15) * rand(0.8, 1.3) * budgetRatio
+      );
+      const primePodium = Math.round(primeVictoire * rand(0.3, 0.5));
+
+      // Durée du contrat :
+      //  Pilote top (ov ≥ 75) + écurie riche    → contrat court (1 saison — confiance mutuelle)
+      //  Pilote moyen                             → 2 saisons (stabilité)
+      //  Pilote faible + écurie pauvre (pari)    → 3 saisons (investissement long terme)
+      //  Pilote top + écurie pauvre               → 1 saison (le pilote partira vite de toute façon)
+      let seasons;
+      if (ov >= 78 && prefersPeakPerformers)      seasons = 1;
+      else if (ov >= 78 && prefersYoungTalent)    seasons = 1; // pilote trop fort pour eux, offre de passage
+      else if (ov < 65 && prefersYoungTalent)     seasons = 3; // pari sur un jeune, on verrouille
+      else                                         seasons = 2;
+
+      // Expiration de l'offre : 7 jours
+      const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+      // Ne pas créer de doublon si une offre est déjà pending entre ces deux entités
+      const already = await TransferOffer.findOne({ teamId: team._id, pilotId: pilot._id, status: 'pending' });
+      if (already) continue;
+
       await TransferOffer.create({
         teamId: team._id, pilotId: pilot._id,
-        coinMultiplier: parseFloat(rand(0.9, 1.8).toFixed(2)),
-        primeVictoire:  randInt(0, 200),
-        primePodium:    randInt(0, 100),
-        salaireBase:    randInt(50, 300),
-        seasons:        randInt(1, 3),
-        status: 'pending', expiresAt: expiry,
+        coinMultiplier,
+        primeVictoire: Math.max(0, primeVictoire),
+        primePodium:   Math.max(0, primePodium),
+        salaireBase:   Math.max(50, salaireBase),
+        seasons,
+        status: 'pending',
+        expiresAt,
       });
     }
   }
 
-  return expired.length;
+  return expiredContracts.length;
 }
 
 // ============================================================
@@ -1559,16 +1695,6 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_draft_start')
     .setDescription('[ADMIN] Lance le draft snake — chaque joueur choisit son écurie'),
-
-  new SlashCommandBuilder().setName('admin_offer')
-    .setDescription('[ADMIN] Envoie une offre de contrat d\'une écurie à un pilote')
-    .addStringOption(o => o.setName('ecurie').setDescription('Nom de l\'écurie qui fait l\'offre').setRequired(true))
-    .addUserOption(o => o.setName('joueur').setDescription('Pilote ciblé').setRequired(true))
-    .addNumberOption(o => o.setName('multiplicateur').setDescription('Multiplicateur PLcoins (ex: 1.5)').setRequired(true).setMinValue(0.5).setMaxValue(5))
-    .addIntegerOption(o => o.setName('salaire').setDescription('PLcoins fixes par course').setRequired(true).setMinValue(0))
-    .addIntegerOption(o => o.setName('saisons').setDescription('Durée du contrat (1-3 saisons)').setRequired(true).setMinValue(1).setMaxValue(3))
-    .addIntegerOption(o => o.setName('prime_victoire').setDescription('Bonus PLcoins par victoire').setMinValue(0))
-    .addIntegerOption(o => o.setName('prime_podium').setDescription('Bonus PLcoins par podium').setMinValue(0)),
 
   new SlashCommandBuilder().setName('admin_test_race')
     .setDescription('[ADMIN] Simule une course fictive avec pilotes fictifs — test visuel'),
@@ -2497,9 +2623,8 @@ async function handleInteraction(interaction) {
           '`/admin_evolve_cars` — État des stats voitures',
         ].join('\n') },
         { name: '🔄 Transferts & Draft', value: [
-          '`/admin_transfer` — Ouvre la période de transfert',
+          '`/admin_transfer` — Ouvre la période de transfert (offres IA auto)',
           '`/admin_draft_start` — Lance le draft snake',
-          '`/admin_offer` — Envoie une offre de contrat d\'une écurie à un pilote',
         ].join('\n') },
         { name: '🧪 Test & Debug', value: [
           '`/admin_test_race` — Simule une course fictive (aucune sauvegarde)',
@@ -2737,100 +2862,6 @@ async function handleInteraction(interaction) {
     return interaction.reply({ embeds: [embed] });
   }
 
-  // ── /admin_offer ──────────────────────────────────────────
-  // L'admin envoie une offre au nom d'une écurie à un pilote précis.
-  // Le pilote reçoit alors la notif dans /offres avec boutons Accept/Refuse.
-  if (commandName === 'admin_offer') {
-    if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-
-    const ecurieName   = interaction.options.getString('ecurie');
-    const targetUser   = interaction.options.getUser('joueur');
-    const multiplicateur = interaction.options.getNumber('multiplicateur');
-    const salaire      = interaction.options.getInteger('salaire');
-    const saisons      = interaction.options.getInteger('saisons');
-    const primeV       = interaction.options.getInteger('prime_victoire') ?? 0;
-    const primeP       = interaction.options.getInteger('prime_podium')   ?? 0;
-
-    // Trouver l'écurie
-    const team = await Team.findOne({ name: { $regex: ecurieName, $options: 'i' } });
-    if (!team) return interaction.reply({ content: `❌ Écurie introuvable : **${ecurieName}**. Vérifie le nom avec \`/ecuries\`.`, ephemeral: true });
-
-    // Vérifier que l'écurie n'est pas déjà pleine
-    const inTeam = await Pilot.countDocuments({ teamId: team._id });
-    if (inTeam >= 2) return interaction.reply({ content: `❌ ${team.emoji} **${team.name}** est déjà complète (2/2 pilotes).`, ephemeral: true });
-
-    // Trouver le pilote cible
-    const pilot = await Pilot.findOne({ discordId: targetUser.id });
-    if (!pilot) return interaction.reply({ content: `❌ <@${targetUser.id}> n'a pas encore de pilote.`, ephemeral: true });
-
-    // Vérifier qu'il n'a pas déjà un contrat actif
-    const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
-    if (activeContract) {
-      return interaction.reply({
-        content: `❌ **${pilot.name}** a déjà un contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin de son contrat.`,
-        ephemeral: true,
-      });
-    }
-
-    // Vérifier qu'une offre similaire (même écurie + même pilote) n'est pas déjà pending
-    const existing = await TransferOffer.findOne({ teamId: team._id, pilotId: pilot._id, status: 'pending' });
-    if (existing) return interaction.reply({ content: `⚠️ Une offre de ${team.emoji} **${team.name}** à **${pilot.name}** est déjà en attente !`, ephemeral: true });
-
-    // Créer l'offre (expire dans 7 jours)
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    const offer = await TransferOffer.create({
-      teamId: team._id, pilotId: pilot._id,
-      coinMultiplier: multiplicateur,
-      salaireBase:    salaire,
-      primeVictoire:  primeV,
-      primePodium:    primeP,
-      seasons:        saisons,
-      status:         'pending',
-      expiresAt,
-    });
-
-    // Confirmation pour l'admin
-    await interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`📨 Offre envoyée — ${team.emoji} ${team.name} → ${pilot.name}`)
-        .setColor(team.color)
-        .setDescription(
-          `**Pilote ciblé :** <@${targetUser.id}> (${pilot.name})\n\n` +
-          `× **${multiplicateur}** multiplicateur PLcoins\n` +
-          `💰 Salaire : **${salaire} 🪙**/course\n` +
-          `🏆 Prime victoire : **${primeV} 🪙** | Prime podium : **${primeP} 🪙**\n` +
-          `📅 Durée : **${saisons} saison(s)**\n` +
-          `⏰ Expire le : <t:${Math.floor(expiresAt.getTime()/1000)}:D>\n\n` +
-          `Le pilote peut voir et accepter l'offre avec \`/offres\`.`
-        )
-        .setFooter({ text: `ID offre : ${offer._id}` })
-      ],
-      ephemeral: true,
-    });
-
-    // Tenter de notifier le pilote en DM
-    try {
-      const dmChannel = await targetUser.createDM();
-      await dmChannel.send({
-        embeds: [new EmbedBuilder()
-          .setTitle(`📬 Nouvelle offre de contrat !`)
-          .setColor(team.color)
-          .setDescription(
-            `${team.emoji} **${team.name}** te propose un contrat !\n\n` +
-            `× **${multiplicateur}** multiplicateur | **${saisons}** saison(s)\n` +
-            `💰 Salaire : **${salaire} 🪙**/course\n` +
-            `🏆 Prime V : **${primeV} 🪙** | Prime P : **${primeP} 🪙**\n\n` +
-            `👉 Réponds avec \`/offres\` dans le serveur pour accepter ou refuser !`
-          )
-        ],
-      });
-    } catch(e) {
-      // DM bloqués — pas grave, le pilote verra avec /offres
-      console.log(`ℹ️  DM bloqué pour ${targetUser.tag} — offre créée quand même.`);
-    }
-    return;
-  }
 } // fin handleInteraction
 
 // ============================================================
@@ -3083,11 +3114,55 @@ async function runRace(override) {
   if (remaining === 0 && channel) {
     await sendSeasonCeremony(season, channel);
     setTimeout(async () => {
-      await startTransferPeriod();
+      const expiredCount = await startTransferPeriod();
+
       try {
         const ch = await client.channels.fetch(RACE_CHANNEL);
-        await ch.send('🔄 **PÉRIODE DE TRANSFERT OUVERTE !** Utilisez `/offres` pour voir vos propositions.');
-      } catch(e) {}
+
+        // Résumé des offres générées par l'IA
+        const allOffers  = await TransferOffer.find({ status: 'pending' });
+        const allTeams2  = await Team.find();
+        const allPilots2 = await Pilot.find({ _id: { $in: allOffers.map(o => o.pilotId) } });
+        const teamMap2   = new Map(allTeams2.map(t => [String(t._id), t]));
+        const pilotMap2  = new Map(allPilots2.map(p => [String(p._id), p]));
+
+        // Grouper les offres par pilote pour avoir un aperçu du marché
+        const offersByPilot = new Map();
+        for (const o of allOffers) {
+          const key = String(o.pilotId);
+          if (!offersByPilot.has(key)) offersByPilot.set(key, []);
+          offersByPilot.get(key).push(o);
+        }
+
+        let marketDesc = '';
+        for (const [pilotId, offers] of offersByPilot) {
+          const pilot    = pilotMap2.get(pilotId);
+          if (!pilot) continue;
+          const ov       = overallRating(pilot);
+          const tier     = ratingTier(ov);
+          const teamNames = offers.map(o => {
+            const t = teamMap2.get(String(o.teamId));
+            return t ? `${t.emoji} ${t.name}` : '?';
+          }).join(', ');
+          marketDesc += `${tier.badge} **${pilot.name}** *(${ov})* — ${offers.length} offre(s) : ${teamNames}\n`;
+        }
+
+        const transferEmbed = new EmbedBuilder()
+          .setTitle('🔄 MERCATO OUVERT — Les écuries ont fait leurs offres !')
+          .setColor('#FF6600')
+          .setDescription(
+            `**${expiredCount}** contrat(s) expiré(s) · **${allOffers.length}** offre(s) générées par le bot\n` +
+            `Les pilotes libres ont **7 jours** pour accepter ou refuser.\n\n` +
+            `📋 Utilisez \`/offres\` pour voir vos propositions de contrat.\n\u200B`
+          )
+          .addFields({
+            name: '📊 État du marché',
+            value: marketDesc.slice(0, 1024) || '*Aucun pilote libre*',
+          })
+          .setFooter({ text: 'Les offres sont générées automatiquement par le bot selon le budget et les besoins de chaque écurie.' });
+
+        await ch.send({ embeds: [transferEmbed] });
+      } catch(e) { console.error('Transfer announcement error:', e.message); }
     }, 24 * 60 * 60 * 1000);
   }
 }
