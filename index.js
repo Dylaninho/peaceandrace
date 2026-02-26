@@ -98,11 +98,43 @@ const PilotSchema = new mongoose.Schema({
   totalEarned  : { type: Number, default: 0 },
   // Photo de profil (URL définie par un admin via /admin_set_photo)
   photoUrl     : { type: String, default: null },
+  // ── Spécialisation ──────────────────────────────────────────
+  // 3 upgrades consécutifs sur la même stat → tag débloqué
+  lastUpgradeStat : { type: String, default: null },  // ex: 'freinage'
+  upgradeStreak   : { type: Number, default: 0 },     // 1→2→3 = trigger
+  specialization  : { type: String, default: null },  // ex: 'freinage' (unique par pilote)
+  // ── Rivalités ───────────────────────────────────────────────
+  rivalId      : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
+  rivalContacts: { type: Number, default: 0 },        // contacts en course cette saison vs rivalId
   // État
   teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
   createdAt    : { type: Date, default: Date.now },
 });
 const Pilot = mongoose.model('Pilot', PilotSchema);
+
+// ── HallOfFame ─────────────────────────────────────────────
+const HallOfFameSchema = new mongoose.Schema({
+  seasonYear       : { type: Number, required: true, unique: true },
+  champPilotId     : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot' },
+  champPilotName   : String,
+  champTeamName    : String,
+  champTeamEmoji   : String,
+  champPoints      : Number,
+  champWins        : Number,
+  champPodiums     : Number,
+  champDnfs        : Number,
+  champConstrName  : String,
+  champConstrEmoji : String,
+  champConstrPoints: Number,
+  mostWinsName     : String,
+  mostWinsCount    : Number,
+  mostDnfsName     : String,
+  mostDnfsCount    : Number,
+  topRatedName     : String,   // meilleur overall en fin de saison
+  topRatedOv       : Number,
+  createdAt        : { type: Date, default: Date.now },
+});
+const HallOfFame = mongoose.model('HallOfFame', HallOfFameSchema);
 
 // ── Team ───────────────────────────────────────────────────
 const TeamSchema = new mongoose.Schema({
@@ -407,6 +439,15 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const pScore = pilotScore(pilot, gpStyle);
   const pilotF = 1 - ((pScore - 50) / 50 * 0.12);
 
+  // ── Bonus spécialisation : +3% sur la stat ciblée ────────
+  // On traduit ça en réduction de temps selon l'impact de la stat sur ce style
+  let specF = 1.0;
+  if (pilot.specialization) {
+    const specWeight = GP_STYLE_WEIGHTS[gpStyle]?.pilot?.[pilot.specialization] || 1.0;
+    // Bonus : 0.3% de réduction par unité de poids (max ~0.5% de gain en temps)
+    specF = 1 - (specWeight * 0.003);
+  }
+
   // Pneus
   const tireData = TIRE[tireCompound];
   // Conservation pneus côté voiture réduit la dégradation effective
@@ -443,7 +484,7 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
     weatherF *= 1 + ((100 - team.refroidissement) / 100 * 0.02);
   }
 
-  return Math.round(BASE * carF * pilotF * tireF * dirtyAirF * trackF * randF * weatherF);
+  return Math.round(BASE * carF * pilotF * specF * tireF * dirtyAirF * trackF * randF * weatherF);
 }
 
 // ─── Calcul Q time (tour lancé, pneus neufs) ──────────────
@@ -550,18 +591,68 @@ function checkIncident(pilot, team) {
   return null;
 }
 
-// ─── SIMULATION QUALIFICATIONS ────────────────────────────
+// ─── SIMULATION QUALIFICATIONS Q1/Q2/Q3 ──────────────────
+// Q1 (tous) → élimine les 5 derniers → P16-20
+// Q2 (15 restants) → élimine 5 autres → P11-15
+// Q3 (10 restants) → shoot-out pour la grille de pole
+// Chaque pilote fait UN tour chrono par segment, avec variabilité.
 async function simulateQualifying(race, pilots, teams) {
-  const weather = pick(['DRY','DRY','DRY','WET']);
-  const results = [];
-  for (const pilot of pilots) {
-    const team = teams.find(t => String(t._id) === String(pilot.teamId));
-    if (!team) continue;
-    const time = calcQualiTime(pilot, team, weather, race.gpStyle);
-    results.push({ pilotId: pilot._id, pilotName: pilot.name, teamName: team.name, teamEmoji: team.emoji, time });
+  const weather = pick(['DRY','DRY','DRY','WET','INTER']);
+  const n = pilots.length;
+  // Taille des groupes selon nb de pilotes (scalable)
+  const q3Size = Math.min(10, Math.max(3, Math.floor(n * 0.5)));
+  const q2Size = Math.min(15, Math.max(q3Size + 2, Math.floor(n * 0.75)));
+  // Q1 : tous les pilotes — 1 tour chrono + variation (tentative d'amélioration ~50% de chance)
+  function doLap(pilot, team, extraVariation = 0) {
+    const base = calcQualiTime(pilot, team, weather, race.gpStyle);
+    const variance = randInt(-300, 300) + extraVariation;
+    return base + variance;
   }
-  results.sort((a,b) => a.time - b.time);
-  return { grid: results, weather };
+
+  const allTimes = pilots.map(pilot => {
+    const team = teams.find(t => String(t._id) === String(pilot.teamId));
+    if (!team) return null;
+    const t1 = doLap(pilot, team);
+    // 60% de chance d'améliorer le temps
+    const t2 = Math.random() > 0.4 ? doLap(pilot, team, -randInt(50, 200)) : t1 + randInt(0, 500);
+    return { pilot, team, time: Math.min(t1, t2) };
+  }).filter(Boolean);
+
+  allTimes.sort((a, b) => a.time - b.time);
+
+  // Q2 : top q2Size relancent un tour
+  const q2Pilots = allTimes.slice(0, q2Size);
+  const q2Elim   = allTimes.slice(q2Size); // P16+ éliminés en Q1
+  q2Pilots.forEach(e => {
+    const t = doLap(e.pilot, e.team, -randInt(0, 150));
+    if (t < e.time) e.time = t;
+  });
+  q2Pilots.sort((a, b) => a.time - b.time);
+
+  // Q3 : top q3Size — dernier tour "à tout donner" (plus grande variance positive)
+  const q3Pilots = q2Pilots.slice(0, q3Size);
+  const q3Elim   = q2Pilots.slice(q3Size); // P11-15 éliminés en Q2
+  q3Pilots.forEach(e => {
+    const t = doLap(e.pilot, e.team, -randInt(100, 350));
+    if (t < e.time) e.time = t;
+  });
+  q3Pilots.sort((a, b) => a.time - b.time);
+
+  // Assembler la grille finale : Q3 → Q2 éliminés → Q1 éliminés
+  const finalGrid = [
+    ...q3Pilots,
+    ...q3Elim,
+    ...q2Elim,
+  ].map((e, i) => ({
+    pilotId  : e.pilot._id,
+    pilotName: e.pilot.name,
+    teamName : e.team.name,
+    teamEmoji: e.team.emoji,
+    time     : e.time,
+    segment  : i < q3Size ? 'Q3' : i < q2Size ? 'Q2' : 'Q1',
+  }));
+
+  return { grid: finalGrid, weather, q3Size, q2Size };
 }
 
 // ─── SIMULATION ESSAIS LIBRES ─────────────────────────────
@@ -840,6 +931,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   let scState          = { state: 'NONE', lapsLeft: 0 };
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
+  const raceCollisions = []; // { attackerId, victimId } — pour rivalités
 
   const send = async (msg) => {
     if (!channel) return;
@@ -1030,6 +1122,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           driver.dnfReason = 'CRASH';
           lapDnfs.push({ driver, reason: 'CRASH' });
           lapIncidents.push({ type: 'CRASH' });
+          // Tracker rivalité : mémoriser la paire de pilotes impliqués
+          raceCollisions.push({ attackerId: String(driver.pilot._id), victimId: String(nearest.pilot._id) });
 
           if (victimDnf) {
             nearest.dnf       = true;
@@ -1262,6 +1356,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
       const drsTag  = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
       const howDesc = overtakeDescription(driver, passed, gpStyle);
 
+      // Mention rivalité si les deux pilotes sont rivaux déclarés
+      const areRivals = (
+        (driver.pilot.rivalId && String(driver.pilot.rivalId) === String(passed.pilot._id)) ||
+        (passed.pilot.rivalId && String(passed.pilot.rivalId) === String(driver.pilot._id))
+      );
+      const rivalTag = areRivals ? `\n⚔️ *Rivalité déclarée — ce dépassement a une saveur particulière !*` : '';
+
       const ovNewPos  = driver.pos;
       const ovLostPos = passed.pos;
       const ovForLead = ovNewPos === 1;
@@ -1277,7 +1378,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
       events.push({
         priority: ovForLead ? 9 : ovIsTop3 ? 8 : 6,
-        text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapOnLeader}*`,
+        text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapOnLeader}*${rivalTag}`,
       });
     }
 
@@ -1402,7 +1503,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     );
   await sendEmbed(podiumEmbed);
 
-  return results;
+  return { results, collisions: raceCollisions };
 }
 
 // ─── Fixtures de test (pilotes/équipes fictifs réutilisés par admin_test_*) ──
@@ -1515,7 +1616,7 @@ async function getAllPilotsWithTeams() {
   return { pilots, teams };
 }
 
-async function applyRaceResults(raceResults, raceId, season) {
+async function applyRaceResults(raceResults, raceId, season, collisions = []) {
   const teams = await Team.find();
 
   for (const r of raceResults) {
@@ -1535,6 +1636,34 @@ async function applyRaceResults(raceResults, raceId, season) {
   }
 
   await Race.findByIdAndUpdate(raceId, { status: 'done', raceResults });
+
+  // ── Rivalités : traiter les collisions de la course ──────
+  // On consolide les contacts par paire (A-B = B-A)
+  const contactMap = new Map(); // key: "idA_idB" (sorted)
+  for (const { attackerId, victimId } of collisions) {
+    const key = [attackerId, victimId].sort().join('_');
+    contactMap.set(key, (contactMap.get(key) || 0) + 1);
+  }
+  for (const [key, count] of contactMap) {
+    const [idA, idB] = key.split('_');
+    // Mettre à jour les contacts des deux pilotes l'un envers l'autre
+    for (const [myId, theirId] of [[idA, idB], [idB, idA]]) {
+      const me = await Pilot.findById(myId);
+      if (!me) continue;
+      const currentRival = me.rivalId ? String(me.rivalId) : null;
+      if (currentRival === theirId) {
+        // Rivalité existante — incrémenter le compteur
+        await Pilot.findByIdAndUpdate(myId, { $inc: { rivalContacts: count } });
+      } else if (!currentRival) {
+        // Pas encore de rival — si 2+ contacts cette course avec ce pilote, déclarer la rivalité
+        const newTotal = (me.rivalContacts || 0) + count;
+        if (count >= 2 || newTotal >= 2) {
+          await Pilot.findByIdAndUpdate(myId, { rivalId: theirId, rivalContacts: count });
+        }
+      }
+      // Si rivalité différente déjà active, on ne change pas (on garde la plus vieille)
+    }
+  }
 
   // Évolution voitures après la course
   await evolveCarStats(raceResults, teams);
@@ -1559,6 +1688,9 @@ async function createNewSeason() {
 
   const pilots = await Pilot.find({ teamId: { $ne: null } });
   for (const p of pilots) await Standing.create({ seasonId: season._id, pilotId: p._id });
+
+  // Réinitialiser rivalités et streak upgrade en début de saison
+  await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0, upgradeStreak: 0, lastUpgradeStat: null } });
 
   return season;
 }
@@ -1749,6 +1881,38 @@ async function startTransferPeriod() {
     }
   }
 
+  // ── ENCHÈRES : surenchère automatique sur les top pilotes convoités ──
+  // Après la génération des offres, si plusieurs écuries ont ciblé le même
+  // pilote top (ov ≥ 75), elles surenchérissent automatiquement l'une l'autre.
+  // Le pilote voit TOUTES les offres et choisit la meilleure.
+  const allNewOffers = await TransferOffer.find({ status: 'pending' });
+  // Grouper par pilote
+  const offerGrouped = new Map();
+  for (const o of allNewOffers) {
+    const key = String(o.pilotId);
+    if (!offerGrouped.has(key)) offerGrouped.set(key, []);
+    offerGrouped.get(key).push(o);
+  }
+  for (const [pilotId, offers] of offerGrouped) {
+    if (offers.length < 2) continue; // pas de concurrence
+    const pilot = await Pilot.findById(pilotId);
+    if (!pilot) continue;
+    const ov = overallRating(pilot);
+    if (ov < 72) continue; // enchères seulement pour les pilotes notés 72+
+    // Trier par salaireBase décroissant
+    offers.sort((a, b) => b.salaireBase - a.salaireBase);
+    const topOffer = offers[0];
+    // Chaque offre concurrente tente de surenchérir
+    for (let i = 1; i < offers.length; i++) {
+      const offer = offers[i];
+      // Surenchère : +10% à +20% sur la meilleure offre visible
+      const surenchere = Math.round(topOffer.salaireBase * rand(1.08, 1.20));
+      if (surenchere > offer.salaireBase) {
+        await TransferOffer.findByIdAndUpdate(offer._id, { salaireBase: surenchere });
+      }
+    }
+  }
+
   return expiredContracts.length;
 }
 
@@ -1849,6 +2013,15 @@ const commands = [
   new SlashCommandBuilder().setName('admin_draft_start')
     .setDescription('[ADMIN] Lance le draft snake — chaque joueur choisit son écurie'),
 
+  new SlashCommandBuilder().setName('palmares')
+    .setDescription('🏛️ Hall of Fame — Champions de chaque saison'),
+
+  new SlashCommandBuilder().setName('rivalite')
+    .setDescription('⚔️ Voir ta rivalité actuelle en saison'),
+
+  new SlashCommandBuilder().setName('admin_reset_rivalites')
+    .setDescription('[ADMIN] Réinitialise toutes les rivalités en début de saison'),
+
   new SlashCommandBuilder().setName('admin_test_race')
     .setDescription('[ADMIN] Simule une course fictive avec pilotes fictifs — test visuel'),
 
@@ -1930,6 +2103,19 @@ function calcUpgradeCost(statKey, currentValue) {
   const multiplier = 1 + Math.max(0, (currentValue - 50)) / 50;
   return Math.round(base * multiplier);
 }
+
+// ─── Spécialisations ─────────────────────────────────────────
+// Déblocage après 3 upgrades CONSÉCUTIFS sur la même stat.
+// Chaque spécialisation donne un micro-bonus en simulation de course.
+const SPECIALIZATION_META = {
+  depassement  : { label: '⚔️ Maître du Dépassement',  desc: '+3% eff. dépassement en piste'    },
+  freinage     : { label: '🛑 Roi du Freinage',          desc: '+3% perf. en zones de freinage'   },
+  defense      : { label: '🛡️ Mur de la Défense',        desc: '+3% résistance aux dépassements'  },
+  adaptabilite : { label: '🌦️ Caméléon',                 desc: '+3% sous conditions variables'    },
+  reactions    : { label: '⚡ Réflexes de Serpent',      desc: '+3% au départ & incidents'        },
+  controle     : { label: '🎯 Chirurgien du Volant',     desc: '+3% consistance sur un tour'      },
+  gestionPneus : { label: '🏎️ Sorcier des Gommes',       desc: '+3% durée de vie des pneus'       },
+};
 
 client.on('interactionCreate', async (interaction) => {
   try {
@@ -2170,6 +2356,30 @@ async function handleInteraction(interaction) {
         value: `**${standing.points} pts** · ${standing.wins}V · ${standing.podiums}P · ${standing.dnfs} DNF`,
       });
     }
+
+    // Spécialisation
+    if (pilot.specialization) {
+      const specMeta = SPECIALIZATION_META[pilot.specialization];
+      embed.addFields({ name: '🏅 Spécialisation',
+        value: specMeta ? `**${specMeta.label}** — *${specMeta.desc}*` : pilot.specialization,
+      });
+    } else if (pilot.upgradeStreak >= 1 && pilot.lastUpgradeStat) {
+      const statLabels = { depassement:'Dépassement', freinage:'Freinage', defense:'Défense', adaptabilite:'Adaptabilité', reactions:'Réactions', controle:'Contrôle', gestionPneus:'Gestion Pneus' };
+      const bar = '🔥'.repeat(pilot.upgradeStreak) + '⬜'.repeat(Math.max(0, 3 - pilot.upgradeStreak));
+      embed.addFields({ name: '📈 Progression spécialisation',
+        value: `${bar} **${pilot.upgradeStreak}/3** upgrades consécutifs sur **${statLabels[pilot.lastUpgradeStat] || pilot.lastUpgradeStat}**`,
+      });
+    }
+
+    // Rivalité
+    if (pilot.rivalId) {
+      const rival = await Pilot.findById(pilot.rivalId);
+      const rivalTeam = rival?.teamId ? await Team.findById(rival.teamId) : null;
+      embed.addFields({ name: '⚔️ Rivalité',
+        value: `${rivalTeam?.emoji || ''} **${rival?.name || '?'}** — ${pilot.rivalContacts || 0} contact(s) en course cette saison`,
+      });
+    }
+
     return interaction.reply({ embeds: [embed] });
   }
 
@@ -2184,18 +2394,16 @@ async function handleInteraction(interaction) {
 
     if (current >= MAX_STAT) return interaction.reply({ content: '❌ Stat déjà au maximum (99) !', ephemeral: true });
 
-    // Coût dynamique selon le niveau actuel de la stat
     const cost = calcUpgradeCost(statKey, current);
 
     if (pilot.plcoins < cost) {
-      // Montrer combien il en manque et quand il pourra améliorer
       const missing = cost - pilot.plcoins;
       return interaction.reply({
         embeds: [new EmbedBuilder()
           .setTitle('❌ PLcoins insuffisants')
           .setColor('#CC4444')
           .setDescription(
-            `**${statKey}** est actuellement à **${current}** — coût d'amélioration : **${cost} 🪙**\n` +
+            `**${statKey}** est actuellement à **${current}** — coût : **${cost} 🪙**\n` +
             `Tu as **${pilot.plcoins} 🪙** — il te manque **${missing} 🪙**.\n\n` +
             `💡 Continue à courir pour accumuler des PLcoins !`
           )
@@ -2204,41 +2412,135 @@ async function handleInteraction(interaction) {
       });
     }
 
-    // Gain toujours +1, plafonné à 99
     const gain     = 1;
     const newValue = Math.min(current + gain, MAX_STAT);
-
-    // Coût du prochain upgrade (pour information)
     const nextCost = newValue < MAX_STAT ? calcUpgradeCost(statKey, newValue) : null;
     const remaining = pilot.plcoins - cost;
 
-    await Pilot.findByIdAndUpdate(pilot._id, {
+    // ── Tracker de streak de spécialisation ──────────────────
+    const isSameStat  = pilot.lastUpgradeStat === statKey;
+    const newStreak   = isSameStat ? (pilot.upgradeStreak || 0) + 1 : 1;
+    // Déblocage : 3 consécutifs ET pas de spécialisation déjà active
+    const unlockSpec  = newStreak >= 3 && !pilot.specialization;
+
+    const updateFields = {
       $inc: { plcoins: -cost },
-      $set: { [statKey]: newValue },
-    });
+      $set: {
+        [statKey]       : newValue,
+        lastUpgradeStat : statKey,
+        upgradeStreak   : unlockSpec ? 0 : newStreak, // reset après déblocage
+        ...(unlockSpec ? { specialization: statKey } : {}),
+      },
+    };
+    await Pilot.findByIdAndUpdate(pilot._id, updateFields);
 
     const statLabels = {
       depassement: 'Dépassement', freinage: 'Freinage', defense: 'Défense',
       adaptabilite: 'Adaptabilité', reactions: 'Réactions', controle: 'Contrôle', gestionPneus: 'Gestion Pneus',
     };
 
-    const desc = [
+    const specMeta = SPECIALIZATION_META[statKey];
+    const streakBar = '🔥'.repeat(Math.min(newStreak, 3)) + '⬜'.repeat(Math.max(0, 3 - Math.min(newStreak, 3)));
+
+    const descLines = [
       `**${statLabels[statKey] || statKey}** : ${current} → **${newValue}** (+1)`,
-      `💸 −${cost} 🪙 · Solde restant : **${remaining} 🪙**`,
-      newValue >= MAX_STAT
-        ? `\n🔒 **Maximum atteint (99)** — cette stat ne peut plus progresser.`
-        : nextCost
-          ? `\n📌 Prochain upgrade : **${nextCost} 🪙** *(stat plus haute = plus cher)*`
-          : '',
-    ].filter(Boolean).join('\n');
+      `💸 −${cost} 🪙 · Solde : **${remaining} 🪙**`,
+    ];
+
+    if (unlockSpec && specMeta) {
+      descLines.push(`\n🏅 **SPÉCIALISATION DÉBLOQUÉE !**`);
+      descLines.push(`**${specMeta.label}**`);
+      descLines.push(`*${specMeta.desc}*`);
+      descLines.push(`\n3 upgrades consécutifs sur **${statLabels[statKey]}** — tu as forgé une identité !`);
+    } else if (pilot.specialization) {
+      const existingSpec = SPECIALIZATION_META[pilot.specialization];
+      descLines.push(`\n✅ Spécialisation active : **${existingSpec?.label || pilot.specialization}**`);
+    } else {
+      // Progression vers spécialisation
+      const streakDisplay = isSameStat ? `${streakBar} ${newStreak}/3` : `${streakBar} 1/3 *(streak réinitialisé)*`;
+      descLines.push(`\n${newStreak >= 2 ? '🔥' : '📌'} **Progression spécialisation :** ${streakDisplay}`);
+      if (newStreak < 3) descLines.push(`*Continue sur **${statLabels[statKey]}** pour débloquer : ${specMeta?.label || ''}*`);
+    }
+
+    if (newValue >= MAX_STAT) descLines.push(`\n🔒 **Maximum (99) atteint.**`);
+    else if (nextCost) descLines.push(`📌 Prochain upgrade : **${nextCost} 🪙**`);
 
     return interaction.reply({
       embeds: [new EmbedBuilder()
-        .setTitle('📈 Amélioration !')
-        .setColor('#FFD700')
-        .setDescription(desc)
+        .setTitle(unlockSpec ? '🏅 Spécialisation débloquée !' : '📈 Amélioration !')
+        .setColor(unlockSpec ? '#FF6600' : '#FFD700')
+        .setDescription(descLines.join('\n'))
       ],
     });
+  }
+
+  // ── /palmares ─────────────────────────────────────────────
+  if (commandName === 'palmares') {
+    const entries = await HallOfFame.find().sort({ seasonYear: -1 });
+    if (!entries.length) {
+      return interaction.reply({ content: '🏛️ Le Hall of Fame est vide — aucune saison terminée pour l\'instant.', ephemeral: true });
+    }
+    const embed = new EmbedBuilder()
+      .setTitle('🏛️ HALL OF FAME — Champions F1 PL')
+      .setColor('#FFD700');
+
+    for (const e of entries) {
+      const specNote = e.topRatedName ? `\n👑 Meilleur pilote en fin de saison : **${e.topRatedName}** *(${e.topRatedOv})*` : '';
+      const mostWinsNote = e.mostWinsName && e.mostWinsCount > 0 ? `\n🏆 Roi des victoires : **${e.mostWinsName}** (${e.mostWinsCount}V)` : '';
+      const mostDnfsNote = e.mostDnfsName && e.mostDnfsCount > 0 ? `\n💀 Malchance : **${e.mostDnfsName}** (${e.mostDnfsCount} DNF)` : '';
+      embed.addFields({
+        name: `Saison ${e.seasonYear}`,
+        value: [
+          `${e.champTeamEmoji || '🏎️'} **${e.champPilotName}** — ${e.champTeamName}`,
+          `🥇 **${e.champPoints} pts** · ${e.champWins}V · ${e.champPodiums}P · ${e.champDnfs} DNF`,
+          `🏗️ Constructeur : **${e.champConstrEmoji || ''} ${e.champConstrName}** (${e.champConstrPoints} pts)`,
+          mostWinsNote, mostDnfsNote, specNote,
+        ].filter(Boolean).join('\n'),
+        inline: false,
+      });
+    }
+    embed.setFooter({ text: 'Un champion se forge par le sang, la sueur et les PLcoins.' });
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /rivalite ─────────────────────────────────────────────
+  if (commandName === 'rivalite') {
+    const pilot = await Pilot.findOne({ discordId: interaction.user.id });
+    if (!pilot) return interaction.reply({ content: '❌ Crée d\'abord ton pilote.', ephemeral: true });
+    if (!pilot.rivalId) {
+      return interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setTitle('⚔️ Aucune rivalité active')
+          .setColor('#888888')
+          .setDescription(
+            `**${pilot.name}** n'a pas encore de rival déclaré cette saison.\n\n` +
+            `*Les rivalités se déclarent après 2 contacts en course avec le même pilote.*`
+          )
+        ],
+        ephemeral: true,
+      });
+    }
+    const rival = await Pilot.findById(pilot.rivalId);
+    const rivalTeam = rival?.teamId ? await Team.findById(rival.teamId) : null;
+    const myTeam    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
+    const embed = new EmbedBuilder()
+      .setTitle(`⚔️ RIVALITÉ : ${pilot.name} vs ${rival?.name || '?'}`)
+      .setColor('#FF4400')
+      .setDescription(
+        `${myTeam?.emoji || ''} **${pilot.name}** *(${overallRating(pilot)})* ` +
+        `vs ${rivalTeam?.emoji || ''} **${rival?.name || '?'}** *(${rival ? overallRating(rival) : '?'})*\n\n` +
+        `💥 **${pilot.rivalContacts || 0} contact(s)** en course cette saison\n\n` +
+        `*La narration signalera leurs prochaines confrontations en course.*`
+      );
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /admin_reset_rivalites ────────────────────────────────
+  if (commandName === 'admin_reset_rivalites') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
+    await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0 } });
+    return interaction.reply({ content: '✅ Toutes les rivalités ont été réinitialisées.', ephemeral: true });
   }
 
   // ── /ecuries ──────────────────────────────────────────────
@@ -2826,9 +3128,10 @@ async function handleInteraction(interaction) {
         { name: '🏁 Saison & Course', value: [
           '`/admin_new_season` — Crée une nouvelle saison (24 GP)',
           '`/admin_force_practice` — Déclenche les essais libres',
-          '`/admin_force_quali` — Déclenche les qualifications',
+          '`/admin_force_quali` — Déclenche les qualifications **Q1/Q2/Q3**',
           '`/admin_force_race` — Déclenche la course',
           '`/admin_evolve_cars` — État des stats voitures',
+          '`/admin_reset_rivalites` — Réinitialise toutes les rivalités',
         ].join('\n') },
         { name: '🔄 Transferts & Draft', value: [
           '`/admin_transfer` — Ouvre la période de transfert (offres IA auto)',
@@ -2876,8 +3179,10 @@ async function handleInteraction(interaction) {
           '`/classement_constructeurs` — Championnat constructeurs',
           '`/calendrier` — Tous les GP',
           '`/resultats` — Dernière course',
+          '`/palmares` — Hall of Fame toutes saisons',
         ].join('\n') },
         { name: '📖 Infos', value: [
+          '`/rivalite` — Ta rivalité actuelle en saison',
           '`/concept` — Présentation du jeu pour les nouveaux',
           '`/f1` — Affiche ce panneau',
         ].join('\n') },
@@ -3125,7 +3430,7 @@ async function runQualifying(override) {
   const { pilots, teams } = await getAllPilotsWithTeams();
   if (!pilots.length) return;
 
-  const { grid, weather } = await simulateQualifying(race, pilots, teams);
+  const { grid, weather, q3Size, q2Size } = await simulateQualifying(race, pilots, teams);
   const channel = await getRaceChannel(override);
 
   await Race.findByIdAndUpdate(race._id, {
@@ -3133,18 +3438,140 @@ async function runQualifying(override) {
     status: 'quali_done',
   });
 
-  const embed = new EmbedBuilder()
-    .setTitle(`⏱️ Qualifications — ${race.emoji} ${race.circuit}`)
+  if (!channel) return;
+
+  const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+  const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
+  const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+
+  const q3Grid = grid.slice(0, q3Size);
+  const q2Grid = grid.slice(q3Size, q2Size);
+  const q1Grid = grid.slice(q2Size);
+  const poleman = q3Grid[0];
+
+  // ─── INTRO ───────────────────────────────────────────────
+  await channel.send(
+    `⏱️ **QUALIFICATIONS — ${race.emoji} ${race.circuit}**\n` +
+    `${styleEmojis[race.gpStyle] || ''} **${race.gpStyle.toUpperCase()}** · Météo : **${weatherLabels[weather] || weather}**\n` +
+    `Les pilotes prennent la piste pour décrocher la meilleure place sur la grille...`
+  );
+  await sleepMs(3000);
+
+  // ─── Q1 ───────────────────────────────────────────────────
+  await channel.send(`🟡 **Q1 — DÉBUT** · ${grid.length} pilotes en piste · La zone d'élimination commence à P${q2Size + 1}`);
+  await sleepMs(2500);
+
+  // Quelques temps intermédiaires fictifs pendant la session
+  const midQ1 = [...grid].sort(() => Math.random() - 0.5).slice(0, 4);
+  await channel.send(
+    `📻 *Q1 en cours...* ` +
+    midQ1.map(g => `${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time + randInt(200, 800))}`).join(' · ')
+  );
+  await sleepMs(3000);
+
+  // Résultat Q1 — montrer le bas du tableau (les éliminés)
+  const q1EliminEmbed = new EmbedBuilder()
+    .setTitle(`🔴 Q1 TERMINÉ — ${race.emoji} ${race.circuit}`)
+    .setColor('#FF4444')
+    .setDescription(
+      `**Éliminés (P${q2Size + 1}–${grid.length}) :**\n` +
+      q1Grid.map((g, i) => {
+        const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
+        return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
+      }).join('\n') +
+      `\n\n**Passage en Q2 :** Top ${q2Size} pilotes ✅`
+    );
+  await channel.send({ embeds: [q1EliminEmbed] });
+  await sleepMs(4000);
+
+  // ─── Q2 ───────────────────────────────────────────────────
+  const q2BubbleLine = grid.slice(q3Size - 1, q3Size + 3).map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
+  await channel.send(
+    `🟡 **Q2 — DÉBUT** · ${q2Size} pilotes en piste · La zone d'élimination commence à P${q3Size + 1}\n` +
+    `*Sur le fil : ${q2BubbleLine}*`
+  );
+  await sleepMs(2500);
+
+  const midQ2 = q2Grid.concat(q3Grid).sort(() => Math.random() - 0.5).slice(0, 4);
+  await channel.send(
+    `📻 *Q2 en cours...* ` +
+    midQ2.map(g => `${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time + randInt(100, 500))}`).join(' · ')
+  );
+  await sleepMs(3000);
+
+  // Drama Q2 : mentionner le pilote qui a failli ne pas passer
+  const lastQ3 = q3Grid[q3Size - 1]; // dernier qualifié en Q3
+  const firstOut = q2Grid[0]; // premier éliminé en Q2
+  const q2Thriller = ((firstOut.time - lastQ3.time) / 1000).toFixed(3);
+
+  const q2EliminEmbed = new EmbedBuilder()
+    .setTitle(`🔴 Q2 TERMINÉ — ${race.emoji} ${race.circuit}`)
+    .setColor('#FF8800')
+    .setDescription(
+      `**Éliminés (P${q3Size + 1}–${q2Size}) :**\n` +
+      q2Grid.map((g, i) => {
+        const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
+        return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
+      }).join('\n') +
+      `\n\n⚠️ **${lastQ3.teamEmoji}${lastQ3.pilotName}** passe de justesse — **${q2Thriller}s** d'avance sur **${firstOut.teamEmoji}${firstOut.pilotName}** !` +
+      `\n\n**Passage en Q3 :** Top ${q3Size} pilotes ✅`
+    );
+  await channel.send({ embeds: [q2EliminEmbed] });
+  await sleepMs(4000);
+
+  // ─── Q3 ───────────────────────────────────────────────────
+  const q3Names = q3Grid.map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
+  await channel.send(
+    `🔥 **Q3 — SHOOT-OUT POUR LA POLE !**\n` +
+    `Les ${q3Size} meilleurs pilotes donnent tout — UN tour, TOUT jouer.\n` +
+    `*En piste : ${q3Names}*`
+  );
+  await sleepMs(3000);
+
+  // Suspense : annoncer les temps progressivement en inverse (dernier → premier)
+  const q3Reversed = [...q3Grid].reverse();
+  for (let i = 0; i < Math.min(3, q3Reversed.length); i++) {
+    const g   = q3Reversed[i];
+    const pos = q3Grid.length - i;
+    await channel.send(`📻 **${g.teamEmoji}${g.pilotName}** — ${msToLapStr(g.time)} · provisoirement **P${pos}**`);
+    await sleepMs(1500);
+  }
+  await sleepMs(1500);
+
+  // Embed final Q3 — grille de départ
+  const q3Embed = new EmbedBuilder()
+    .setTitle(`🏆 Q3 — GRILLE DE DÉPART OFFICIELLE — ${race.emoji} ${race.circuit}`)
     .setColor('#FFD700')
     .setDescription(
-      `Météo : **${weather}**\n\n` +
-      grid.slice(0,20).map((g,i) => {
-        const gap = i === 0 ? '' : ` (+${((g.time - grid[0].time)/1000).toFixed(3)}s)`;
-        return `**P${i+1}** ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)}${gap}`;
+      `Météo Q : **${weatherLabels[weather] || weather}**\n\n` +
+      q3Grid.map((g, i) => {
+        const gap    = i === 0 ? '🏆 **POLE POSITION**' : `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
+        const medal  = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`P${i+1}\``;
+        return `${medal} ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
+      }).join('\n') +
+      `\n\n— — —\n` +
+      q2Grid.map((g, i) => {
+        const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
+        return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
+      }).join('\n') +
+      `\n` +
+      q1Grid.map((g, i) => {
+        const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
+        return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
       }).join('\n')
     );
+  await channel.send({ embeds: [q3Embed] });
+  await sleepMs(1500);
 
-  if (channel) await channel.send({ embeds: [embed] });
+  // ─── Message pole position ────────────────────────────────
+  const gap2nd = q3Grid[1] ? ((q3Grid[1].time - poleman.time) / 1000).toFixed(3) : null;
+  const poleMsg = gap2nd && parseFloat(gap2nd) < 0.1
+    ? `***⚡ POLE POSITION INCROYABLE !!! ${poleman.teamEmoji}${poleman.pilotName} EN ${msToLapStr(poleman.time)} !!!***\n*Seulement +${gap2nd}s de marge — la grille est ultra-serrée demain !*`
+    : gap2nd && parseFloat(gap2nd) > 0.5
+      ? `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** — ${msToLapStr(poleman.time)}\n**+${gap2nd}s** d'avance sur ${q3Grid[1]?.teamEmoji}**${q3Grid[1]?.pilotName}**. *Grosse marge — il part favori !*`
+      : `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** — ${msToLapStr(poleman.time)}` +
+        (gap2nd ? ` · **+${gap2nd}s** sur ${q3Grid[1]?.teamEmoji}**${q3Grid[1]?.pilotName}**` : '');
+  await channel.send(poleMsg);
 }
 
 // ── Cérémonie de fin de saison ────────────────────────────
@@ -3256,6 +3683,40 @@ async function sendSeasonCeremony(season, channel) {
     );
 
   await channel.send({ embeds: [recapEmbed] });
+
+  // ── Sauvegarder dans le Hall of Fame ─────────────────────
+  try {
+    const allPilotsAll = await Pilot.find();
+    const topRated = allPilotsAll.reduce((best, p) => {
+      const ov = overallRating(p);
+      return (!best || ov > overallRating(best)) ? p : best;
+    }, null);
+
+    await HallOfFame.findOneAndUpdate(
+      { seasonYear: season.year },
+      {
+        seasonYear      : season.year,
+        champPilotId    : champ?._id || null,
+        champPilotName  : champ?.name || '?',
+        champTeamName   : champTeam?.name || '?',
+        champTeamEmoji  : champTeam?.emoji || '🏎️',
+        champPoints     : champStanding?.points || 0,
+        champWins       : champStanding?.wins || 0,
+        champPodiums    : champStanding?.podiums || 0,
+        champDnfs       : champStanding?.dnfs || 0,
+        champConstrName  : champConstr?.name || '?',
+        champConstrEmoji : champConstr?.emoji || '🏗️',
+        champConstrPoints: constrStandings[0]?.points || 0,
+        mostWinsName    : mostWins ? pilotMap.get(String(mostWins.pilotId))?.name : null,
+        mostWinsCount   : mostWins?.wins || 0,
+        mostDnfsName    : mostDnfs ? pilotMap.get(String(mostDnfs.pilotId))?.name : null,
+        mostDnfsCount   : mostDnfs?.dnfs || 0,
+        topRatedName    : topRated?.name || null,
+        topRatedOv      : topRated ? overallRating(topRated) : null,
+      },
+      { upsert: true }
+    );
+  } catch(e) { console.error('HallOfFame save error:', e.message); }
 }
 
 async function runRace(override) {
@@ -3279,8 +3740,38 @@ async function runRace(override) {
   }
 
   const channel = await getRaceChannel(override);
-  const results = await simulateRace(race, grid, pilots, teams, contracts, channel);
-  await applyRaceResults(results, race._id, season);
+  const { results, collisions } = await simulateRace(race, grid, pilots, teams, contracts, channel);
+  await applyRaceResults(results, race._id, season, collisions);
+
+  // ── Annonce rivalités nouvellement déclarées ─────────────
+  if (channel && collisions.length) {
+    // Recharger les pilotes pour voir les rivalités mises à jour
+    const updatedPilots = await Pilot.find({ _id: { $in: pilots.map(p => p._id) } });
+    const rivalAnnounces = [];
+    for (const p of updatedPilots) {
+      if (!p.rivalId) continue;
+      const rival = updatedPilots.find(r => String(r._id) === String(p.rivalId));
+      if (!rival) continue;
+      // Annoncer seulement si la rivalité a été confirmée (2+ contacts) et pas encore annoncée
+      if ((p.rivalContacts || 0) === 2) {
+        const pTeam = pilots.find(pi => String(pi._id) === String(p._id));
+        const rTeam = pilots.find(pi => String(pi._id) === String(rival._id));
+        // Éviter les doublons (A-B et B-A)
+        const pairKey = [String(p._id), String(rival._id)].sort().join('_');
+        if (!rivalAnnounces.includes(pairKey)) {
+          rivalAnnounces.push(pairKey);
+          const ptTeam = teams.find(t => String(t._id) === String(p.teamId));
+          const rvTeam = teams.find(t => String(t._id) === String(rival.teamId));
+          await channel.send(
+            `⚔️ **RIVALITÉ DÉCLARÉE !**\n` +
+            `${ptTeam?.emoji || ''}**${p.name}** vs ${rvTeam?.emoji || ''}**${rival.name}** — ` +
+            `2 contacts en course cette saison. *Ces deux-là ne s'aiment pas...*\n` +
+            `*La narration prendra note de leurs prochaines confrontations !*`
+          );
+        }
+      }
+    }
+  }
 
   // Tableau final
   const embed = new EmbedBuilder().setTitle(`🏁 Résultats Officiels — ${race.emoji} ${race.circuit}`).setColor('#FF1801');
