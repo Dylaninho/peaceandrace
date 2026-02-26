@@ -2499,7 +2499,7 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_set_photo')
     .setDescription('[ADMIN] Définit la photo de profil d\'un pilote')
-    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible').setRequired(true))
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (laisse vide pour toi-même)'))
     .addStringOption(o => o.setName('url').setDescription('URL directe de l\'image (jpg/png/gif)').setRequired(true))
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
 
@@ -3623,7 +3623,7 @@ async function handleInteraction(interaction) {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
-    const target     = interaction.options.getUser('joueur');
+    const target     = interaction.options.getUser('joueur') || interaction.user;
     const url        = interaction.options.getString('url').trim();
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
 
