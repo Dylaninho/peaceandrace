@@ -1103,41 +1103,63 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     }
 
     // ── Safety Car (APRÈS les incidents — on peut citer la cause) ──
+    // Le SC est résolu ICI (après incidents, avant calcul des temps)
+    // Le bunching est appliqué IMMÉDIATEMENT pour que les gaps du tour suivant soient déjà serrés
     const prevScState = scState.state;
     scState = resolveSafetyCar(scState, lapIncidents);
     const scActive = scState.state !== 'NONE';
 
+    // ── Bunching SC : quand un SC/VSC se déclenche, tous les écarts se resserrent ──
+    // On réfère les positions APRÈS tri, puis on normalise les totalTime
     if (scState.state !== 'NONE' && prevScState === 'NONE') {
-      // Trouver la cause probable (dernier DNF du tour)
-      const cause     = lapDnfs.length > 0 ? lapDnfs[lapDnfs.length - 1] : null;
-      const causeStr  = cause
-        ? ` à cause de **l'abandon de ${cause.driver.pilot.name}**`
+      const aliveSC = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+      if (aliveSC.length > 1) {
+        const leaderTime = aliveSC[0].totalTime;
+        if (scState.state === 'SC') {
+          // SC complet : tout le monde se regroupe à ~1s maximum entre chaque voiture
+          for (let i = 1; i < aliveSC.length; i++) {
+            const maxGap = i * 900; // 0.9s par position, donc P2 = 0.9s, P10 = 9s du leader
+            aliveSC[i].totalTime = Math.min(aliveSC[i].totalTime, leaderTime + maxGap);
+          }
+        } else {
+          // VSC : ralentissement mais groupement partiel (gaps réduits de 60%)
+          for (let i = 1; i < aliveSC.length; i++) {
+            const currentGap = aliveSC[i].totalTime - leaderTime;
+            aliveSC[i].totalTime = leaderTime + Math.round(currentGap * 0.4);
+          }
+        }
+        // Recalcul des positions après bunching
+        aliveSC.forEach((d, i) => { d.pos = i + 1; });
+      }
+
+      // Annonce SC/VSC — APRÈS l'incident dans le même message
+      const cause    = lapDnfs.length > 0 ? lapDnfs[lapDnfs.length - 1] : null;
+      const causeStr = cause
+        ? ` suite à l'abandon de **${cause.driver.pilot.name}**`
         : ` suite à un incident sur la piste`;
 
       if (scState.state === 'SC') {
-        const scFlavors = [
-          `🚨 **SAFETY CAR DÉPLOYÉ AU TOUR ${lap}**${causeStr} !\nLe peloton se reforme — tous les écarts sont effacés. C'est reparti de zéro !`,
-          `🚨 **SAFETY CAR !** Tour ${lap}${causeStr}. La direction de course intervient — la voiture de sécurité prend la tête. Qui va rentrer aux stands ?`,
-          `🚨 **SC IN !** Tour ${lap}${causeStr}. Les commissaires nettoient la piste. Le peloton se compacte — ça va redonner du piment à cette course !`,
-        ];
-        events.push({ priority: 10, text: pick(scFlavors) });
+        events.push({ priority: 10, text: pick([
+          `🚨 **SAFETY CAR DÉPLOYÉ !**${causeStr}\nLe peloton se reforme — les écarts sont effacés. Tout est à refaire !`,
+          `🚨 **SC IN !**${causeStr}. La voiture de sécurité prend la tête — qui va rentrer aux stands pour gratter une stratégie ?`,
+          `🚨 **SAFETY CAR !** T${lap}${causeStr}. Les commissaires nettoient la piste — ça va redonner du piment à cette course !`,
+        ]) });
       } else {
-        const vscFlavors = [
-          `🟡 **VIRTUAL SAFETY CAR** déployé au tour ${lap}${causeStr}. Tout le monde roule au ralenti — pas de double yellow dans les stands.`,
-          `🟡 **VSC !** Tour ${lap}${causeStr}. Les pilotes maintiennent le delta. La course se met en pause le temps de sécuriser la zone.`,
-        ];
-        events.push({ priority: 10, text: pick(vscFlavors) });
+        events.push({ priority: 10, text: pick([
+          `🟡 **VIRTUAL SAFETY CAR**${causeStr}. Tout le monde maintient le delta — la course se met en pause.`,
+          `🟡 **VSC !**${causeStr}. Les pilotes roulent au ralenti, les gaps se resserrent. La course reprendra bientôt.`,
+        ]) });
       }
     }
 
+    // ── Fin de SC/VSC : green flag ────────────────────────────
     if (prevScState !== 'NONE' && scState.state === 'NONE') {
-      const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
-      const top3   = ranked.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
-      const gfFlavors = [
-        `🟢 **GREEN FLAG !** Tour ${lap} — La course est relancée ! ${top3}\nLes stratèges se grattent la tête — qui va attaquer en premier ?`,
-        `🟢 **FEU VERT !** Tour ${lap} — On repart ! Classement : ${top3}\nLa course va reprendre de plus belle — tensions garanties !`,
-      ];
-      events.push({ priority: 10, text: pick(gfFlavors) });
+      const rankedRestart = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+      const top3str = rankedRestart.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
+      events.push({ priority: 10, text: pick([
+        `🟢 **GREEN FLAG !** T${lap} — La course reprend ! ${top3str}\nLes gaps ont été effacés — tout le monde est dans le même mouchoir. Ça va exploser !`,
+        `🟢 **FEU VERT !** T${lap} — On repart ! ${top3str}\nLe peloton est groupé — qui va attaquer en premier ?`,
+      ]) });
     }
 
     // ── Calcul des temps au tour ─────────────────────────────
@@ -1200,15 +1222,19 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
     // ── Dépassements ─────────────────────────────────────────
     // Un dépassement en piste ne peut se produire que si les deux pilotes
-    // étaient PROCHES avant ce tour (gap pré-tour < 4s). Sinon c'est un
+    // étaient PROCHES avant ce tour (gap pré-tour < 3s). Sinon c'est un
     // artefact de simulation (pit mal classifié, écart trop grand).
+    // Après un SC, les gaps sont naturellement très serrés — les dépassements
+    // ne sont autorisés qu'à la reprise (tour suivant le green flag).
+    const justRestarted = prevScState !== 'NONE' && scState.state === 'NONE';
     for (const driver of ranked) {
       if (driver.pos >= driver.lastPos) continue;          // pas progressé
       if (driver.pittedThisLap) continue;                  // position due au pit
       if (scActive) continue;                              // pas pendant SC
+      if (justRestarted) continue;                         // tour de restart = pas de dépassement
       if (lap <= 1) continue;
 
-      // Trouver le pilote "passé" : celui qui occupait driver.lastPos
+      // Trouver le pilote "passé" : celui qui occupait driver.lastPos avant ce tour
       // et qui n'a pas lui-même pité
       const passed = ranked.find(d =>
         d.pos === driver.lastPos &&
@@ -1217,18 +1243,17 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
       );
       if (!passed) continue;
 
-      // Vérifier que le gap PRÉ-tour entre les deux était réaliste
-      // pour un vrai dépassement en piste (max ~4 secondes)
+      // Vérifier que le gap PRÉ-tour était réaliste (max ~3s pour un vrai dépassement en piste)
       const preLapDriver = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
       const preLapPassed = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
       const preLapGapMs  = Math.abs(preLapPassed - preLapDriver);
-      if (preLapGapMs > 4000) continue; // trop loin l'un de l'autre — pas un vrai dépassement
+      if (preLapGapMs > 3000) continue;
 
       // Gap APRÈS le tour (écart résultant)
-      const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
-      const gapStr    = postGapMs < 1000
-        ? `${postGapMs}ms sur ${passed.pilot.name}`
-        : `+${(postGapMs / 1000).toFixed(3)}s sur ${passed.pilot.name}`;
+      const postGapMs = driver.totalTime - passed.totalTime;
+      const gapStr    = Math.abs(postGapMs) < 1000
+        ? `${Math.abs(postGapMs)}ms`
+        : `${(Math.abs(postGapMs) / 1000).toFixed(3)}s`;
 
       const gapOnLeader = driver.pos > 1
         ? ` · ${((driver.totalTime - ranked[0].totalTime) / 1000).toFixed(3)}s du leader`
@@ -1245,11 +1270,14 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         ? `***🏆 T${lap} — CHANGEMENT EN TÊTE !!!***${drsTag}`
         : ovIsTop3
           ? `***⚔️ T${lap} — DÉPASSEMENT DANS LE TOP 3 !***${drsTag}`
-          : `⚔️ **T${lap} — DÉPASSEMENT !** P${driver.lastPos} → **P${driver.pos}**${drsTag}`;
+          : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
+
+      // Bloc de changement de positions (clair et lisible)
+      const posBlock = `⬆️ **${driver.pilot.name}** → P${ovNewPos}\n⬇️ **${passed.pilot.name}** → P${ovLostPos}`;
 
       events.push({
         priority: ovForLead ? 9 : ovIsTop3 ? 8 : 6,
-        text: `${ovHeader}\n  › ${howDesc}\n  › Écart : **${gapStr}**${gapOnLeader}`,
+        text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapOnLeader}*`,
       });
     }
 
@@ -1312,7 +1340,16 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     const primeV   = (driver.pos === 1 && !driver.dnf) ? (contract?.primeVictoire || 0) : 0;
     const primeP   = (driver.pos <= 3 && !driver.dnf)  ? (contract?.primePodium   || 0) : 0;
     const fl       = fastestLapHolder && String(fastestLapHolder.pilot._id) === String(driver.pilot._id);
-    const coins    = Math.round((pts * 20 + (driver.dnf ? 0 : 50)) * multi + salary + primeV + primeP + (fl ? 30 : 0));
+
+    // Bonus de participation : tout le monde gagne quelque chose même sans point
+    // P1-P10 = 0 bonus (pts F1 suffisent), P11 = 12, P15 = 60, P20 = 120
+    // Cela garantit que les bas de grille peuvent améliorer 1 stat toutes les 1-2 courses
+    const participBonus = driver.dnf ? 0 : Math.round(Math.max(0, (driver.pos - 10) * 12));
+
+    const coins = Math.round(
+      (pts * 20 + (driver.dnf ? 0 : 60) + participBonus) * multi
+      + salary + primeV + primeP + (fl ? 30 : 0)
+    );
 
     results.push({
       pilotId   : driver.pilot._id,
@@ -1734,16 +1771,16 @@ const commands = [
     .addUserOption(o => o.setName('joueur').setDescription('Joueur cible')),
 
   new SlashCommandBuilder().setName('ameliorer')
-    .setDescription('Améliore une stat de ton pilote')
+    .setDescription('Améliore une stat de ton pilote (+1 par achat, coût variable selon le niveau)')
     .addStringOption(o => o.setName('stat').setDescription('Stat à améliorer').setRequired(true)
       .addChoices(
-        { name: 'Dépassement    — 500 🪙', value: 'depassement'  },
-        { name: 'Freinage       — 500 🪙', value: 'freinage'     },
-        { name: 'Défense        — 450 🪙', value: 'defense'      },
-        { name: 'Adaptabilité   — 400 🪙', value: 'adaptabilite' },
-        { name: 'Réactions      — 400 🪙', value: 'reactions'    },
-        { name: 'Contrôle       — 450 🪙', value: 'controle'     },
-        { name: 'Gestion Pneus  — 400 🪙', value: 'gestionPneus' },
+        { name: 'Dépassement    — à partir de 120 🪙', value: 'depassement'  },
+        { name: 'Freinage       — à partir de 120 🪙', value: 'freinage'     },
+        { name: 'Défense        — à partir de 100 🪙', value: 'defense'      },
+        { name: 'Adaptabilité   — à partir de  90 🪙', value: 'adaptabilite' },
+        { name: 'Réactions      — à partir de  90 🪙', value: 'reactions'    },
+        { name: 'Contrôle       — à partir de 110 🪙', value: 'controle'     },
+        { name: 'Gestion Pneus  — à partir de  90 🪙', value: 'gestionPneus' },
       )),
 
   new SlashCommandBuilder().setName('ecuries')
@@ -1872,10 +1909,27 @@ client.once('ready', async () => {
 // ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝
 // ============================================================
 
-const STAT_COST = {
-  depassement: 500, freinage: 500, defense: 450,
-  adaptabilite: 400, reactions: 400, controle: 450, gestionPneus: 400,
+// ─── Coûts d'amélioration ────────────────────────────────────
+// Gain : toujours +1 par achat
+// Coût de base par stat, avec malus progressif selon le niveau actuel :
+//   coût_réel = coût_base × (1 + (stat_actuelle - 50) / 50)
+//   → À 50 : coût normal. À 75 : ×1.5. À 99 : ×1.98.
+//
+// Calibrage cible (sans salaire) :
+//   P1 (560 coins)   → 3-4 upgrades par course
+//   P3 (360 coins)   → 2-3 upgrades
+//   P10 (80 coins)   → 1 upgrade toutes les 1-2 courses
+//   P20 (120 coins)  → 1 upgrade toutes les 1-2 courses
+const STAT_COST_BASE = {
+  depassement: 100, freinage: 100, defense: 85,
+  adaptabilite: 75, reactions: 75, controle: 90, gestionPneus: 75,
 };
+
+function calcUpgradeCost(statKey, currentValue) {
+  const base = STAT_COST_BASE[statKey] || 85;
+  const multiplier = 1 + Math.max(0, (currentValue - 50)) / 50;
+  return Math.round(base * multiplier);
+}
 
 client.on('interactionCreate', async (interaction) => {
   try {
@@ -2125,27 +2179,65 @@ async function handleInteraction(interaction) {
     if (!pilot) return interaction.reply({ content: '❌ Crée d\'abord ton pilote.', ephemeral: true });
 
     const statKey  = interaction.options.getString('stat');
-    const cost     = STAT_COST[statKey];
     const current  = pilot[statKey];
     const MAX_STAT = 99;
 
-    if (current >= MAX_STAT) return interaction.reply({ content: '❌ Stat déjà au max (99) !', ephemeral: true });
-    if (pilot.plcoins < cost) return interaction.reply({ content: `❌ Pas assez de PLcoins (${pilot.plcoins}/${cost}).`, ephemeral: true });
+    if (current >= MAX_STAT) return interaction.reply({ content: '❌ Stat déjà au maximum (99) !', ephemeral: true });
 
-    // On calcule le vrai gain sans jamais dépasser 99
-    const gain     = Math.min(2, MAX_STAT - current);
-    const newValue = current + gain;
+    // Coût dynamique selon le niveau actuel de la stat
+    const cost = calcUpgradeCost(statKey, current);
 
-    // Double sécurité : $min garantit que même en cas de race condition, la stat ne dépasse pas 99
+    if (pilot.plcoins < cost) {
+      // Montrer combien il en manque et quand il pourra améliorer
+      const missing = cost - pilot.plcoins;
+      return interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setTitle('❌ PLcoins insuffisants')
+          .setColor('#CC4444')
+          .setDescription(
+            `**${statKey}** est actuellement à **${current}** — coût d'amélioration : **${cost} 🪙**\n` +
+            `Tu as **${pilot.plcoins} 🪙** — il te manque **${missing} 🪙**.\n\n` +
+            `💡 Continue à courir pour accumuler des PLcoins !`
+          )
+        ],
+        ephemeral: true,
+      });
+    }
+
+    // Gain toujours +1, plafonné à 99
+    const gain     = 1;
+    const newValue = Math.min(current + gain, MAX_STAT);
+
+    // Coût du prochain upgrade (pour information)
+    const nextCost = newValue < MAX_STAT ? calcUpgradeCost(statKey, newValue) : null;
+    const remaining = pilot.plcoins - cost;
+
     await Pilot.findByIdAndUpdate(pilot._id, {
       $inc: { plcoins: -cost },
-      $min: { [statKey]: MAX_STAT },          // si déjà à 99 suite à un race condition, ne bouge pas
-      $set: { [statKey]: newValue },           // valeur calculée côté serveur, plafonnée
+      $set: { [statKey]: newValue },
     });
+
+    const statLabels = {
+      depassement: 'Dépassement', freinage: 'Freinage', defense: 'Défense',
+      adaptabilite: 'Adaptabilité', reactions: 'Réactions', controle: 'Contrôle', gestionPneus: 'Gestion Pneus',
+    };
+
+    const desc = [
+      `**${statLabels[statKey] || statKey}** : ${current} → **${newValue}** (+1)`,
+      `💸 −${cost} 🪙 · Solde restant : **${remaining} 🪙**`,
+      newValue >= MAX_STAT
+        ? `\n🔒 **Maximum atteint (99)** — cette stat ne peut plus progresser.`
+        : nextCost
+          ? `\n📌 Prochain upgrade : **${nextCost} 🪙** *(stat plus haute = plus cher)*`
+          : '',
+    ].filter(Boolean).join('\n');
+
     return interaction.reply({
-      embeds: [new EmbedBuilder().setTitle('📈 Amélioration !').setColor('#FFD700')
-        .setDescription(`**${statKey}** : ${current} → **${newValue}** (+${gain})\n💸 −${cost} PLcoins` +
-          (newValue >= MAX_STAT ? '\n🔒 **Maximum atteint (99)** — cette stat ne peut plus progresser.' : ''))],
+      embeds: [new EmbedBuilder()
+        .setTitle('📈 Amélioration !')
+        .setColor('#FFD700')
+        .setDescription(desc)
+      ],
     });
   }
 
@@ -2766,7 +2858,7 @@ async function handleInteraction(interaction) {
         { name: '👤 Ton pilote', value: [
           '`/create_pilot` — Crée ton pilote (1 seul par compte)',
           '`/profil` — Stats, note générale, contrat et classement',
-          '`/ameliorer` — Améliore une stat (+2 garanti)',
+          '`/ameliorer` — Améliore une stat (+1, coût variable selon niveau)',
           '`/historique` — Ta carrière complète',
         ].join('\n') },
         { name: '🏎️ Écuries & Pilotes', value: [
@@ -2844,7 +2936,7 @@ async function handleInteraction(interaction) {
           name: '\u{1F4B0}  PLcoins \u2014 La monnaie du jeu',
           value:
             'Tu gagnes des **PLcoins** \u00e0 chaque course (points + salaire contrat + primes).\n' +
-            'Tu les d\u00e9penses pour **am\u00e9liorer tes stats** (+2 garanti \u00e0 chaque fois).\n' +
+            'Tu les d\u00e9penses pour **am\u00e9liorer tes stats** (+1 par achat (coût croissant selon ton niveau).\n' +
             'Objectif\u00a0: construire le pilote parfait pour ton style de jeu.',
           inline: false,
         },
@@ -2900,7 +2992,7 @@ async function handleInteraction(interaction) {
         },
         {
           name: '4\uFE0F\u20E3  Investis tes PLcoins',
-          value: '`/ameliorer` pour booster une stat (+2 garanti \u00e0 chaque fois).',
+          value: '`/ameliorer` pour booster une stat (+1 par achat, coût croissant selon ton niveau).',
           inline: false,
         },
         {
