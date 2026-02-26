@@ -139,6 +139,31 @@ const HallOfFameSchema = new mongoose.Schema({
 });
 const HallOfFame = mongoose.model('HallOfFame', HallOfFameSchema);
 
+// ── PilotGPRecord — Historique détaillé par GP ────────────
+// Un document par pilote par course — alimente /performances
+const PilotGPRecordSchema = new mongoose.Schema({
+  pilotId      : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', required: true },
+  seasonId     : { type: mongoose.Schema.Types.ObjectId, ref: 'Season' },
+  seasonYear   : { type: Number, required: true },
+  raceId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Race' },
+  circuit      : { type: String, required: true },
+  circuitEmoji : { type: String, default: '🏁' },
+  gpStyle      : { type: String, default: 'mixte' },
+  teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team' },
+  teamName     : { type: String, default: '?' },
+  teamEmoji    : { type: String, default: '🏎️' },
+  startPos     : { type: Number, default: null },   // position sur la grille
+  finishPos    : { type: Number, required: true },  // position finale
+  dnf          : { type: Boolean, default: false },
+  dnfReason    : { type: String, default: null },
+  points       : { type: Number, default: 0 },
+  coins        : { type: Number, default: 0 },
+  fastestLap   : { type: Boolean, default: false },
+  raceDate     : { type: Date, default: Date.now },
+});
+PilotGPRecordSchema.index({ pilotId: 1, raceDate: -1 });
+const PilotGPRecord = mongoose.model('PilotGPRecord', PilotGPRecordSchema);
+
 // ── Team ───────────────────────────────────────────────────
 const TeamSchema = new mongoose.Schema({
   name         : String,
@@ -2084,6 +2109,13 @@ async function getAllPilotsWithTeams() {
 async function applyRaceResults(raceResults, raceId, season, collisions = []) {
   const teams = await Team.find();
 
+  // Récupérer les infos de la course pour les GPRecords
+  const raceDoc = await Race.findById(raceId);
+
+  // Récupérer la grille de départ pour les positions de départ
+  const qualiGrid = raceDoc?.qualiGrid || [];
+  const startPosMap = new Map(qualiGrid.map((g, i) => [String(g.pilotId), i + 1]));
+
   for (const r of raceResults) {
     await Pilot.findByIdAndUpdate(r.pilotId, { $inc: { plcoins: r.coins, totalEarned: r.coins } });
     const pts = F1_POINTS[r.pos - 1] || 0;
@@ -2098,6 +2130,31 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
       { $inc: { points: pts } },
       { upsert: true }
     );
+
+    // ── Enregistrement GPRecord ──────────────────────────────
+    if (raceDoc) {
+      const team = teams.find(t => String(t._id) === String(r.teamId));
+      await PilotGPRecord.create({
+        pilotId      : r.pilotId,
+        seasonId     : season._id,
+        seasonYear   : season.year,
+        raceId       : raceId,
+        circuit      : raceDoc.circuit,
+        circuitEmoji : raceDoc.emoji || '🏁',
+        gpStyle      : raceDoc.gpStyle || 'mixte',
+        teamId       : r.teamId,
+        teamName     : team?.name || '?',
+        teamEmoji    : team?.emoji || '🏎️',
+        startPos     : startPosMap.get(String(r.pilotId)) || null,
+        finishPos    : r.pos,
+        dnf          : r.dnf || false,
+        dnfReason    : r.dnfReason || null,
+        points       : pts,
+        coins        : r.coins,
+        fastestLap   : r.fastestLap || false,
+        raceDate     : raceDoc.scheduledDate || new Date(),
+      });
+    }
   }
 
   await Race.findByIdAndUpdate(raceId, { status: 'done', raceResults });
@@ -2541,6 +2598,18 @@ const commands = [
 
   new SlashCommandBuilder().setName('concept')
     .setDescription('Présentation complète du jeu F1 PL — pour les nouveaux !'),
+
+  new SlashCommandBuilder().setName('performances')
+    .setDescription('📊 Historique détaillé des GPs, équipes et records d\'un pilote')
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)'))
+    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2))
+    .addStringOption(o => o.setName('vue').setDescription('Que veux-tu voir ?')
+      .addChoices(
+        { name: '🕐 Récents — 10 derniers GPs', value: 'recent' },
+        { name: '🏆 Records — Meilleurs résultats', value: 'records' },
+        { name: '🏎️ Écuries — Historique des équipes', value: 'teams' },
+        { name: '📅 Saison — GPs d\'une saison', value: 'season' },
+      )),
 ];
 
 // ============================================================
@@ -4068,6 +4137,7 @@ async function handleInteraction(interaction) {
           '`/create_pilot` — Crée un pilote (nationalité, numéro, stats — **2 max par joueur**)',
           '`/profil [pilote:1|2]` — Stats, note générale, contrat et classement',
           '`/ameliorer [pilote:1|2]` — Améliore une stat (+1, coût croissant selon le niveau)',
+          '`/performances [pilote:1|2] [vue:récents|records|écuries|saison]` — Historique complet des GPs',
           '`/historique [pilote:1|2]` — Carrière complète multi-saisons',
           '`/rivalite [pilote:1|2]` — Ta rivalité actuelle en saison',
         ].join('\n') },
@@ -4097,6 +4167,189 @@ async function handleInteraction(interaction) {
     return interaction.reply({ embeds: [f1Embed], ephemeral: true });
   }
 
+
+  // ── /performances ─────────────────────────────────────────
+  if (commandName === 'performances') {
+    const target     = interaction.options.getUser('joueur') || interaction.user;
+    const pilotIndex = interaction.options.getInteger('pilote') || 1;
+    const vue        = interaction.options.getString('vue') || 'recent';
+
+    const pilot = await getPilotForUser(target.id, pilotIndex);
+    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+
+    const team    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
+    const allRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
+
+    if (!allRecs.length) {
+      return interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setTitle(`📊 Performances — ${pilot.name}`)
+          .setColor('#888888')
+          .setDescription('*Aucune course disputée pour l\'instant. Les données s\'accumuleront après chaque GP !*')
+        ],
+        ephemeral: true,
+      });
+    }
+
+    const ov   = overallRating(pilot);
+    const tier = ratingTier(ov);
+    const medals = { 1:'🥇', 2:'🥈', 3:'🥉' };
+    const dnfIcon = { CRASH:'💥', MECHANICAL:'🔩', PUNCTURE:'🫧' };
+    const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+
+    function posStr(r) {
+      if (r.dnf) return `❌ DNF ${dnfIcon[r.dnfReason] || ''}`;
+      return `${medals[r.finishPos] || `P${r.finishPos}`}`;
+    }
+    function gainLoss(r) {
+      if (r.dnf || r.startPos == null) return '';
+      const diff = r.startPos - r.finishPos;
+      if (diff > 0) return ` ⬆️+${diff}`;
+      if (diff < 0) return ` ⬇️${diff}`;
+      return ' ➡️';
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(team?.color || tier.color)
+      .setThumbnail(pilot.photoUrl || null);
+
+    // ── VUE RÉCENTS ──────────────────────────────────────────
+    if (vue === 'recent') {
+      const recents = allRecs.slice(0, 10);
+      const lines = recents.map(r => {
+        const fl = r.fastestLap ? ' ⚡' : '';
+        const gl = gainLoss(r);
+        const pts = r.points > 0 ? ` · **${r.points}pts**` : '';
+        const grid = r.startPos ? ` *(grille P${r.startPos})*` : '';
+        return `${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})*\n` +
+               `  ${posStr(r)}${gl}${pts}${fl} — ${r.teamEmoji} ${r.teamName}${grid}`;
+      }).join('\n\n');
+
+      // Forme récente : 5 derniers
+      const last5 = allRecs.slice(0, 5);
+      const formStr = last5.map(r => {
+        if (r.dnf) return '❌';
+        if (r.finishPos === 1) return '🥇';
+        if (r.finishPos <= 3) return '🏆';
+        if (r.finishPos <= 10) return '✅';
+        return '▪️';
+      }).join(' ');
+
+      embed
+        .setTitle(`🕐 Performances récentes — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
+        .setDescription(
+          `${tier.badge} **${ov}** — ${team ? `${team.emoji} ${team.name}` : '*Sans écurie*'}\n` +
+          `Forme : ${formStr} *(5 derniers GPs)*\n\n` +
+          lines
+        )
+        .setFooter({ text: `${allRecs.length} GP(s) au total · Vue Récents` });
+
+    // ── VUE RECORDS ──────────────────────────────────────────
+    } else if (vue === 'records') {
+      const finished = allRecs.filter(r => !r.dnf);
+      const best     = [...finished].sort((a, b) => a.finishPos - b.finishPos);
+      const bestPts  = [...allRecs].sort((a, b) => b.points - a.points);
+      const top5     = best.slice(0, 5);
+      const wins     = finished.filter(r => r.finishPos === 1);
+      const podiums  = finished.filter(r => r.finishPos <= 3);
+      const flaps    = allRecs.filter(r => r.fastestLap);
+      const dnfs     = allRecs.filter(r => r.dnf);
+      const bestGain = [...finished.filter(r => r.startPos)].sort((a, b) => (a.startPos - a.finishPos) < (b.startPos - b.finishPos) ? 1 : -1)[0];
+      const totalPts = allRecs.reduce((s, r) => s + r.points, 0);
+      const totalCoins = allRecs.reduce((s, r) => s + r.coins, 0);
+
+      const top5lines = top5.map(r =>
+        `${medals[r.finishPos] || `P${r.finishPos}`} ${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})* — ${r.teamEmoji} ${r.teamName}` +
+        (r.startPos ? ` *(grille P${r.startPos})*` : '') +
+        (r.fastestLap ? ' ⚡' : '')
+      ).join('\n');
+
+      const statsBlock =
+        `🥇 **${wins.length}** victoire(s) · 🏆 **${podiums.length}** podium(s) · ❌ **${dnfs.length}** DNF\n` +
+        `⚡ **${flaps.length}** meilleur(s) tour(s) · 📊 **${totalPts}** pts totaux · 💰 **${totalCoins}** 🪙 gagnés\n` +
+        (bestGain ? `🚀 Meilleure remontée : **+${bestGain.startPos - bestGain.finishPos}** places (${bestGain.circuitEmoji} ${bestGain.circuit} S${bestGain.seasonYear})\n` : '');
+
+      embed
+        .setTitle(`🏆 Records — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
+        .setDescription(
+          `${tier.badge} **${ov}** — **${allRecs.length}** GP(s) disputé(s)\n\n` +
+          `**📈 Statistiques carrière :**\n${statsBlock}\n` +
+          (top5.length ? `**🎖️ Top ${top5.length} meilleurs résultats :**\n${top5lines}` : '*Aucun résultat sans DNF.*')
+        )
+        .setFooter({ text: 'Vue Records — tous GP confondus' });
+
+    // ── VUE ÉQUIPES ──────────────────────────────────────────
+    } else if (vue === 'teams') {
+      // Regrouper par équipe (nom + emoji pour clé)
+      const teamGroups = new Map();
+      for (const r of allRecs) {
+        const key = r.teamName;
+        if (!teamGroups.has(key)) teamGroups.set(key, { emoji: r.teamEmoji, name: r.teamName, records: [] });
+        teamGroups.get(key).records.push(r);
+      }
+
+      const teamLines = [...teamGroups.values()].map(g => {
+        const recs     = g.records;
+        const finished = recs.filter(r => !r.dnf);
+        const wins     = finished.filter(r => r.finishPos === 1).length;
+        const podiums  = finished.filter(r => r.finishPos <= 3).length;
+        const dnfs2    = recs.filter(r => r.dnf).length;
+        const pts      = recs.reduce((s, r) => s + r.points, 0);
+        const avgPos   = finished.length ? (finished.reduce((s, r) => s + r.finishPos, 0) / finished.length).toFixed(1) : '—';
+        const seasons  = [...new Set(recs.map(r => r.seasonYear))].sort().join(', ');
+        const bestR    = finished.sort((a, b) => a.finishPos - b.finishPos)[0];
+        return (
+          `**${g.emoji} ${g.name}** — S${seasons} · ${recs.length} GP(s)\n` +
+          `  🥇${wins}V · 🏆${podiums}P · ❌${dnfs2} DNF · ${pts}pts · moy. P${avgPos}` +
+          (bestR ? `\n  ⭐ Meilleur : ${medals[bestR.finishPos] || `P${bestR.finishPos}`} ${bestR.circuitEmoji} ${bestR.circuit} S${bestR.seasonYear}` : '')
+        );
+      }).join('\n\n');
+
+      embed
+        .setTitle(`🏎️ Historique des écuries — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
+        .setDescription(
+          `${tier.badge} **${ov}** — **${teamGroups.size}** écurie(s) au total\n\n` +
+          teamLines
+        )
+        .setFooter({ text: 'Vue Écuries — toutes saisons confondues' });
+
+    // ── VUE SAISON ───────────────────────────────────────────
+    } else if (vue === 'season') {
+      // Trouver la saison active ou la plus récente
+      const activeSeason = await getActiveSeason();
+      const targetYear   = activeSeason?.year || (allRecs[0]?.seasonYear);
+      const seasonRecs   = allRecs.filter(r => r.seasonYear === targetYear).sort((a, b) => new Date(a.raceDate) - new Date(b.raceDate));
+
+      if (!seasonRecs.length) {
+        return interaction.reply({ content: `❌ Aucune course jouée en saison ${targetYear}.`, ephemeral: true });
+      }
+
+      const finished  = seasonRecs.filter(r => !r.dnf);
+      const totalPts  = seasonRecs.reduce((s, r) => s + r.points, 0);
+      const wins      = finished.filter(r => r.finishPos === 1).length;
+      const podiums   = finished.filter(r => r.finishPos <= 3).length;
+      const dnfsS     = seasonRecs.filter(r => r.dnf).length;
+      const avgPos    = finished.length ? (finished.reduce((s, r) => s + r.finishPos, 0) / finished.length).toFixed(1) : '—';
+
+      const lines = seasonRecs.map(r => {
+        const fl  = r.fastestLap ? '⚡' : '  ';
+        const gl  = gainLoss(r);
+        const pts = r.points > 0 ? `+${r.points}pts` : '     ';
+        const grid = r.startPos ? `P${String(r.startPos).padStart(2)}→` : '    ';
+        return `${r.circuitEmoji} ${styleEmojis[r.gpStyle] || ''} \`${grid}${posStr(r).padEnd(5)}\` ${fl} ${pts} — ${r.teamEmoji}${r.teamName}${gl}`;
+      }).join('\n');
+
+      embed
+        .setTitle(`📅 Saison ${targetYear} — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
+        .setDescription(
+          `${tier.badge} **${ov}** · **${totalPts} pts** · 🥇${wins}V · 🏆${podiums}P · ❌${dnfsS} DNF · moy. P${avgPos}\n\n` +
+          `\`\`\`\n${lines}\n\`\`\``
+        )
+        .setFooter({ text: `${seasonRecs.length}/${(await Race.countDocuments({ seasonId: activeSeason?._id }))} GPs joués — Saison ${targetYear}` });
+    }
+
+    return interaction.reply({ embeds: [embed] });
+  }
 
   // ── /concept ──────────────────────────────────────────────
   if (commandName === 'concept') {
