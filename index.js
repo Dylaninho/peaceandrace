@@ -702,7 +702,7 @@ const RACE_GIFS = {
     'https://i.makeagif.com/media/2-29-2016/SMpwn6.gif',
     'https://media.tenor.com/QbdwfqcYeuIAAAAM/f1-f1overtake.gif',
     'https://cdn.makeagif.com/media/12-05-2013/RGyvuA.gif',
-    'https://64.media.tumblr.com/bace9527a9df9d0f6d54a390510f34f1/tumblr_ntm7hr9HJ61s9l8tco4_540.gif',
+    'https://64.media.tumblr.com/bace9527a9df9d0f6d54a390510f34f1/tumblr_ntm7hr9HJ61s9l8tco4_540.gifv',
     'https://i.postimg.cc/HxWZBrBJ/Race-Highlights-2021-Italian-Grand-Prix-2.gif',
   ],
 
@@ -1295,15 +1295,18 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         if (!d || !ahead) continue;
         const reactDiff = d.pilot.reactions - ahead.pilot.reactions;
         if (reactDiff > 12 && Math.random() > 0.52) {
+          // Swap des objets dans le tableau
           [drivers[i], drivers[i - 1]] = [drivers[i - 1], drivers[i]];
-          drivers[i].pos     = i + 1;
-          drivers[i - 1].pos = i;
+          // Après le swap : drivers[i-1] est l'ancien d (qui monte), drivers[i] est l'ancien ahead (qui descend)
+          drivers[i - 1].pos = i;      // d monte à la position i (1-based)
+          drivers[i].pos     = i + 1;  // ahead descend à i+1
           startSwaps.push(`${d.team.emoji}**${d.pilot.name}** P${i+1}→**P${i}** dépasse ${ahead.team.emoji}**${ahead.pilot.name}**`);
         }
       }
+      // Recalcul propre des positions selon l'ordre final du tableau
       drivers.sort((a,b) => a.pos - b.pos).forEach((d,i) => d.pos = i+1);
       alive.forEach(d => { d.lastPos = d.pos; });
-      const startLeader = drivers[0];
+      const startLeader = drivers.find(d => d.pos === 1) || drivers[0];
       if (startSwaps.length) {
         events.push({ priority: 9, text:
           `🚦 **BAGARRE AU PREMIER VIRAGE !**\n${startSwaps.slice(0,4).map(s => `  › ${s}`).join('\n')}\n  › ${startLeader.team.emoji}**${startLeader.pilot.name}** mène à l'issue du premier tour !`
