@@ -1986,6 +1986,9 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 // ─── Helpers pilote multi-pilotes ──────────────────────────
 // Retourne le pilote d'un user selon son index (1 ou 2). null si introuvable.
 async function getPilotForUser(discordId, pilotIndex = 1) {
+  if (pilotIndex === 1) {
+    return Pilot.findOne({ discordId, $or: [{ pilotIndex: 1 }, { pilotIndex: null }, { pilotIndex: { $exists: false } }] });
+  }
   return Pilot.findOne({ discordId, pilotIndex });
 }
 // Retourne tous les pilotes d'un user (1 ou 2)
