@@ -702,7 +702,7 @@ const RACE_GIFS = {
     'https://i.makeagif.com/media/2-29-2016/SMpwn6.gif',
     'https://media.tenor.com/QbdwfqcYeuIAAAAM/f1-f1overtake.gif',
     'https://cdn.makeagif.com/media/12-05-2013/RGyvuA.gif',
-    'https://64.media.tumblr.com/bace9527a9df9d0f6d54a390510f34f1/tumblr_ntm7hr9HJ61s9l8tco4_540.gifv',
+    'https://64.media.tumblr.com/bace9527a9df9d0f6d54a390510f34f1/tumblr_ntm7hr9HJ61s9l8tco4_540.gif',
     'https://i.postimg.cc/HxWZBrBJ/Race-Highlights-2021-Italian-Grand-Prix-2.gif',
   ],
 
