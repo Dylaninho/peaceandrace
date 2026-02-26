@@ -427,7 +427,7 @@ function pilotScore(pilot, gpStyle) {
 }
 
 // ─── Calcul du lap time ───────────────────────────────────
-function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position) {
+function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0) {
   const BASE = 90_000;
   const w = GP_STYLE_WEIGHTS[gpStyle];
 
@@ -462,14 +462,18 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   let dirtyAirF = 1.0;
   if (position > 1) {
     const dirtyAirPenalty = (100 - team.dirtyAir) / 100 * 0.012;
-    dirtyAirF = 1 + dirtyAirPenalty * Math.random();
+    // Pendant le cooldown post-SC, le dirty air est réduit (DRS train, peloton compact)
+    const daRandom = scCooldown > 0 ? Math.random() * 0.3 : Math.random();
+    dirtyAirF = 1 + dirtyAirPenalty * daRandom;
   }
 
   // Track evolution
   const trackF = 1 - (trackEvo / 100 * 0.015);
 
   // Variabilité (controle réduit les erreurs de pilotage)
-  const errorRange = (100 - pilot.controle) / 100 * 0.6 / 100;
+  // Après un SC/VSC, la variance est réduite pour maintenir le peloton groupé (~5 tours)
+  const cooldownFactor = scCooldown > 0 ? 0.25 : 1.0; // 75% de réduction pendant le cooldown
+  const errorRange = (100 - pilot.controle) / 100 * 0.6 / 100 * cooldownFactor;
   const randF = 1 + (Math.random() - 0.5) * errorRange;
 
   // Météo — adaptabilite réduit la perte par temps variable
@@ -929,6 +933,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   }).filter(Boolean);
 
   let scState          = { state: 'NONE', lapsLeft: 0 };
+  let scCooldown       = 0; // tours de variance réduite après la fin d'un SC/VSC
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
   const raceCollisions = []; // { attackerId, victimId } — pour rivalités
@@ -1193,7 +1198,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         incidentText = pick(puncFlavors);
       }
 
-      if (incidentText) events.push({ priority: 8, text: incidentText });
+      if (incidentText) events.push({ priority: 10, text: incidentText });
     }
 
     // ── Safety Car (APRÈS les incidents — on peut citer la cause) ──
@@ -1233,13 +1238,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         : ` suite à un incident sur la piste`;
 
       if (scState.state === 'SC') {
-        events.push({ priority: 10, text: pick([
+        events.push({ priority: 9, text: pick([
           `🚨 **SAFETY CAR DÉPLOYÉ !**${causeStr}\nLe peloton se reforme — les écarts sont effacés. Tout est à refaire !`,
           `🚨 **SC IN !**${causeStr}. La voiture de sécurité prend la tête — qui va rentrer aux stands pour gratter une stratégie ?`,
           `🚨 **SAFETY CAR !** T${lap}${causeStr}. Les commissaires nettoient la piste — ça va redonner du piment à cette course !`,
         ]) });
       } else {
-        events.push({ priority: 10, text: pick([
+        events.push({ priority: 9, text: pick([
           `🟡 **VIRTUAL SAFETY CAR**${causeStr}. Tout le monde maintient le delta — la course se met en pause.`,
           `🟡 **VSC !**${causeStr}. Les pilotes roulent au ralenti, les gaps se resserrent. La course reprendra bientôt.`,
         ]) });
@@ -1248,6 +1253,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
     // ── Fin de SC/VSC : green flag ────────────────────────────
     if (prevScState !== 'NONE' && scState.state === 'NONE') {
+      scCooldown = 5; // 5 tours de variance réduite après restart
       const rankedRestart = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
       const top3str = rankedRestart.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
       events.push({ priority: 10, text: pick([
@@ -1257,11 +1263,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     }
 
     // ── Calcul des temps au tour ─────────────────────────────
+    if (scCooldown > 0) scCooldown--;
     for (const driver of drivers.filter(d => !d.dnf)) {
       let lt = calcLapTime(
         driver.pilot, driver.team,
         driver.tireCompound, driver.tireWear,
-        weather, trackEvo, gpStyle, driver.pos
+        weather, trackEvo, gpStyle, driver.pos,
+        scCooldown  // passer le cooldown pour réduire la variance
       );
       if (scActive) lt = Math.round(lt * (scState.state === 'SC' ? 1.35 : 1.18));
 
@@ -1329,13 +1337,17 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
       if (lap <= 1) continue;
 
       // Trouver le pilote "passé" : celui qui occupait driver.lastPos avant ce tour
-      // et qui n'a pas lui-même pité
+      // et qui n'a pas lui-même pité — ET qui était juste devant (positions adjacentes)
       const passed = ranked.find(d =>
         d.pos === driver.lastPos &&
         !d.pittedThisLap &&
         String(d.pilot._id) !== String(driver.pilot._id)
       );
       if (!passed) continue;
+
+      // Vérifier que les positions étaient adjacentes AVANT le tour (pas de saut de plusieurs rangs)
+      // driver.lastPos doit être exactement driver.pos + 1 (il était juste derrière)
+      if (driver.lastPos !== driver.pos + 1) continue;
 
       // Vérifier que le gap PRÉ-tour était réaliste (max ~3s pour un vrai dépassement en piste)
       const preLapDriver = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
@@ -2028,7 +2040,7 @@ const commands = [
   new SlashCommandBuilder().setName('admin_test_practice')
     .setDescription('[ADMIN] Simule des essais libres fictifs — test narration'),
 
-  new SlashCommandBuilder().setName('admin_test_quali')
+  new SlashCommandBuilder().setName('admin_test_qualif')
     .setDescription('[ADMIN] Simule des qualifications fictives — test narration'),
 
   new SlashCommandBuilder().setName('admin_help')
@@ -3060,61 +3072,147 @@ async function handleInteraction(interaction) {
     return;
   }
 
-  // -- /admin_test_quali --
-  if (commandName === 'admin_test_quali') {
+  // -- /admin_test_qualif --
+  if (commandName === 'admin_test_qualif') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
     const { testTeams, testPilots, testRace } = buildTestFixtures();
-    await interaction.reply({ content: `⏱️ **Qualifications de test** — style **${testRace.gpStyle.toUpperCase()}** · résultats en cours...`, ephemeral: true });
+    await interaction.reply({ content: `⏱️ **Qualifications TEST Q1/Q2/Q3** — style **${testRace.gpStyle.toUpperCase()}** — résultats en cours dans ce channel...`, ephemeral: true });
 
     ;(async () => {
-      const channel = interaction.channel;
-      const { grid, weather } = await simulateQualifying(testRace, testPilots, testTeams);
-      const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+      const channel      = interaction.channel;
+      const styleEmojis  = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+      const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
 
-      // Intro Q
+      const { grid, weather, q3Size, q2Size } = await simulateQualifying(testRace, testPilots, testTeams);
+
+      const q3Grid  = grid.slice(0, q3Size);
+      const q2Grid  = grid.slice(q3Size, q2Size);
+      const q1Grid  = grid.slice(q2Size);
+      const poleman = q3Grid[0];
+
+      // ─── INTRO ─────────────────────────────────────────────
       await channel.send(
         `⏱️ **QUALIFICATIONS — ${testRace.emoji} ${testRace.circuit}** *(TEST)*\n` +
-        `${styleEmojis[testRace.gpStyle]} **${testRace.gpStyle.toUpperCase()}** · Météo : **${weather}**\n` +
-        `Les pilotes s'élancent pour le tour lancé. Un seul tour, tout donner...`
+        `${styleEmojis[testRace.gpStyle]} **${testRace.gpStyle.toUpperCase()}** · Météo : **${weatherLabels[weather] || weather}**\n` +
+        `Les pilotes prennent la piste pour décrocher la meilleure place sur la grille...`
       );
-      await sleep(2000);
+      await sleep(3000);
 
-      // Suspense : annonce les temps progressivement
-      const sorted = [...grid];
-      const mid    = Math.floor(sorted.length / 2);
+      // ─── Q1 ────────────────────────────────────────────────
+      await channel.send(`🟡 **Q1 — DÉBUT** · ${grid.length} pilotes en piste · La zone d'élimination commence à P${q2Size + 1}`);
+      await sleep(2500);
 
-      // Premier secteur — quelques temps intermédiaires
-      const early3 = sorted.slice(0, 3);
+      const midQ1 = [...grid].sort(() => Math.random() - 0.5).slice(0, 4);
       await channel.send(
-        `📻 *Q en cours...* ${early3.map((g,i) => `P${i+1} ${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time)}`).join(' · ')}`
+        `📻 *Q1 en cours...* ` +
+        midQ1.map(g => `${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time + randInt(200, 800))}`).join(' · ')
+      );
+      await sleep(3000);
+
+      const q1EliminEmbed = new EmbedBuilder()
+        .setTitle(`🔴 Q1 TERMINÉ — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
+        .setColor('#FF4444')
+        .setDescription(
+          `**Éliminés (P${q2Size + 1}–${grid.length}) :**\n` +
+          q1Grid.map((g, i) => {
+            const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
+            return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
+          }).join('\n') +
+          `\n\n**Passage en Q2 :** Top ${q2Size} pilotes ✅`
+        );
+      await channel.send({ embeds: [q1EliminEmbed] });
+      await sleep(4000);
+
+      // ─── Q2 ────────────────────────────────────────────────
+      const q2BubbleLine = grid.slice(q3Size - 1, q3Size + 3).map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
+      await channel.send(
+        `🟡 **Q2 — DÉBUT** · ${q2Size} pilotes en piste · La zone d'élimination commence à P${q3Size + 1}\n` +
+        `*Sur le fil : ${q2BubbleLine}*`
       );
       await sleep(2500);
 
-      // Embed final grille quali
-      const embed = new EmbedBuilder()
-        .setTitle(`⏱️ Classement Qualifications — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
+      const midQ2 = q2Grid.concat(q3Grid).sort(() => Math.random() - 0.5).slice(0, 4);
+      await channel.send(
+        `📻 *Q2 en cours...* ` +
+        midQ2.map(g => `${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time + randInt(100, 500))}`).join(' · ')
+      );
+      await sleep(3000);
+
+      const lastQ3    = q3Grid[q3Size - 1];
+      const firstOut  = q2Grid[0];
+      const q2Thriller = ((firstOut.time - lastQ3.time) / 1000).toFixed(3);
+
+      const q2EliminEmbed = new EmbedBuilder()
+        .setTitle(`🔴 Q2 TERMINÉ — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
+        .setColor('#FF8800')
+        .setDescription(
+          `**Éliminés (P${q3Size + 1}–${q2Size}) :**\n` +
+          q2Grid.map((g, i) => {
+            const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
+            return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
+          }).join('\n') +
+          `\n\n⚠️ **${lastQ3.teamEmoji}${lastQ3.pilotName}** passe de justesse — **${q2Thriller}s** d'avance sur **${firstOut.teamEmoji}${firstOut.pilotName}** !` +
+          `\n\n**Passage en Q3 :** Top ${q3Size} pilotes ✅`
+        );
+      await channel.send({ embeds: [q2EliminEmbed] });
+      await sleep(4000);
+
+      // ─── Q3 ────────────────────────────────────────────────
+      const q3Names = q3Grid.map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
+      await channel.send(
+        `🔥 **Q3 — SHOOT-OUT POUR LA POLE !**\n` +
+        `Les ${q3Size} meilleurs pilotes donnent tout — UN tour, TOUT jouer.\n` +
+        `*En piste : ${q3Names}*`
+      );
+      await sleep(3000);
+
+      // Suspense : annonce les temps en sens inverse (dernier → premier)
+      const q3Reversed = [...q3Grid].reverse();
+      for (let i = 0; i < Math.min(3, q3Reversed.length); i++) {
+        const g   = q3Reversed[i];
+        const pos = q3Grid.length - i;
+        await channel.send(`📻 **${g.teamEmoji}${g.pilotName}** — ${msToLapStr(g.time)} · provisoirement **P${pos}**`);
+        await sleep(1500);
+      }
+      await sleep(1500);
+
+      // Embed final Q3 — grille complète
+      const q3Embed = new EmbedBuilder()
+        .setTitle(`🏆 Q3 — GRILLE DE DÉPART OFFICIELLE — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
         .setColor('#FFD700')
         .setDescription(
-          `Météo : **${weather}** · **${testRace.gpStyle.toUpperCase()}** ${styleEmojis[testRace.gpStyle]}\n\n` +
-          grid.map((g, i) => {
-            const gap     = i === 0 ? '🏆 **POLE POSITION**' : `+${((g.time - grid[0].time)/1000).toFixed(3)}s`;
-            const medal   = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`P${String(i+1).padStart(2,' ')}\``;
+          `Météo Q : **${weatherLabels[weather] || weather}**\n\n` +
+          q3Grid.map((g, i) => {
+            const gap   = i === 0 ? '🏆 **POLE POSITION**' : `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
+            const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`P${i+1}\``;
             return `${medal} ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
           }).join('\n') +
-          '\n\n*⚠️ Session fictive — aucune donnée sauvegardée*'
+          `\n\n— — —\n` +
+          q2Grid.map((g, i) => {
+            const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
+            return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
+          }).join('\n') +
+          `\n` +
+          q1Grid.map((g, i) => {
+            const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
+            return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
+          }).join('\n') +
+          `\n\n*⚠️ Session fictive — aucune donnée sauvegardée*`
         );
-      await channel.send({ embeds: [embed] });
+      await channel.send({ embeds: [q3Embed] });
+      await sleep(1500);
 
-      // Commentaire pole
-      const poleman = grid[0];
-      const gap2nd  = ((grid[1]?.time - grid[0].time) / 1000).toFixed(3);
-      await channel.send(
-        `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** en **${msToLapStr(poleman.time)}** !` +
-        (grid[1] ? ` **+${gap2nd}s** d'avance sur ${grid[1].teamEmoji}**${grid[1].pilotName}**. Belle performance !` : '')
-      );
-    })().catch(e => console.error('admin_test_quali error:', e.message));
+      // Message pole
+      const gap2nd  = q3Grid[1] ? ((q3Grid[1].time - poleman.time) / 1000).toFixed(3) : null;
+      const poleMsg = gap2nd && parseFloat(gap2nd) < 0.1
+        ? `***🏆 POLE POSITION !!! ${poleman.teamEmoji}${poleman.pilotName.toUpperCase()} EN ${msToLapStr(poleman.time)} !!! +${gap2nd}s — ULTRA SERRÉ !!!***`
+        : `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** en **${msToLapStr(poleman.time)}** !` +
+          (gap2nd ? ` **+${gap2nd}s** d'avance sur ${q3Grid[1].teamEmoji}**${q3Grid[1].pilotName}**.` : '');
+      await channel.send(poleMsg);
+
+    })().catch(e => console.error('admin_test_qualif error:', e.message));
     return;
   }
 
