@@ -183,6 +183,22 @@ const CircuitRecordSchema = new mongoose.Schema({
 });
 const CircuitRecord = mongoose.model('CircuitRecord', CircuitRecordSchema);
 
+// ── NewsArticle — Tabloïd de paddock ──────────────────────
+const NewsArticleSchema = new mongoose.Schema({
+  type       : { type: String, required: true },  // 'rivalry','transfer_rumor','drama','hype','form_crisis','teammate_duel','dev_vague','scandal','title_fight'
+  source     : { type: String, required: true },  // 'pitlane_insider','paddock_whispers','pl_racing_news','f1_weekly'
+  headline   : { type: String, required: true },
+  body       : { type: String, required: true },
+  pilotIds   : [{ type: mongoose.Schema.Types.ObjectId, ref: 'Pilot' }],
+  teamIds    : [{ type: mongoose.Schema.Types.ObjectId, ref: 'Team' }],
+  raceId     : { type: mongoose.Schema.Types.ObjectId, ref: 'Race', default: null },
+  seasonYear : { type: Number },
+  publishedAt: { type: Date, default: Date.now },
+  triggered  : { type: String, default: 'auto' }, // 'post_race' | 'scheduled' | 'manual'
+});
+NewsArticleSchema.index({ publishedAt: -1 });
+const NewsArticle = mongoose.model('NewsArticle', NewsArticleSchema);
+
 // ── Team ───────────────────────────────────────────────────
 const TeamSchema = new mongoose.Schema({
   name         : String,
@@ -1604,6 +1620,582 @@ function buildPressBlock(ctx, angle) {
   return null;
 }
 
+// ─── MOTEUR DE NEWS — Tabloïd de paddock ─────────────────
+
+const NEWS_SOURCES = {
+  pitlane_insider  : { name: '🔥 PitLane Insider',    color: '#FF4444' },
+  paddock_whispers : { name: '🤫 Paddock Whispers',   color: '#9B59B6' },
+  pl_racing_news   : { name: '🗞️ PL Racing News',     color: '#2C3E50' },
+  f1_weekly        : { name: '📡 F1 Weekly',          color: '#2980B9' },
+};
+
+// Publier un article dans le channel de course
+async function publishNews(article, channel) {
+  if (!channel) return;
+  const src = NEWS_SOURCES[article.source];
+  const embed = new EmbedBuilder()
+    .setAuthor({ name: src.name })
+    .setTitle(article.headline)
+    .setColor(src.color)
+    .setDescription(article.body)
+    .setFooter({ text: `Saison ${article.seasonYear} · ${new Date(article.publishedAt).toLocaleDateString('fr-FR')}` });
+  try { await channel.send({ embeds: [embed] }); } catch(e) { console.error('News publish error:', e); }
+}
+
+// ── Générateurs par type ──────────────────────────────────
+
+function genRivalryArticle(pA, pB, teamA, teamB, contacts, circuit, seasonYear) {
+  const sources = ['pitlane_insider', 'paddock_whispers'];
+  const source  = pick(sources);
+
+  const headlines = [
+    `${pA.name} vs ${pB.name} : la guerre froide du paddock`,
+    `Encore un accrochage — ${pA.name} et ${pB.name} au bord du clash`,
+    `"Ça va finir mal" — la rivalité ${pA.name}/${pB.name} inquiète le paddock`,
+    `${teamA.emoji}${pA.name} et ${teamB.emoji}${pB.name} : la tension monte d'un cran`,
+    `La FIA surveille — ${contacts} incidents entre ${pA.name} et ${pB.name} cette saison`,
+  ];
+
+  const bodies = [
+    `${contacts} contacts en course cette saison entre les deux pilotes — le dernier en date à ${circuit} n'a pas arrangé les choses.\n\n` +
+    pick([
+      `Selon nos sources, ${pA.name} aurait demandé à la direction de course d'examiner les manœuvres de ${pB.name}. "Il prend trop de risques", aurait-il déclaré en privé.`,
+      `${pB.name} a refusé de commenter après la course. Ce silence en dit parfois plus long qu'un discours.`,
+      `Dans les couloirs du paddock, on murmure que les deux camps ne se saluent plus. Ambiance.`,
+    ]),
+
+    `À ${circuit}, la ligne entre racing et provocation a une nouvelle fois été franchie.\n\n` +
+    pick([
+      `"C'était délibéré ou stupide — dans les deux cas c'est inacceptable." Une source proche de ${teamA.name} n'a pas mâché ses mots.`,
+      `${pA.name} a regardé droit dans les yeux ${pB.name} lors de la pesée. Aucun mot échangé. Tout était dit.`,
+      `La FIA a officiellement "pris note" de l'incident. En langage FIA, ça veut dire qu'ils regardent de très près.`,
+    ]),
+
+    `${pA.name} et ${pB.name} partagent la piste depuis le début de saison. ${contacts} contacts plus tard, on se demande comment ça n'a pas encore explosé.\n\n` +
+    pick([
+      `Les équipes ont tenté de calmer le jeu en interne. Sans succès apparent.`,
+      `"Ils se respectent mais ne s'apprécient pas" — une formule qu'on entend souvent dans ce paddock.`,
+      `Le prochain GP va être à surveiller de très près. L'un des deux va craquer.`,
+    ]),
+  ];
+
+  return {
+    type: 'rivalry', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [pA._id, pB._id],
+    teamIds: [teamA._id, teamB._id],
+    seasonYear,
+  };
+}
+
+function genTransferRumorArticle(pilot, currentTeam, targetTeam, seasonYear) {
+  const source = pick(['paddock_whispers', 'pitlane_insider']);
+
+  const headlines = [
+    `${pilot.name} chez ${targetTeam.emoji}${targetTeam.name} ? La rumeur enfle`,
+    `Transfert choc : ${targetTeam.name} viserait ${pilot.name}`,
+    `${pilot.name} sur le départ ? ${targetTeam.name} aux aguets`,
+    `"Des discussions ont eu lieu" — ${pilot.name} et ${targetTeam.name}, le feuilleton continue`,
+    `Exclusif : ${pilot.name} aurait rencontré des dirigeants de ${targetTeam.name}`,
+  ];
+
+  const bodies = [
+    `Selon nos informations, le nom de ${pilot.name} circule avec insistance dans l'entourage de ${targetTeam.emoji}${targetTeam.name}.\n\n` +
+    pick([
+      `Son équipe actuelle ${currentTeam?.emoji || ''}${currentTeam?.name || 'son écurie'} dément tout contact. Ce qui, dans ce milieu, veut souvent dire le contraire.`,
+      `"Aucune approche n'a été faite." C'est ce qu'on nous a répondu — la formule classique qui n'engage à rien.`,
+      `Les deux parties font profil bas. Mais les regards échangés dans le paddock parlent d'eux-mêmes.`,
+    ]),
+
+    `Un dîner discret. Des agents aperçus ensemble. Et soudain, le nom de ${pilot.name} revient dans toutes les conversations.\n\n` +
+    pick([
+      `${targetTeam.name} cherche à renforcer son line-up. ${pilot.name} coche beaucoup de cases.`,
+      `La question n'est peut-être pas de savoir si c'est vrai — mais si ${currentTeam?.name || 'son écurie actuelle'} serait prête à le laisser partir.`,
+      `Notre source : "Les discussions en sont à un stade très préliminaire. Mais elles existent."`,
+    ]),
+
+    `On ne prête qu'aux riches — et en ce moment, le nom de ${pilot.name} est sur toutes les lèvres.\n\n` +
+    pick([
+      `${targetTeam.emoji}${targetTeam.name} a les moyens de ses ambitions. ${pilot.name} a les ambitions de ses moyens. L'équation est simple.`,
+      `Rien d'officiel. Mais dans ce paddock, "rien d'officiel" est souvent le début de quelque chose.`,
+      `Paddock Whispers maintient ses informations. La balle est dans le camp des dirigeants.`,
+    ]),
+  ];
+
+  return {
+    type: 'transfer_rumor', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [pilot._id],
+    teamIds: [targetTeam._id, ...(currentTeam ? [currentTeam._id] : [])],
+    seasonYear,
+  };
+}
+
+function genDramaArticle(pilotA, pilotB, teamA, teamB, seasonYear, context = {}) {
+  const source = pick(['pitlane_insider', 'paddock_whispers', 'pl_racing_news']);
+
+  const dramaTypes = [
+    // Clash verbal fictif
+    () => ({
+      headline: pick([
+        `${pilotA.name} lâche une pique — ${pilotB.name} visé ?`,
+        `Tension en conf de presse : ${pilotA.name} ne mâche pas ses mots`,
+        `"Certains pilotes devraient regarder leurs propres erreurs" — ${pilotA.name}`,
+      ]),
+      body:
+        `En conférence de presse, ${pilotA.name} n'a pas pu s'empêcher : ${pick([
+          `"Il y a des pilotes sur cette grille qui oublient les règles de base du respect en course."`,
+          `"Je préfère ne pas nommer qui, mais tout le monde sait de qui je parle."`,
+          `"Mon ingénieur m'a demandé de rester calme. J'essaie."`,
+        ])}\n\n` +
+        pick([
+          `Une pique à peine voilée vers ${teamB.emoji}${pilotB.name} ? L'intéressé n'a pas commenté — pour l'instant.`,
+          `${pilotB.name}, interrogé dans la foulée, a souri. "Je n'ai rien à ajouter." Ambiance.`,
+          `Le paddock a retenu son souffle. ${pilotB.name} a été prévenu de la déclaration — sa réaction sera à surveiller au prochain GP.`,
+        ]),
+    }),
+    // Guerre des chiffres / ego
+    () => ({
+      headline: pick([
+        `${pilotA.name} vs ${pilotB.name} : la bataille des egos`,
+        `Qui est le meilleur ? ${pilotA.name} et ${pilotB.name} ne sont pas d'accord`,
+        `${pilotA.name} : "Je mérite mieux que ça" — sous-entendu ?`,
+      ]),
+      body:
+        `${pick([
+          `${pilotA.name} estime ne pas être reconnu à sa juste valeur sur cette grille.`,
+          `"Je ne suis pas là pour finir derrière ${pilotB.name}. Ce n'est pas mon niveau." Des mots forts.`,
+          `Dans une interview accordée à nos confrères, ${pilotA.name} a laissé entendre que la hiérarchie actuelle ne reflétait pas la réalité des performances.`,
+        ])}\n\n` +
+        pick([
+          `${teamB.emoji}${pilotB.name} a été informé de ces déclarations. "Qu'il vienne me le dire en piste" aurait-il répondu selon nos sources.`,
+          `Le clan ${pilotB.name} reste serein. Les chiffres sont là — et pour l'instant, ils donnent raison à ${pilotB.name}.`,
+          `Le paddock observe. Quand deux pilotes de ce niveau s'accrochent verbalement, ça finit toujours par se régler en piste.`,
+        ]),
+    }),
+    // Drama ingénieur / équipe
+    () => ({
+      headline: pick([
+        `Tensions en interne chez ${teamA.emoji}${teamA.name}`,
+        `${pilotA.name} et son équipe sur la même longueur d'onde ? Pas si sûr`,
+        `La stratégie fait débat — ${pilotA.name} mécontent ?`,
+      ]),
+      body:
+        `${pick([
+          `Selon une source proche du garage, ${pilotA.name} et son ingénieur de course traversent une période de "friction" depuis quelques GP.`,
+          `Le choix stratégique du dernier GP n'aurait pas été du goût de ${pilotA.name}. En interne, des mots auraient été échangés.`,
+          `"Il y a des désaccords normaux dans toute équipe. Mais là, c'est un peu plus que ça." Une source qui souhaite rester anonyme.`,
+        ])}\n\n` +
+        pick([
+          `${teamA.name} dément toute tension. Classique.`,
+          `${pilotA.name} a souri en conférence de presse. Un peu trop peut-être.`,
+          `Reste à voir si ça se règle avant le prochain GP — ou si ça empire.`,
+        ]),
+    }),
+  ];
+
+  const chosen = pick(dramaTypes)();
+  return {
+    type: 'drama', source,
+    headline: chosen.headline,
+    body: chosen.body,
+    pilotIds: [pilotA._id, pilotB._id],
+    teamIds: [teamA._id, teamB._id],
+    seasonYear,
+  };
+}
+
+function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
+  const source = pick(['pitlane_insider', 'f1_weekly', 'pl_racing_news']);
+
+  const headlines = [
+    `${pilot.name} : et si c'était lui le grand nom de cette saison ?`,
+    `La révélation ${team.emoji}${team.name} : ${pilot.name} crève l'écran`,
+    `${pilot.name} en feu — le paddock commence à vraiment prendre note`,
+    `"On n'attendait pas ça" — ${pilot.name} déjoue tous les pronostics`,
+    `${wins > 1 ? wins + ' victoires' : podiums + ' podiums'} — ${pilot.name} n'est plus une surprise, c'est une menace`,
+  ];
+
+  const bodies = [
+    `${pick([
+      `Personne ne l'avait mis sur la liste des favoris en début de saison.`,
+      `En début de saison, peu de monde aurait parié sur ${pilot.name} pour jouer ce rôle.`,
+      `Les données de préparation de saison n'indiquaient pas ça. Et pourtant.`,
+    ])} ${wins > 0 ? `${wins} victoire(s) et ${podiums} podium(s) plus tard` : `${podiums} podium(s) plus tard`}, ${pilot.name} impose le respect.\n\n` +
+    pick([
+      `"Il a quelque chose de différent dans l'approche des GP. Une maturité qu'on ne voit pas souvent." Une voix du paddock.`,
+      `${team.emoji}${team.name} a clairement trouvé quelque chose. La question : est-ce durable ?`,
+      `P${champPos} au championnat. Si ça continue, les grandes écuries vont s'intéresser à lui de près.`,
+    ]),
+
+    `On cherche souvent les grands noms. Parfois, les grands noms viennent nous chercher.\n\n` +
+    `${pilot.name} est P${champPos} au championnat avec ${wins > 0 ? `${wins} victoire(s)` : `${podiums} podium(s)`} cette saison. ` +
+    pick([
+      `Son ingénieur est le premier à le dire : "Il repousse les limites à chaque sortie."`,
+      `Les données télémétrie ne mentent pas — il pousse la voiture dans des zones que peu osent explorer.`,
+      `Plusieurs membres du paddock ont discrètement demandé à en savoir plus sur lui. Signal fort.`,
+    ]),
+  ];
+
+  return {
+    type: 'hype', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [pilot._id],
+    teamIds: [team._id],
+    seasonYear,
+  };
+}
+
+function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear) {
+  const source = pick(['pitlane_insider', 'pl_racing_news', 'paddock_whispers']);
+
+  const headlines = [
+    `${pilot.name} dans le dur — jusqu'où ?`,
+    `La spirale ${pilot.name} : accident de parcours ou signal d'alarme ?`,
+    `${team.emoji}${team.name} commence à s'interroger sur ${pilot.name}`,
+    `"Il faut que ça change" — ${pilot.name} sous pression`,
+    `${dnfs} abandons — ${pilot.name} traverse sa pire période`,
+  ];
+
+  const bodies = [
+    `${dnfs} abandons ${lastResults ? `et des résultats en dessous des attentes` : ''} — la série noire de ${pilot.name} commence à faire parler.\n\n` +
+    pick([
+      `En interne, on reste solidaire officiellement. Mais les questions existent.`,
+      `"Tout le monde traverse des creux. La différence c'est comment tu en sors." Message reçu ?`,
+      `${pilot.name} s'est entraîné en simulateur pendant 6 heures hier soir. La réponse sera en piste.`,
+    ]),
+
+    `Il y a quelques GP, ${pilot.name} semblait intouchable. Aujourd'hui, chaque course apporte son lot de mauvaises nouvelles.\n\n` +
+    pick([
+      `La pression commence à se faire sentir. ${team.emoji}${team.name} a des attentes — et pour l'instant, elles ne sont pas remplies.`,
+      `Selon une source interne : "On ne remet pas en question le pilote. On remet en question la dynamique actuelle."`,
+      `Des rumeurs de changement d'ingénieur de course ont commencé à circuler. Rien de confirmé.`,
+    ]),
+  ];
+
+  return {
+    type: 'form_crisis', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [pilot._id],
+    teamIds: [team._id],
+    seasonYear,
+  };
+}
+
+function genTeammateDuelArticle(winner, loser, teamObj, winsW, winsL, seasonYear) {
+  const source = pick(['f1_weekly', 'pl_racing_news', 'pitlane_insider']);
+
+  const headlines = [
+    `${winner.name} écrase ${loser.name} en interne — le statut N°1 ne fait plus débat`,
+    `Duel interne ${teamObj.emoji}${teamObj.name} : ${winner.name} prend le dessus`,
+    `${loser.name} dans l'ombre de ${winner.name} — la situation devient inconfortable`,
+    `${winsW}–${winsL} : les chiffres parlent pour ${winner.name}`,
+  ];
+
+  const bodies = [
+    `${winsW}–${winsL} en duels directs cette saison. Les chiffres sont implacables : ${winner.name} domine ${loser.name} chez ${teamObj.emoji}${teamObj.name}.\n\n` +
+    pick([
+      `${loser.name} ne cache pas son inconfort : "Je sais ce que je dois améliorer. Je travaille."`,
+      `L'écurie continue d'afficher une égalité de traitement officielle. Mais dans les faits, la hiérarchie est claire.`,
+      `"La voiture numéro 1 a commencé à recevoir les mises à jour en priorité." Officiellement démenti, bien sûr.`,
+    ]),
+
+    `En début de saison, on parlait d'un duo équilibré chez ${teamObj.emoji}${teamObj.name}. Plusieurs GP plus tard, le tableau est différent.\n\n` +
+    `${winner.name} finit devant son coéquipier ${winsW} fois sur ${winsW + winsL} — ` +
+    pick([
+      `une domination que même les plus grands supporters de ${loser.name} ont du mal à relativiser.`,
+      `la tendance semble s'installer. La question : ${loser.name} va-t-il accepter ce rôle ?`,
+      `${loser.name} a demandé une réunion technique en interne. Pas de résultat pour l'instant.`,
+    ]),
+  ];
+
+  return {
+    type: 'teammate_duel', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [winner._id, loser._id],
+    teamIds: [teamObj._id],
+    seasonYear,
+  };
+}
+
+function genScandalArticle(teams, pilots, seasonYear) {
+  const teamA = pick(teams), teamB = pick(teams.filter(t => String(t._id) !== String(teamA._id)));
+  if (!teamB) return null;
+  const source = pick(['paddock_whispers', 'pitlane_insider']);
+
+  const scandals = [
+    {
+      headline: `${teamA.emoji}${teamA.name} accusée de copie — l'enquête FIA ouverte`,
+      body:
+        `Une plainte formelle aurait été déposée par ${teamB.emoji}${teamB.name} contre ${teamA.emoji}${teamA.name} concernant une supposée "similarité suspecte" dans la conception de l'aileron avant.\n\n` +
+        pick([
+          `La FIA a confirmé avoir "pris note de la requête". Traduction : enquête préliminaire ouverte.`,
+          `${teamA.name} nie catégoriquement. "Nos conceptions sont le fruit d'un travail indépendant." Classique.`,
+          `Si la plainte aboutit, des points pourraient être retirés rétroactivement. Le paddock retient son souffle.`,
+        ]),
+    },
+    {
+      headline: `Carburant illégal ? Les rumeurs autour de ${teamA.emoji}${teamA.name}`,
+      body:
+        `Des mesures de telémétrie inhabituelles auraient attiré l'attention des commissaires lors du dernier GP.\n\n` +
+        pick([
+          `${teamA.name} parle d'"anomalie de capteur". D'autres parlent d'autre chose.`,
+          `La FIA n'a pas encore officiellement communiqué. Mais les prélèvements ont bien eu lieu.`,
+          `Si les tests s'avèrent positifs, on parlerait d'une disqualification rétroactive. Énorme.`,
+        ]),
+    },
+    {
+      headline: `Budget cap : ${teamA.emoji}${teamA.name} dans le viseur ?`,
+      body:
+        `Des questions commencent à se poser sur les dépenses de ${teamA.emoji}${teamA.name} cette saison.\n\n` +
+        pick([
+          `Plusieurs équipes auraient soulevé la question lors d'une réunion de la commission F1 PL. Sans résultat pour l'instant.`,
+          `"On respecte toutes les règles financières à la lettre." Le communiqué de ${teamA.name} est arrivé vite. Trop vite ?`,
+          `Si une infraction est confirmée, les sanctions vont de l'amende à la déduction de points constructeurs.`,
+        ]),
+    },
+  ];
+
+  const chosen = pick(scandals);
+  return {
+    type: 'scandal', source,
+    headline: chosen.headline,
+    body: chosen.body,
+    pilotIds: [],
+    teamIds: [teamA._id, teamB._id],
+    seasonYear,
+  };
+}
+
+function genDevVagueArticle(team, seasonYear) {
+  const source = pick(['f1_weekly', 'pl_racing_news']);
+
+  const headlines = [
+    `${team.emoji}${team.name} apporte des modifications discrètes — les chronos intriguent`,
+    `Développement silencieux chez ${team.emoji}${team.name} : quelque chose se prépare`,
+    `${team.name} : "On travaille" — mais sur quoi exactement ?`,
+    `Les essais libres de ${team.emoji}${team.name} ont fait hausser des sourcils`,
+  ];
+
+  const bodies = [
+    `Rien d'officiel — ${team.name} n'a communiqué sur aucune mise à jour majeure. Mais les observateurs attentifs ont noté des changements de configuration ce week-end.\n\n` +
+    pick([
+      `Les temps en essais libres suggèrent un gain en vitesse de pointe. Léger, mais réel.`,
+      `"On affine des détails aérodynamiques." C'est tout ce que le directeur technique a consenti à dire.`,
+      `Si ces gains se confirment en course, le rapport de force pourrait légèrement évoluer.`,
+    ]),
+
+    `${team.emoji}${team.name} a travaillé fort en usine ces dernières semaines. Les premiers signes arrivent en piste.\n\n` +
+    pick([
+      `Pas de révolution — mais une évolution cohérente qui pourrait faire la différence sur les prochains circuits.`,
+      `Les ingénieurs rivaux ont été vus observer attentivement la voiture au parc fermé. Signe que quelque chose a changé.`,
+      `"On ne commente pas le travail des autres." La réponse de ${pick(teams => team.name)} masque peut-être une certaine inquiétude.`,
+    ]),
+  ];
+
+  return {
+    type: 'dev_vague', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [],
+    teamIds: [team._id],
+    seasonYear,
+  };
+}
+
+function genTitleFightArticle(leader, challenger, leaderTeam, challengerTeam, gap, gpLeft, seasonYear) {
+  const source = pick(['f1_weekly', 'pl_racing_news', 'pitlane_insider']);
+
+  const headlines = [
+    `${gap} points — le titre se joue maintenant`,
+    `${leader.name} vs ${challenger.name} : le duel pour l'histoire`,
+    `${gpLeft} GPs restants — tout est encore possible`,
+    `La pression monte : ${challenger.name} n'a plus le droit à l'erreur`,
+    `${leader.name} tient les rênes — mais ${challenger.name} n'abdique pas`,
+  ];
+
+  const bodies = [
+    `${gap} points séparent ${leaderTeam.emoji}${leader.name} de ${challengerTeam.emoji}${challenger.name} à ${gpLeft} GP(s) de la fin.\n\n` +
+    pick([
+      `La mathématique est cruelle : ${challenger.name} doit gagner et espérer. ${leader.name} doit gérer et ne pas craquer.`,
+      `"Je ne regarde pas le classement. Je cours pour gagner chaque GP." ${leader.name} a dit ça. Personne ne le croit vraiment.`,
+      `Deux styles opposés, deux approches opposées. Ce championnat ressemble à un test de caractère autant que de vitesse.`,
+    ]),
+
+    `Le titre ne se gagne pas — il se perd. Et les deux protagonistes le savent.\n\n` +
+    `${leaderTeam.emoji}${leader.name} en tête avec ${gap} points d'avance. ` +
+    pick([
+      `Confortable sur le papier. Pas si confortable dans la tête d'un pilote qui a tout à perdre.`,
+      `${challengerTeam.emoji}${challenger.name} a gagné les 2 derniers GP. La dynamique a changé — et tout le monde l'a senti.`,
+      `Les prochains circuits favorisent qui ? Les deux camps analysent. Le suspense est total.`,
+    ]),
+  ];
+
+  return {
+    type: 'title_fight', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [leader._id, challenger._id],
+    teamIds: [leaderTeam._id, challengerTeam._id],
+    seasonYear,
+  };
+}
+
+// ── Orchestrateur post-GP ─────────────────────────────────
+async function generatePostRaceNews(race, finalResults, season, channel) {
+  const allPilots  = await Pilot.find({ teamId: { $ne: null } });
+  const allTeams   = await Team.find();
+  const standings  = await Standing.find({ seasonId: season._id }).sort({ points: -1 });
+  const totalRaces = await Race.countDocuments({ seasonId: season._id });
+  const doneRaces  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
+  const gpLeft     = totalRaces - doneRaces;
+
+  const pilotMap = new Map(allPilots.map(p => [String(p._id), p]));
+  const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
+
+  const articlesToPost = [];
+
+  // 1. RIVALITÉ — si contacts cette course
+  const rivalPairs = new Map();
+  for (const p of allPilots) {
+    if (!p.rivalId) continue;
+    const key = [String(p._id), String(p.rivalId)].sort().join('_');
+    if (!rivalPairs.has(key)) {
+      const pA = p, pB = pilotMap.get(String(p.rivalId));
+      if (pB && p.rivalContacts >= 2) {
+        rivalPairs.set(key, { pA, pB });
+      }
+    }
+  }
+  for (const { pA, pB } of rivalPairs.values()) {
+    const tA = teamMap.get(String(pA.teamId));
+    const tB = teamMap.get(String(pB.teamId));
+    if (tA && tB) {
+      articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year));
+    }
+  }
+
+  // 2. TITLE FIGHT — si écart < 30pts et > 2 GPs restants
+  if (standings.length >= 2 && gpLeft > 2) {
+    const s1 = standings[0], s2 = standings[1];
+    const gap = s1.points - s2.points;
+    if (gap <= 30 && gap >= 0) {
+      const p1 = pilotMap.get(String(s1.pilotId));
+      const p2 = pilotMap.get(String(s2.pilotId));
+      const t1 = p1 ? teamMap.get(String(p1.teamId)) : null;
+      const t2 = p2 ? teamMap.get(String(p2.teamId)) : null;
+      if (p1 && p2 && t1 && t2) {
+        articlesToPost.push(genTitleFightArticle(p1, p2, t1, t2, gap, gpLeft, season.year));
+      }
+    }
+  }
+
+  // 3. HYPE — pilote avec 2+ victoires ou 4+ podiums, P1-5 au champ
+  for (let i = 0; i < Math.min(standings.length, 5); i++) {
+    const s = standings[i];
+    const pilot = pilotMap.get(String(s.pilotId));
+    const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
+    if (pilot && team && (s.wins >= 2 || s.podiums >= 4)) {
+      if (Math.random() < 0.4) { // 40% de chance par GP pour ne pas spammer
+        articlesToPost.push(genHypeArticle(pilot, team, s.wins, s.podiums, season.year, i + 1));
+        break;
+      }
+    }
+  }
+
+  // 4. CRISE DE FORME — pilote avec 2+ DNFs et mauvaise position
+  for (const s of standings.slice(5)) {
+    const pilot = pilotMap.get(String(s.pilotId));
+    const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
+    if (pilot && team && s.dnfs >= 2 && Math.random() < 0.35) {
+      articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year));
+      break;
+    }
+  }
+
+  // 5. DUEL COÉQUIPIER — si écart ≥ 4 duels
+  const processed = new Set();
+  for (const p of allPilots) {
+    const tid = String(p.teamId);
+    if (processed.has(tid)) continue;
+    const teammates = allPilots.filter(x => String(x.teamId) === tid);
+    if (teammates.length < 2) continue;
+    processed.add(tid);
+    const [a, b] = teammates;
+    const wA = a.teammateDuelWins || 0, wB = b.teammateDuelWins || 0;
+    if (Math.abs(wA - wB) >= 4 && Math.random() < 0.3) {
+      const team = teamMap.get(tid);
+      if (!team) continue;
+      const winner = wA > wB ? a : b, loser = wA > wB ? b : a;
+      articlesToPost.push(genTeammateDuelArticle(winner, loser, team, Math.max(wA, wB), Math.min(wA, wB), season.year));
+    }
+  }
+
+  // Limiter à 3 articles max par GP pour ne pas noyer le channel
+  const toPost = articlesToPost.slice(0, 3);
+
+  for (const articleData of toPost) {
+    const article = await NewsArticle.create({ ...articleData, raceId: race._id, triggered: 'post_race', publishedAt: new Date() });
+    await sleep(3000);
+    await publishNews(article, channel);
+  }
+}
+
+// ── Job planifié — gossip toutes les 36-48h ───────────────
+async function runScheduledNews(discordClient) {
+  const channel = RACE_CHANNEL ? discordClient.channels.cache.get(RACE_CHANNEL) : null;
+  if (!channel) return;
+
+  const season = await getActiveSeason();
+  if (!season) return;
+
+  const allPilots = await Pilot.find({ teamId: { $ne: null } });
+  const allTeams  = await Team.find();
+  if (!allPilots.length || !allTeams.length) return;
+
+  const teamMap = new Map(allTeams.map(t => [String(t._id), t]));
+
+  // Choisir un type au hasard parmi : drama, transfer_rumor, dev_vague, scandal
+  const roll = Math.random();
+  let articleData = null;
+
+  if (roll < 0.3) {
+    // DRAMA — deux pilotes random de teams différentes
+    const pA = pick(allPilots);
+    const others = allPilots.filter(p => String(p.teamId) !== String(pA.teamId));
+    const pB = others.length ? pick(others) : null;
+    if (pB) {
+      const tA = teamMap.get(String(pA.teamId));
+      const tB = teamMap.get(String(pB.teamId));
+      if (tA && tB) articleData = genDramaArticle(pA, pB, tA, tB, season.year);
+    }
+  } else if (roll < 0.6) {
+    // RUMEUR TRANSFERT — pilote random, équipe cible random (différente)
+    const pilot = pick(allPilots);
+    const currentTeam = teamMap.get(String(pilot.teamId));
+    const otherTeams  = allTeams.filter(t => String(t._id) !== String(pilot.teamId));
+    const targetTeam  = otherTeams.length ? pick(otherTeams) : null;
+    if (targetTeam) articleData = genTransferRumorArticle(pilot, currentTeam, targetTeam, season.year);
+  } else if (roll < 0.85) {
+    // DEV VAGUE — équipe random
+    const team = pick(allTeams);
+    articleData = genDevVagueArticle(team, season.year);
+  } else {
+    // SCANDALE — deux équipes random
+    if (allTeams.length >= 2) articleData = genScandalArticle(allTeams, allPilots, season.year);
+  }
+
+  if (articleData) {
+    const article = await NewsArticle.create({ ...articleData, triggered: 'scheduled', publishedAt: new Date() });
+    await publishNews(article, channel);
+  }
+}
+
 // ─── SIMULATION COURSE COMPLÈTE ───────────────────────────
 async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   const totalLaps = race.laps;
@@ -2438,6 +3030,12 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     }
   } catch(e) { console.error('Conf de presse erreur:', e); }
 
+  // ── News post-GP ─────────────────────────────────────────
+  try {
+    await sleep(4000);
+    await generatePostRaceNews(race, results, season, channel);
+  } catch(e) { console.error('Post-race news erreur:', e); }
+
   return { results, collisions: raceCollisions };
 }
 
@@ -3081,6 +3679,13 @@ const commands = [
   new SlashCommandBuilder().setName('record_circuit')
     .setDescription('⏱️ Consulte le record du meilleur tour sur un circuit')
     .addStringOption(o => o.setName('circuit').setDescription('Nom du circuit (partiel accepté)').setRequired(true)),
+
+  new SlashCommandBuilder().setName('news')
+    .setDescription('🗞️ Derniers articles du paddock — rumeurs, drama, inside')
+    .addIntegerOption(o => o.setName('page').setDescription('Page (défaut: 1)').setMinValue(1)),
+
+  new SlashCommandBuilder().setName('admin_news_force')
+    .setDescription('[ADMIN] Force la publication d\'un article de news maintenant'),
 ];
 
 // ============================================================
@@ -3121,6 +3726,18 @@ client.once('ready', async () => {
   });
   console.log('✅ Slash commands enregistrées');
   startScheduler();
+
+  // ── Job news toutes les 40h (±8h de variation) pour du naturel ──
+  const NEWS_INTERVAL_BASE = 40 * 60 * 60 * 1000;
+  const scheduleNextNews = () => {
+    const jitter = (Math.random() - 0.5) * 8 * 60 * 60 * 1000; // ±8h
+    setTimeout(async () => {
+      try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news error:', e); }
+      scheduleNextNews();
+    }, NEWS_INTERVAL_BASE + jitter);
+  };
+  scheduleNextNews();
+  console.log('✅ Job news planifié (toutes les ~40h)');
 });
 
 // ============================================================
@@ -4691,7 +5308,9 @@ async function handleInteraction(interaction) {
           '`/pilotes` — Classement général par note (style FIFA)',
           '`/ecuries` — Liste des 10 écuries avec leurs pilotes',
           '`/ecurie nom:...` — Stats voiture détaillées d\'une écurie',
+          '`/record_circuit circuit:...` — Record du meilleur tour sur un circuit',
         ].join('\n') },
+        { name: '🗞️ Actualités paddock', value: '`/news [page]` — Rumeurs, drama, rivalités, title fight… mis à jour après chaque GP et toutes les ~40h' },
         { name: '📋 Contrats & Transferts', value: [
           '`/mon_contrat [pilote:1|2]` — Ton contrat actuel',
           '`/offres [pilote:1|2]` — Offres en attente (boutons interactifs)',
@@ -4935,6 +5554,62 @@ async function handleInteraction(interaction) {
       ],
       ephemeral: true,
     });
+  }
+
+  // ── /news ─────────────────────────────────────────────────
+  if (commandName === 'news') {
+    const page    = interaction.options.getInteger('page') || 1;
+    const perPage = 5;
+    const skip    = (page - 1) * perPage;
+    const total   = await NewsArticle.countDocuments();
+    const articles = await NewsArticle.find().sort({ publishedAt: -1 }).skip(skip).limit(perPage);
+
+    if (!articles.length) {
+      return interaction.reply({ content: '📰 Aucun article pour l\'instant — les news arrivent après les GPs et toutes les 40h environ.', ephemeral: true });
+    }
+
+    const typeEmojis = {
+      rivalry       : '⚔️',
+      transfer_rumor: '🔄',
+      drama         : '💥',
+      hype          : '🚀',
+      form_crisis   : '📉',
+      teammate_duel : '👥',
+      dev_vague     : '⚙️',
+      scandal       : '💣',
+      title_fight   : '🏆',
+    };
+
+    const lines = articles.map(a => {
+      const src   = NEWS_SOURCES[a.source];
+      const emoji = typeEmojis[a.type] || '📰';
+      const date  = new Date(a.publishedAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
+      return `${emoji} **${a.headline}**\n${src?.name || a.source} · *${date}*\n${a.body.split('\n\n')[0].slice(0, 120)}${a.body.length > 120 ? '...' : ''}`;
+    }).join('\n\n─────────────────\n\n');
+
+    const embed = new EmbedBuilder()
+      .setTitle(`🗞️ Paddock Press — Page ${page}/${Math.ceil(total / perPage)}`)
+      .setColor('#2C3E50')
+      .setDescription(lines)
+      .setFooter({ text: `${total} articles au total · /news page:${page + 1} pour la suite` });
+
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /admin_news_force ─────────────────────────────────────
+  if (commandName === 'admin_news_force') {
+    if (!interaction.member.permissions.has('Administrator')) {
+      return interaction.reply({ content: '❌ Admin uniquement.', ephemeral: true });
+    }
+    await interaction.deferReply({ ephemeral: true });
+    const channel = client.channels.cache.get(RACE_CHANNEL);
+    if (!channel) return interaction.editReply('❌ Channel non configuré (RACE_CHANNEL_ID manquant).');
+    try {
+      await runScheduledNews(client);
+      return interaction.editReply('✅ Article de news généré et publié.');
+    } catch(e) {
+      return interaction.editReply(`❌ Erreur : ${e.message}`);
+    }
   }
 
   // ── /concept ──────────────────────────────────────────────
