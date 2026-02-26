@@ -2136,8 +2136,8 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     }
   }
 
-  // Limiter à 3 articles max par GP pour ne pas noyer le channel
-  const toPost = articlesToPost.slice(0, 3);
+  // Limiter à 2 articles max par GP pour ne pas noyer le channel
+  const toPost = articlesToPost.slice(0, 2);
 
   for (const articleData of toPost) {
     const article = await NewsArticle.create({ ...articleData, raceId: race._id, triggered: 'post_race', publishedAt: new Date() });
@@ -3727,17 +3727,17 @@ client.once('ready', async () => {
   console.log('✅ Slash commands enregistrées');
   startScheduler();
 
-  // ── Job news toutes les 40h (±8h de variation) pour du naturel ──
-  const NEWS_INTERVAL_BASE = 40 * 60 * 60 * 1000;
+  // ── Job news 1-2 fois par jour (base 18h ±6h de variation) ──
+  const NEWS_INTERVAL_BASE = 18 * 60 * 60 * 1000;
   const scheduleNextNews = () => {
-    const jitter = (Math.random() - 0.5) * 8 * 60 * 60 * 1000; // ±8h
+    const jitter = (Math.random() - 0.5) * 12 * 60 * 60 * 1000; // ±6h → entre 12h et 24h
     setTimeout(async () => {
       try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news error:', e); }
       scheduleNextNews();
     }, NEWS_INTERVAL_BASE + jitter);
   };
   scheduleNextNews();
-  console.log('✅ Job news planifié (toutes les ~40h)');
+  console.log('✅ Job news planifié (1-2 fois par jour, entre 12h et 24h)');
 });
 
 // ============================================================
