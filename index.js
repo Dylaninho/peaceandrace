@@ -410,19 +410,96 @@ function draftTeamAtIndex(order, idx) {
   return round % 2 === 0 ? order[pos] : order[n - 1 - pos];
 }
 
-// Construit le select menu des pilotes disponibles pour le draft
+// ── Draft : select menu des pilotes disponibles ───────────
 function buildDraftSelectMenu(freePilots, draftId) {
   const options = freePilots.slice(0, 25).map(p => {
     const ov = overallRating(p);
     const t  = ratingTier(ov);
-    return { label: `${t.badge} ${ov} — ${p.name}`, value: String(p._id), description: `Frein ${p.freinage} | Ctrl ${p.controle} | Dep ${p.depassement}` };
+    const flag = p.nationality?.split(' ')[0] || '';
+    return {
+      label      : `${t.badge} ${ov} — ${p.name}`,
+      value      : String(p._id),
+      description: `${flag} #${p.racingNumber || '?'} · Dép ${p.depassement} · Frei ${p.freinage} · Ctrl ${p.controle}`,
+    };
   });
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`draft_pick_${draftId}`)
-      .setPlaceholder('Choisissez un pilote...')
+      .setPlaceholder('🔍 Sélectionner un pilote...')
       .addOptions(options)
   );
+}
+
+// ── Draft : embed "On The Clock" affiché avant chaque pick ─
+function buildOnTheClockPayload(team, globalPick, totalPicks, round, pickInRound, totalInRound, freePilots, draftId) {
+  const suspensePhrases = [
+    `Les scouts de **${team.name}** s'activent en coulisses...`,
+    `Tout le monde retient son souffle. **${team.name}** a la parole.`,
+    `Le war room de **${team.name}** est en pleine réflexion...`,
+    `C'est le moment de vérité pour **${team.name}**. Qui rejoindra l'écurie ?`,
+    `Les négociations sont intenses du côté de **${team.name}**...`,
+    `**${team.name}** consulte ses données. Le chrono tourne.`,
+  ];
+  const phrase = suspensePhrases[globalPick % suspensePhrases.length];
+
+  const embed = new EmbedBuilder()
+    .setColor(team.color || '#FFD700')
+    .setAuthor({ name: `DRAFT F1 PL — ROUND ${round} · PICK ${pickInRound}/${totalInRound}` })
+    .setTitle(`⏳  ${team.emoji}  ${team.name.toUpperCase()}  EST AU CHOIX`)
+    .setDescription(`\n${phrase}\n\u200B`)
+    .addFields({
+      name: '📋 Pilotes restants',
+      value: freePilots.slice(0, 10).map(p => {
+        const ov = overallRating(p);
+        const t  = ratingTier(ov);
+        const flag = p.nationality?.split(' ')[0] || '';
+        return `${t.badge} **${ov}** — ${flag} ${p.name} #${p.racingNumber || '?'}`;
+      }).join('\n') + (freePilots.length > 10 ? `\n*…et ${freePilots.length - 10} autres*` : ''),
+    })
+    .setFooter({ text: `Pick global #${globalPick + 1}/${totalPicks} · Seul un admin peut sélectionner` });
+
+  const selectRow = buildDraftSelectMenu(freePilots, draftId);
+  return { embeds: [embed], components: [selectRow] };
+}
+
+// ── Draft : embed de révélation après un pick ─────────────
+function buildPickRevealEmbed(team, pilot, globalPick, totalPicks, round, pickInRound, totalInRound) {
+  const ov   = overallRating(pilot);
+  const tier = ratingTier(ov);
+  const flag = pilot.nationality || '🏳️ Inconnu';
+  const isLast = globalPick + 1 >= totalPicks;
+
+  const revealPhrases = [
+    `L'écurie a tranché. Il n'y a plus de doute.`,
+    `Le suspens est terminé. Le choix est officiel.`,
+    `La signature est posée. C'est confirmé.`,
+    `Après délibération, le verdict est tombé.`,
+    `Le transfert est acté. Bienvenue dans l'écurie !`,
+  ];
+  const phrase = revealPhrases[globalPick % revealPhrases.length];
+
+  const embed = new EmbedBuilder()
+    .setColor(team.color || '#FFD700')
+    .setAuthor({ name: `${team.emoji} ${team.name} — PICK OFFICIEL` })
+    .setTitle(`🎯  ${pilot.name.toUpperCase()}`)
+    .setDescription(
+      `${phrase}\n\n` +
+      `**${team.emoji} ${team.name}** sélectionne **${tier.badge} ${pilot.name}** !\n\u200B`
+    )
+    .addFields(
+      { name: '🌍 Nationalité',   value: flag,              inline: true },
+      { name: '🔢 Numéro',        value: `#${pilot.racingNumber || '?'}`, inline: true },
+      { name: '⭐ Overall',        value: `**${tier.badge} ${ov}**`,       inline: true },
+      { name: '📊 Stats clés', value:
+        `Dép \`${pilot.depassement}\` · Frei \`${pilot.freinage}\` · Déf \`${pilot.defense}\`\n` +
+        `Réact \`${pilot.reactions}\` · Ctrl \`${pilot.controle}\` · Adapt \`${pilot.adaptabilite}\` · Pneus \`${pilot.gestionPneus}\``,
+      },
+    )
+    .setFooter({ text: isLast ? '🏁 Dernier pick de la draft !' : `Round ${round} · Pick ${pickInRound}/${totalInRound}` });
+
+  if (pilot.photoUrl) embed.setThumbnail(pilot.photoUrl);
+
+  return embed;
 }
 
 // ─── Score voiture pondéré selon le style de GP ───────────
@@ -2562,23 +2639,37 @@ async function handleInteraction(interaction) {
       if (!interaction.member.permissions.has('Administrator'))
         return interaction.reply({ content: '❌ Seul un admin peut valider le pick.', ephemeral: true });
 
-      const draftId  = interaction.customId.replace('draft_pick_', '');
-      const pilotId  = interaction.values[0];
+      const draftId = interaction.customId.replace('draft_pick_', '');
+      const pilotId = interaction.values[0];
+
       let draft;
       try { draft = await DraftSession.findById(draftId); } catch(e) {}
       if (!draft || draft.status !== 'active')
         return interaction.reply({ content: '❌ Draft introuvable ou terminé.', ephemeral: true });
 
-      // Vérifier que ce pilote n'est pas déjà pické
       if (draft.picks.some(pk => String(pk.pilotId) === pilotId))
         return interaction.reply({ content: '❌ Ce pilote a déjà été sélectionné !', ephemeral: true });
 
-      const teamId   = String(draftTeamAtIndex(draft.order, draft.currentPickIndex));
-      const team     = await Team.findById(teamId);
-      const pilot    = await Pilot.findById(pilotId);
+      const teamId = String(draftTeamAtIndex(draft.order, draft.currentPickIndex));
+      const team   = await Team.findById(teamId);
+      const pilot  = await Pilot.findById(pilotId);
       if (!team || !pilot) return interaction.reply({ content: '❌ Données introuvables.', ephemeral: true });
 
-      // Assigner le pilote à l'écurie + créer contrat de base
+      const globalPick  = draft.currentPickIndex;
+      const totalInRound = draft.order.length;
+      const round        = Math.floor(globalPick / totalInRound) + 1;
+      const pickInRound  = (globalPick % totalInRound) + 1;
+
+      // ① Suspense : on retire le menu, on affiche "en cours..."
+      const suspenseEmbed = new EmbedBuilder()
+        .setColor(team.color || '#FFD700')
+        .setTitle(`⚡  ${team.emoji}  ${team.name.toUpperCase()}  FAIT SON CHOIX...`)
+        .setDescription('> *Le silence s\'est installé dans le war room. La décision est imminente.*')
+        .setFooter({ text: `Round ${round} · Pick ${pickInRound}/${totalInRound}` });
+
+      await interaction.update({ embeds: [suspenseEmbed], components: [] });
+
+      // ② Assigner pilote + créer contrat
       await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id });
       const existingContract = await Contract.findOne({ pilotId: pilot._id, active: true });
       if (!existingContract) {
@@ -2590,42 +2681,73 @@ async function handleInteraction(interaction) {
         });
       }
 
-      // Sauvegarder le pick
       draft.picks.push({ teamId: team._id, pilotId: pilot._id });
       draft.currentPickIndex += 1;
 
-      const ov   = overallRating(pilot);
-      const tier = ratingTier(ov);
-      let msg = `✅ **${team.emoji} ${team.name}** choisit **${tier.badge} ${ov} ${pilot.name}** !`;
+      const isLast = draft.currentPickIndex >= draft.totalPicks;
 
-      if (draft.currentPickIndex >= draft.totalPicks) {
-        // Draft terminé
+      // ③ Reveal cinématique
+      const revealEmbed = buildPickRevealEmbed(
+        team, pilot, globalPick, draft.totalPicks, round, pickInRound, totalInRound
+      );
+      await interaction.followUp({ embeds: [revealEmbed] });
+
+      if (isLast) {
+        // ── Draft terminé ──────────────────────────────────
         draft.status = 'done';
         await draft.save();
-        await interaction.update({ content: msg + '\n\n🏁 **Draft terminé !** Toutes les écuries sont composées.', components: [] });
+
+        // Récap final : toutes les écuries et leurs pilotes
+        const allTeams  = await Team.find();
+        const allPilots = await Pilot.find({ teamId: { $in: allTeams.map(t => t._id) } });
+        const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
+
+        const recapLines = allTeams.map(t => {
+          const roster = allPilots.filter(p => String(p.teamId) === String(t._id));
+          const names  = roster.map(p => {
+            const ov  = overallRating(p);
+            const ti  = ratingTier(ov);
+            const flag = p.nationality?.split(' ')[0] || '';
+            return `  ${ti.badge} **${p.name}** ${flag} #${p.racingNumber || '?'} (${ov})`;
+          }).join('\n') || '  *Aucun pilote*';
+          return `${t.emoji} **${t.name}**\n${names}`;
+        }).join('\n\n');
+
+        const closingEmbed = new EmbedBuilder()
+          .setColor('#FFD700')
+          .setTitle('🏆  DRAFT TERMINÉE — LES ÉCURIES SONT FORMÉES !')
+          .setDescription('> *Le championnat peut commencer. Que le meilleur pilote gagne.*\n\u200B')
+          .addFields({ name: '📋 Composition des écuries', value: recapLines.slice(0, 4096) })
+          .setFooter({ text: `${draft.totalPicks} picks réalisés · Bonne saison 🏎️💨` });
+
+        await interaction.followUp({ embeds: [closingEmbed] });
       } else {
         await draft.save();
-        // Prochain pick
-        const nextTeamId = draftTeamAtIndex(draft.order, draft.currentPickIndex);
-        const nextTeam   = await Team.findById(nextTeamId);
-        const pickedIds  = draft.picks.map(pk => String(pk.pilotId));
-        const freePilots = await Pilot.find({ _id: { $nin: pickedIds } }).sort({ freinage: -1 });
 
-        const round  = Math.floor(draft.currentPickIndex / draft.order.length) + 1;
-        const pickN  = (draft.currentPickIndex % draft.order.length) + 1;
-        const totalN = draft.order.length;
+        // ④ Prochain "On The Clock"
+        const nextTeamId   = draftTeamAtIndex(draft.order, draft.currentPickIndex);
+        const nextTeam     = await Team.findById(nextTeamId);
+        const pickedIds    = draft.picks.map(pk => String(pk.pilotId));
+        const freePilots   = await Pilot.find({ _id: { $nin: pickedIds } }).sort({ createdAt: 1 });
+        const sortedFree   = [...freePilots].sort((a, b) => overallRating(b) - overallRating(a));
 
-        if (!freePilots.length) {
-          draft.status = 'done';
-          await draft.save();
-          await interaction.update({ content: msg + '\n\n🏁 **Draft terminé !** Plus de pilotes disponibles.', components: [] });
-        } else {
-          const selectRow = buildDraftSelectMenu(freePilots, String(draft._id));
-          await interaction.update({
-            content: msg + `\n\n**Round ${round} — Pick ${pickN}/${totalN}** : au tour de **${nextTeam.emoji} ${nextTeam.name}**`,
-            components: [selectRow],
-          });
+        const nextGlobal   = draft.currentPickIndex;
+        const nextRound    = Math.floor(nextGlobal / totalInRound) + 1;
+        const nextPickInR  = (nextGlobal % totalInRound) + 1;
+
+        // Annonce de changement de round si nécessaire
+        if (nextPickInR === 1 && nextRound > 1) {
+          const roundEmbed = new EmbedBuilder()
+            .setColor('#C0C0C0')
+            .setTitle(`🔄  ROUND ${nextRound} — L'ORDRE S'INVERSE !`)
+            .setDescription('> *Le snake draft reprend dans l\'ordre inverse. La chasse est relancée.*');
+          await interaction.followUp({ embeds: [roundEmbed] });
         }
+
+        const clockPayload = buildOnTheClockPayload(
+          nextTeam, nextGlobal, draft.totalPicks, nextRound, nextPickInR, totalInRound, sortedFree, String(draft._id)
+        );
+        await interaction.followUp(clockPayload);
       }
       return;
     }
@@ -3475,19 +3597,16 @@ async function handleInteraction(interaction) {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
-    // Vérifier qu'il n'y a pas un draft actif
     const existing = await DraftSession.findOne({ status: 'active' });
     if (existing) return interaction.reply({ content: '❌ Un draft est déjà en cours !', ephemeral: true });
 
-    // Ordre des teams : budget ASC (plus petite écurie choisit en premier — fair play)
     const teams = await Team.find().sort({ budget: 1 });
     if (!teams.length) return interaction.reply({ content: '❌ Aucune écurie trouvée.', ephemeral: true });
 
-    // Pilotes libres (sans équipe), triés par note
-    const freePilots = await Pilot.find({ teamId: null });
-    if (!freePilots.length) return interaction.reply({ content: '❌ Aucun pilote libre pour le draft.', ephemeral: true });
+    const freePilots = await Pilot.find({ teamId: null }).sort({ createdAt: 1 });
+    if (!freePilots.length) return interaction.reply({ content: '❌ Aucun pilote libre pour la draft.', ephemeral: true });
 
-    const totalRounds = 2; // 2 pilotes par écurie
+    const totalRounds = 2;
     const totalPicks  = teams.length * totalRounds;
 
     const draft = await DraftSession.create({
@@ -3497,40 +3616,41 @@ async function handleInteraction(interaction) {
       status: 'active',
     });
 
-    // Afficher l'ordre du draft
-    const orderStr = teams.map((t, i) => `${i+1}. ${t.emoji} ${t.name}`).join('\n');
-    const pilotListStr = freePilots
-      .map(p => { const ov = overallRating(p); const t = ratingTier(ov); return `${t.badge} **${ov}** — ${p.name}`; })
-      .sort((a, b) => {
-        const getOv = s => parseInt(s.match(/\*\*(\d+)\*\*/)?.[1] || '0');
-        return getOv(b) - getOv(a);
-      })
-      .join('\n');
+    // ── Embed d'ouverture cinématique ──────────────────────
+    const sortedPilots = [...freePilots]
+      .map(p => { const ov = overallRating(p); const t = ratingTier(ov); const flag = p.nationality?.split(' ')[0] || ''; return { str: `${t.badge} **${ov}** — ${flag} ${p.name} #${p.racingNumber || '?'}`, ov }; })
+      .sort((a, b) => b.ov - a.ov);
 
-    const infoEmbed = new EmbedBuilder()
-      .setTitle('🎯 DRAFT DES ÉCURIES — Début !')
+    const pilotListStr = sortedPilots.map(x => x.str).join('\n');
+    const orderStr = teams.map((t, i) => `**${i+1}.** ${t.emoji} ${t.name}`).join('\n');
+
+    const openingEmbed = new EmbedBuilder()
       .setColor('#FFD700')
+      .setTitle('🏁  DRAFT F1 PL — C\'EST PARTI !')
       .setDescription(
-        '**Format : Snake Draft** (round 1 = ordre ASC budget · round 2 = ordre inversé)\n' +
-        `**${totalPicks} picks au total** (${teams.length} écuries × ${totalRounds} rounds)\n\u200B`
+        '> *Les écuries prennent position. Les pilotes attendent. Le championnat commence ici.*\n\u200B'
       )
       .addFields(
-        { name: '📋 Ordre Round 1', value: orderStr, inline: true },
-        { name: '🏎️ Pilotes disponibles', value: pilotListStr.slice(0, 1024) || 'Aucun', inline: false },
-      );
+        { name: '📋 Ordre du Round 1', value: orderStr, inline: true },
+        { name: '\u200B', value: '*Round 2 = ordre inversé (snake)*', inline: true },
+        { name: `🏎️ ${freePilots.length} pilotes disponibles`, value: pilotListStr.slice(0, 1024) },
+      )
+      .setFooter({ text: `Format Snake Draft · ${totalPicks} picks au total · ${teams.length} écuries × ${totalRounds} rounds` });
 
+    await interaction.reply({ embeds: [openingEmbed] });
+
+    // ── Premier "On The Clock" ─────────────────────────────
     const firstTeamId = draftTeamAtIndex(teams.map(t => t._id), 0);
     const firstTeam   = teams.find(t => String(t._id) === String(firstTeamId));
     const sortedFree  = [...freePilots].sort((a, b) => overallRating(b) - overallRating(a));
-    const selectRow   = buildDraftSelectMenu(sortedFree, String(draft._id));
 
-    await interaction.reply({ embeds: [infoEmbed] });
-    await interaction.followUp({
-      content: `**Round 1 — Pick 1/${teams.length}** : au tour de **${firstTeam.emoji} ${firstTeam.name}** de choisir !`,
-      components: [selectRow],
-    });
+    const clockPayload = buildOnTheClockPayload(
+      firstTeam, 0, totalPicks, 1, 1, teams.length, sortedFree, String(draft._id)
+    );
+    await interaction.followUp(clockPayload);
     return;
   }
+
 
   // -- /pilotes --
   if (commandName === 'pilotes') {
