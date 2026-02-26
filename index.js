@@ -595,7 +595,7 @@ function checkIncident(pilot, team) {
   const crashF   = ((100 - pilot.controle) / 100 * 0.005) + ((100 - pilot.reactions) / 100 * 0.003);
   if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
   if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
-  if (roll < 0.008)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
+  if (roll < 0.003)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
   return null;
 }
 
@@ -944,46 +944,164 @@ function collisionDescription(attacker, victim, lap, attackerDnf, victimDnf, dam
   return pick(intros) + consequence;
 }
 
-// Ambiance aléatoire play-by-play — drama uniquement si ça concerne le haut du classement
-function atmosphereLine(ranked, lap, totalLaps, weather, scState) {
+// Ambiance aléatoire play-by-play — TOUJOURS quelque chose à dire
+function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle) {
   if (!ranked.length) return null;
   const leader = ranked[0];
   const second = ranked[1];
   const third  = ranked[2];
   const pct    = lap / totalLaps;
-  if (scState.state !== 'NONE') return null;
 
   const lines = [];
 
+  // ── Sous SC/VSC : commentaire spécifique ───────────────
+  if (scState.state === 'SC') {
+    const pit4 = ranked.slice(0,6).map(d => `${d.team.emoji}**${d.pilot.name}**`).join(' · ');
+    lines.push(pick([
+      `🚨 Le peloton roule en file derrière la voiture de sécurité... ${pit4} — les équipes analysent les stratégies. Qui va rentrer ?`,
+      `🚨 La course est gelée. Les mécaniciens sont en alerte dans les stands — l'arrêt sous SC peut tout changer !`,
+      `🚨 Le Safety Car maintient le rythme... Les pilotes gardent leurs pneus au chaud. Le restart va être explosif.`,
+    ]));
+    return pick(lines);
+  }
+  if (scState.state === 'VSC') {
+    lines.push(pick([
+      `🟡 VSC en cours — tout le monde roule au delta. Personne ne peut attaquer, personne ne peut défendre.`,
+      `🟡 Virtual Safety Car toujours actif. La course reprendra bientôt — les gaps se figent.`,
+    ]));
+    return pick(lines);
+  }
+
+  // ── Gaps en tête — drama si serré ───────────────────────
   if (second) {
     const gapTop = (second.totalTime - leader.totalTime) / 1000;
-    if (gapTop < 0.5) {
-      lines.push(`***👀 MOINS D'UNE DEMI-SECONDE !!! ${second.team.emoji}${second.pilot.name} EST DANS LE DRS DE ${leader.team.emoji}${leader.pilot.name} !!! RIEN N'EST JOUÉ !***`);
-      lines.push(`***🔥 ${second.team.emoji}${second.pilot.name} EST COLLÉ !!! ${gapTop.toFixed(3)}s — ÇA VA EXPLOSER !!!***`);
-    } else if (gapTop < 1.5) {
-      lines.push(`***⚡ Moins d'une seconde entre ${leader.team.emoji}${leader.pilot.name} et ${second.team.emoji}${second.pilot.name}*** — la pression est ***MAXIMALE*** en tête !`);
-      lines.push(`😤 ${second.team.emoji}**${second.pilot.name}** colle aux roues de ${leader.team.emoji}**${leader.pilot.name}** — ça va exploser d'une seconde à l'autre !`);
-    } else if (gapTop < 3 && third) {
+    if (gapTop < 0.3) {
+      lines.push(pick([
+        `***👀 ${second.team.emoji}${second.pilot.name} DANS LE DRS !!! ${gapTop.toFixed(3)}s — LA BOMBE VA EXPLOSER !!!***`,
+        `***🔥 ${gapTop.toFixed(3)}s !!! ${second.team.emoji}${second.pilot.name} colle aux roues de ${leader.team.emoji}${leader.pilot.name} — ÇA VA PASSER OU ÇA VA CASSER !!!***`,
+      ]));
+    } else if (gapTop < 1.0) {
+      lines.push(pick([
+        `***⚡ T${lap} — ${second.team.emoji}${second.pilot.name} est à **${gapTop.toFixed(3)}s** de ${leader.team.emoji}${leader.pilot.name}*** — la pression est maximale !`,
+        `😤 **${second.team.emoji}${second.pilot.name}** fond sur **${leader.team.emoji}${leader.pilot.name}** — ${gapTop.toFixed(3)}s seulement. Ça chauffait déjà, ça brûle maintenant.`,
+      ]));
+    } else if (gapTop < 2.5 && third) {
       const gap3 = (third.totalTime - second.totalTime) / 1000;
-      if (gap3 < 2) lines.push(`🏎️ Bagarre à trois ! ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tout le monde dans le même peloton !`);
-    } else if (gapTop > 15) {
-      lines.push(`🏃 ${leader.team.emoji}**${leader.pilot.name}** file seul en tête — **${gapTop.toFixed(1)}s** d'avance. La course semble pliée...`);
+      if (gap3 < 1.5) lines.push(`🏎️ **Bagarre à trois !** ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tous dans le même mouchoir !`);
+      else lines.push(`🏎️ ${leader.team.emoji}**${leader.pilot.name}** devant — **${gapTop.toFixed(1)}s** sur ${second.team.emoji}**${second.pilot.name}**. La pression monte.`);
+    } else if (gapTop > 20) {
+      lines.push(pick([
+        `🏃 ${leader.team.emoji}**${leader.pilot.name}** file seul en tête — **${gapTop.toFixed(1)}s** d'avance. On dirait une autre course là-devant.`,
+        `💨 ${leader.team.emoji}**${leader.pilot.name}** maîtrise parfaitement son Grand Prix. **+${gapTop.toFixed(1)}s** — c'est impressionnant.`,
+      ]));
+    } else {
+      // Gap moyen — commentaire générique sur la course
+      lines.push(pick([
+        `🏎️ T${lap}/${totalLaps} — ${leader.team.emoji}**${leader.pilot.name}** en tête avec **+${gapTop.toFixed(1)}s** sur ${second.team.emoji}**${second.pilot.name}**. La course suit son cours.`,
+        `⏱ T${lap} — Ordre stable en tête. ${leader.team.emoji}**${leader.pilot.name}** administre son avantage.`,
+        `🎙 T${lap} — ${leader.team.emoji}**${leader.pilot.name}** reste au commandement. ${second.team.emoji}**${second.pilot.name}** surveille ses pneus.`,
+      ]));
+    }
+  } else {
+    lines.push(`🏁 ${leader.team.emoji}**${leader.pilot.name}** seul en piste — tous les adversaires ont abandonné !`);
+  }
+
+  // ── Commentaires sur les pneus / stratégie ───────────────
+  const hardPushers = ranked.filter(d => d.tireWear > 30 && d.pos <= 8);
+  if (hardPushers.length > 0) {
+    const p = hardPushers[0];
+    lines.push(pick([
+      `🔥 **${p.team.emoji}${p.pilot.name}** (P${p.pos}) est en train de griller ses ${TIRE[p.tireCompound].emoji}**${TIRE[p.tireCompound].label}** — il va devoir s'arrêter bientôt.`,
+      `⚠️ Usure critique sur la voiture de **${p.team.emoji}${p.pilot.name}** — les pneus ${TIRE[p.tireCompound].emoji} sont en limite. La stratégie va être décisive.`,
+    ]));
+  }
+
+  // ── Météo ────────────────────────────────────────────────
+  if (weather === 'WET')   lines.push(pick([
+    `🌧️ Pluie battante — la piste est traîtresse. Chaque virage demande une concentration maximale.`,
+    `🌧️ Les spray derrière les voitures réduisent la visibilité. Difficile de dépasser dans ces conditions.`,
+  ]));
+  if (weather === 'HOT')   lines.push(`🔥 La chaleur est intense — **${Math.floor(50 + Math.random()*10)}°C** en piste. Les pneus souffrent énormément aujourd'hui.`);
+  if (weather === 'INTER') lines.push(pick([
+    `🌦️ Piste mixte — ni sec, ni mouillé. La fenêtre des slicks pourrait s'ouvrir dans quelques tours.`,
+    `🌦️ Conditions délicates. Un pilote sur intermédiaires peut perdre des secondes par tour si la piste sèche.`,
+  ]));
+
+  // ── Étapes clés de la course ─────────────────────────────
+  if (pct > 0.24 && pct < 0.28) {
+    lines.push(`📊 **Premier quart de course** passé — les stratèges commencent à calculer les fenêtres de pit stop.`);
+  }
+  if (pct > 0.48 && pct < 0.52) {
+    lines.push(`⏱ **Mi-course !** T${lap}/${totalLaps} — qui va jouer la stratégie, qui va rester dehors ?`);
+  }
+  if (pct > 0.74 && pct < 0.78) {
+    lines.push(pick([
+      `🏁 **Dernier quart de course.** Les positions se cristallisent — ou pas. Tout peut encore arriver.`,
+      `🏁 Plus que ${totalLaps - lap} tours ! Les mécaniciens croisent les doigts. Les pilotes donnent tout.`,
+    ]));
+  }
+
+  // ── Battle dans le peloton ───────────────────────────────
+  for (let i = 1; i < Math.min(ranked.length, 12); i++) {
+    const behind = ranked[i];
+    const ahead  = ranked[i-1];
+    const gap = (behind.totalTime - ahead.totalTime) / 1000;
+    if (gap < 1.5 && gap > 0.3) {
+      lines.push(pick([
+        `👁 **Surveillance !** ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) est à **${gap.toFixed(3)}s** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). Ça fume derrière !`,
+        `🔭 **P${i} vs P${i+1} —** ${ahead.team.emoji}**${ahead.pilot.name}** sous pression de ${behind.team.emoji}**${behind.pilot.name}** · **+${gap.toFixed(3)}s** entre eux.`,
+      ]));
+      break;
     }
   }
 
-  if (weather === 'WET')   lines.push(`🌧️ La piste est toujours glissante — chaque virage est une loterie par ce temps.`);
-  if (weather === 'HOT')   lines.push(`🔥 La chaleur est intense — les pneus souffrent énormément.`);
-  if (weather === 'INTER') lines.push(`🌦️ Piste mixte délicate — la moindre erreur et c'est dans le mur.`);
-
-  if (pct > 0.45 && pct < 0.55) lines.push(`⏱ Mi-course franchie — les stratèges ont les yeux rivés sur les données. Qui va bouger ?`);
-  if (pct > 0.75 && second) {
-    const gap = (second.totalTime - leader.totalTime) / 1000;
-    if (gap < 5) lines.push(`***🏁 Dernier quart — ${leader.team.emoji}${leader.pilot.name} en tête mais ${second.team.emoji}${second.pilot.name} à ${gap.toFixed(1)}s... C'est pas encore joué !***`);
-    else         lines.push(`🏁 Dernier quart de course — les positions semblent figées. Il faudrait un miracle maintenant.`);
+  // ── Style de circuit ────────────────────────────────────
+  if (gpStyle === 'urbain' && Math.random() < 0.25) {
+    lines.push(pick([
+      `🏙️ Sur ce circuit urbain, les murs sont partout — la concentration doit être totale.`,
+      `🏙️ Les virages à angle droit du tracé urbain rendent les dépassements très difficiles. La qualif' était cruciale.`,
+    ]));
+  }
+  if (gpStyle === 'rapide' && Math.random() < 0.25) {
+    lines.push(pick([
+      `💨 Circuit rapide — les voitures passent à plus de 300 km/h dans les lignes droites. Impressionnant.`,
+      `💨 À ces vitesses, le moindre écart de trajectoire se paie cash. La précision est reine.`,
+    ]));
   }
 
-  if (!lines.length) return null;
+  if (!lines.length) {
+    // Fallback universel
+    lines.push(`🎙 T${lap}/${totalLaps} — La course continue. ${ranked[0]?.team.emoji}**${ranked[0]?.pilot.name}** reste en tête.`);
+  }
   return pick(lines);
+}
+
+// ─── Descriptions de DÉFENSE ────────────────────────────────
+function defenseDescription(defender, attacker, gpStyle) {
+  const a = `${attacker.team.emoji}**${attacker.pilot.name}**`;
+  const d = `${defender.team.emoji}**${defender.pilot.name}**`;
+  const defHigh = defender.pilot.defense > 75;
+  const freinage = defender.pilot.freinage > 70;
+  return pick([
+    `🛡️ ${d} ferme la porte — couvre l'intérieur, ${a} doit lever le pied !`,
+    `🛡️ ${d} résiste ! Freinage tardif${freinage ? ' au millimètre' : ''} — il repousse ${a} dehors. ${defHigh ? '**Défense magistrale.**' : ''}`,
+    `💪 ${a} tente le coup, mais ${d} couvre chaque virage. Pas de passage !`,
+    `🔒 ${d} en mode défensif — il change de trajectoire juste avant le point de corde. ${a} est bloqué !`,
+    `🏎️ Bras de fer entre ${a} et ${d} — le défenseur est cramponné à sa position. Magnifique lutte !`,
+  ]);
+}
+
+// ─── Descriptions de CONTRE-ATTAQUE (repasse après avoir été passé) ─────────
+function counterAttackDescription(attacker, defender, gpStyle) {
+  const a = `${attacker.team.emoji}**${attacker.pilot.name}**`;
+  const d = `${defender.team.emoji}**${defender.pilot.name}**`;
+  return pick([
+    `***⚡ CONTRE-ATTAQUE IMMÉDIATE !*** ${a} avait passé ${d}, mais ${d} retarde son freinage au maximum — ***il REPASSE !*** Incroyable !`,
+    `***🔄 IL REPREND SA PLACE !*** ${d} passe à l'intérieur du prochain virage — ${a} ne s'y attendait pas ! ***INVERSION !***`,
+    `***😤 PAS QUESTION DE LAISSER ÇA !*** ${d} répond dans la foulée — il force son chemin et reprend la position ! ***FANTASTIQUE !***`,
+    `***💥 RÉPONSE IMMÉDIATE !*** ${a} avait cru avoir fait le plus dur, mais ${d} est là — freinage tardif, corde parfaite. ***Il revient !***`,
+    `🔄 ${d} ne se laisse pas faire — il trouve l'ouverture au virage suivant et récupère sa position dans la foulée !`,
+  ]);
 }
 
 // ─── SIMULATION COURSE COMPLÈTE ───────────────────────────
@@ -1046,10 +1164,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   }).filter(Boolean);
 
   let scState          = { state: 'NONE', lapsLeft: 0 };
-  let scCooldown       = 0; // tours de variance réduite après la fin d'un SC/VSC
+  let scCooldown       = 0;
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
-  const raceCollisions = []; // { attackerId, victimId } — pour rivalités
+  const raceCollisions = [];
+  // battleMap : clé = "idA_idB" (ordre croissant) → { lapsClose, lastPasser, lastPasserLap }
+  // Suit les duels persistants entre deux pilotes proches pour générer des contre-attaques
+  const battleMap = new Map();
 
   const send = async (msg) => {
     if (!channel) return;
@@ -1469,89 +1590,138 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
     const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
 
-    // ── Dépassements ─────────────────────────────────────────
-    // Règles strictes :
-    // 1. Pas pendant SC/VSC (aucune exception)
-    // 2. Pas le tour du restart (positions encore trop proches)
-    // 3. Uniquement si positions strictement adjacentes avant le tour
-    // 4. Gap pré-tour max 3s (vrai dépassement en piste, pas artefact)
-    // 5. Aucun des deux n'a pité ce tour
+    // ── Mise à jour du battleMap ──────────────────────────────
+    // Pour chaque paire de pilotes adjacents distants de < 2s, on incrémente lapsClose
+    if (!scActive) {
+      for (let i = 0; i < ranked.length - 1; i++) {
+        const ahead  = ranked[i];
+        const behind = ranked[i + 1];
+        const gap = behind.totalTime - ahead.totalTime;
+        const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
+        if (gap < 2000) {
+          const existing = battleMap.get(bkey) || { lapsClose: 0, lastPasser: null, lastPasserLap: -99 };
+          battleMap.set(bkey, { ...existing, lapsClose: existing.lapsClose + 1 });
+        } else {
+          // Trop loin → reset
+          battleMap.delete(bkey);
+        }
+      }
+    }
+
+    // ── Dépassements & Batailles ──────────────────────────────
+    // Règles :
+    // 1. Jamais sous SC/VSC
+    // 2. Pas tour de restart
+    // 3. Positions adjacentes AVANT le tour (driver.lastPos = driver.pos + 1)
+    // 4. Gap pré-tour < 3s
+    // 5. Ni attaquant ni défenseur n'ont pité
+    // 6. Contre-attaque possible si le pilote vient d'être passé au tour précédent
     const justRestarted = prevScState !== 'NONE' && scState.state === 'NONE';
+
     for (const driver of ranked) {
-      if (scActive) continue;                               // JAMAIS sous SC
-      if (justRestarted) continue;                          // tour de restart bloqué
+      if (scActive) continue;
+      if (justRestarted) continue;
       if (lap <= 1) continue;
-      if (driver.pos >= driver.lastPos) continue;           // pas progressé
-      if (driver.pittedThisLap) continue;                   // changement dû au pit
+      if (driver.pittedThisLap) continue;
 
-      // Le pilote passé : celui qui était juste devant (lastPos = driver.pos + 1 avant ce tour)
-      if (driver.lastPos !== driver.pos + 1) continue;      // saut de plus d'une place → invalide
+      const movedUp   = driver.pos < driver.lastPos;
+      const movedDown = driver.pos > driver.lastPos;
 
-      const passed = ranked.find(d =>
-        d.pos === driver.lastPos &&
-        !d.pittedThisLap &&
-        String(d.pilot._id) !== String(driver.pilot._id)
-      );
-      if (!passed) continue;
-      // Le pilote passé doit aussi avoir avancé/reculé d'exactement 1 place
-      if (passed.lastPos !== passed.pos - 1) continue;
+      // ── Dépassement (le pilote a gagné UNE place) ──────────
+      if (movedUp && driver.lastPos === driver.pos + 1) {
+        // Chercher le pilote qui était à cette position et qui n'a pas pité
+        const passed = ranked.find(d =>
+          d.pos === driver.lastPos &&
+          !d.pittedThisLap &&
+          String(d.pilot._id) !== String(driver.pilot._id)
+        );
+        if (!passed) continue;
+        // Le pilote passé doit avoir reculé : sa lastPos doit être inférieure à sa pos actuelle
+        // On est plus tolérant ici : on vérifie juste qu'il n'a pas pité et qu'il a reculé
+        if (passed.pos <= passed.lastPos) continue; // il n'a pas reculé → pas un vrai dépassement
 
-      // Gap pré-tour : max 3s pour un vrai dépassement en piste
-      const preLapDriver = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
-      const preLapPassed = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
-      const preLapGapMs  = Math.abs(preLapPassed - preLapDriver);
-      if (preLapGapMs > 3000) continue;
+        // Gap pré-tour
+        const preLapD = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
+        const preLapP = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
+        if (Math.abs(preLapP - preLapD) > 3000) continue;
 
-      // Gap APRÈS le tour
-      const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
-      const gapStr    = postGapMs < 1000
-        ? `${postGapMs}ms`
-        : `${(postGapMs / 1000).toFixed(3)}s`;
+        const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
+        const gapStr    = postGapMs < 1000 ? `${postGapMs}ms` : `${(postGapMs/1000).toFixed(3)}s`;
+        const gapLeader = driver.pos > 1 ? ` · ${((driver.totalTime - ranked[0].totalTime)/1000).toFixed(3)}s du leader` : '';
+        const drsTag    = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
+        const areRivals = (
+          (driver.pilot.rivalId && String(driver.pilot.rivalId) === String(passed.pilot._id)) ||
+          (passed.pilot.rivalId && String(passed.pilot.rivalId) === String(driver.pilot._id))
+        );
+        const rivalTag = areRivals ? `\n⚔️ *Rivalité déclarée — ce dépassement a une saveur particulière !*` : '';
 
-      const gapOnLeader = driver.pos > 1
-        ? ` · ${((driver.totalTime - ranked[0].totalTime) / 1000).toFixed(3)}s du leader`
-        : '';
+        // Vérifier si c'est une contre-attaque
+        const bkey = [String(driver.pilot._id), String(passed.pilot._id)].sort().join('_');
+        const battle = battleMap.get(bkey);
+        const isCounterAttack = battle &&
+          battle.lastPasser === String(passed.pilot._id) &&
+          (lap - battle.lastPasserLap) <= 2;
 
-      const drsTag  = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
-      const howDesc = overtakeDescription(driver, passed, gpStyle);
+        // Mettre à jour qui vient de passer
+        const updatedBattle = battle
+          ? { ...battle, lastPasser: String(driver.pilot._id), lastPasserLap: lap }
+          : { lapsClose: 1, lastPasser: String(driver.pilot._id), lastPasserLap: lap };
+        battleMap.set(bkey, updatedBattle);
 
-      const areRivals = (
-        (driver.pilot.rivalId && String(driver.pilot.rivalId) === String(passed.pilot._id)) ||
-        (passed.pilot.rivalId && String(passed.pilot.rivalId) === String(driver.pilot._id))
-      );
-      const rivalTag = areRivals ? `\n⚔️ *Rivalité déclarée — ce dépassement a une saveur particulière !*` : '';
+        const ovNewPos  = driver.pos;
+        const ovLostPos = passed.pos;
+        const ovForLead = ovNewPos === 1;
+        const ovIsTop3  = ovNewPos <= 3 || ovLostPos <= 3;
+        const ovHeader  = ovForLead
+          ? `***🏆 T${lap} — CHANGEMENT EN TÊTE !!!***${drsTag}`
+          : ovIsTop3
+            ? `***⚔️ T${lap} — DÉPASSEMENT DANS LE TOP 3 !***${drsTag}`
+            : isCounterAttack
+              ? `🔄 **T${lap} — CONTRE-ATTAQUE !**${drsTag}`
+              : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
 
-      const ovNewPos  = driver.pos;
-      const ovLostPos = passed.pos;
-      const ovForLead = ovNewPos === 1;
-      const ovIsTop3  = ovNewPos <= 3 || ovLostPos <= 3;
-      const ovHeader  = ovForLead
-        ? `***🏆 T${lap} — CHANGEMENT EN TÊTE !!!***${drsTag}`
-        : ovIsTop3
-          ? `***⚔️ T${lap} — DÉPASSEMENT DANS LE TOP 3 !***${drsTag}`
-          : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
+        const howDesc = isCounterAttack
+          ? counterAttackDescription(driver, passed, gpStyle)
+          : overtakeDescription(driver, passed, gpStyle);
 
-      const posBlock = `⬆️ **${driver.pilot.name}** → P${ovNewPos}\n⬇️ **${passed.pilot.name}** → P${ovLostPos}`;
+        const posBlock = `⬆️ **${driver.pilot.name}** → P${ovNewPos}\n⬇️ **${passed.pilot.name}** → P${ovLostPos}`;
+        const gifCat   = ovForLead ? 'overtake_lead' : ovIsTop3 ? 'overtake_podium' : 'overtake_normal';
 
-      const gifCat = ovForLead ? 'overtake_lead' : ovIsTop3 ? 'overtake_podium' : 'overtake_normal';
-      events.push({
-        priority: ovForLead ? 9 : ovIsTop3 ? 8 : 6,
-        text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapOnLeader}*${rivalTag}`,
-        gif: pickGif(gifCat),
-      });
+        events.push({
+          priority: ovForLead ? 9 : ovIsTop3 ? 8 : isCounterAttack ? 7 : 6,
+          text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}`,
+          gif: pickGif(gifCat),
+        });
+      }
     }
 
-    // ── Atmosphère play-by-play (tous les 3 tours si pas d'events) ──
-    if (!events.length && lap % 3 === 0) {
-      const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState);
-      if (atmo) events.push({ priority: 1, text: atmo });
+    // ── Défenses sans changement de position ──────────────────
+    // Si deux pilotes sont proches depuis 2+ tours et aucun n'a dépassé → peut-être une belle défense
+    if (!scActive && !justRestarted && lap > 2 && Math.random() < 0.35) {
+      for (let i = 0; i < ranked.length - 1; i++) {
+        const ahead  = ranked[i];
+        const behind = ranked[i + 1];
+        if (ahead.pittedThisLap || behind.pittedThisLap) continue;
+        const gap  = (behind.totalTime - ahead.totalTime) / 1000;
+        const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
+        const battle = battleMap.get(bkey);
+        // 3+ tours proches, personne n'a dépassé ce tour → narrer la défense
+        if (battle && battle.lapsClose >= 3 && gap < 1.2) {
+          const defText = defenseDescription(ahead, behind, gpStyle);
+          events.push({ priority: 4, text: defText });
+          break; // une seule défense par tour max
+        }
+      }
     }
+
+    // ── Commentary obligatoire chaque tour ───────────────────
+    // Toujours un message, même si rien ne se passe
+    const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle);
+    if (atmo) events.push({ priority: events.length === 0 ? 3 : 1, text: atmo });
 
     // ── Composition et envoi du message ─────────────────────
     events.sort((a,b) => b.priority - a.priority);
     const eventsText = events.map(e => e.text).join('\n\n');
-
-    // GIF : on prend celui de l'event de plus haute priorité (1 seul par tour max)
     const topGif = events.find(e => e.gif)?.gif ?? null;
 
     const showFullStandings = (lap % 10 === 0) || lap === totalLaps;
@@ -1576,17 +1746,14 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         }).join('\n');
     }
 
-    const hasEvents = events.length > 0;
-    if (hasEvents || showFullStandings || showTop5) {
-      const header = `**⏱ Tour ${lap}/${totalLaps}**` +
-        (scState.state === 'SC'  ? ` 🚨 **SAFETY CAR**` : '') +
-        (scState.state === 'VSC' ? ` 🟡 **VSC**`         : '');
-      await send([header, eventsText, standingsText].filter(Boolean).join('\n'));
-      // Envoyer le GIF après le texte si disponible
-      if (topGif && channel) {
-        try { await channel.send(topGif); } catch(e) {}
-        await sleep(2000);
-      }
+    // Toujours envoyer (commentary garanti)
+    const header = `**⏱ Tour ${lap}/${totalLaps}**` +
+      (scState.state === 'SC'  ? ` 🚨 **SAFETY CAR**` : '') +
+      (scState.state === 'VSC' ? ` 🟡 **VSC**`        : '');
+    await send([header, eventsText, standingsText].filter(Boolean).join('\n'));
+    if (topGif && channel) {
+      try { await channel.send(topGif); } catch(e) {}
+      await sleep(2000);
     }
   }
 
