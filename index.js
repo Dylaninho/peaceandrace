@@ -2499,8 +2499,8 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_set_photo')
     .setDescription('[ADMIN] Définit la photo de profil d\'un pilote')
-    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (laisse vide pour toi-même)'))
     .addStringOption(o => o.setName('url').setDescription('URL directe de l\'image (jpg/png/gif)').setRequired(true))
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (laisse vide pour toi-même)'))
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
 
   new SlashCommandBuilder().setName('admin_draft_start')
