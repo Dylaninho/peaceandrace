@@ -3142,6 +3142,34 @@ async function handleInteraction(interaction) {
       });
     }
 
+    // ── Aperçu rapide des performances (GPRecord) ────────────
+    const gpRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
+    if (gpRecs.length) {
+      const totalGPs   = gpRecs.length;
+      const finished   = gpRecs.filter(r => !r.dnf);
+      const wins       = finished.filter(r => r.finishPos === 1).length;
+      const podiums    = finished.filter(r => r.finishPos <= 3).length;
+      const dnfsTotal  = gpRecs.filter(r => r.dnf).length;
+      const flaps      = gpRecs.filter(r => r.fastestLap).length;
+      const avgPos     = finished.length ? (finished.reduce((s, r) => s + r.finishPos, 0) / finished.length).toFixed(1) : '—';
+      const best       = finished.sort((a, b) => a.finishPos - b.finishPos)[0];
+
+      // Forme : 5 derniers en icônes
+      const formIcons  = gpRecs.slice(0, 5).map(r => {
+        if (r.dnf) return '❌';
+        if (r.finishPos === 1) return '🥇';
+        if (r.finishPos <= 3) return '🏆';
+        if (r.finishPos <= 10) return '✅';
+        return '▪️';
+      }).join('');
+
+      const perfLine =
+        `🥇 **${wins}V** · 🏆 **${podiums}P** · ❌ **${dnfsTotal}** DNF · ⚡ **${flaps}** FL · moy. **P${avgPos}**` +
+        (best ? `\n⭐ Meilleur : **P${best.finishPos}** ${best.circuitEmoji} ${best.circuit} *(S${best.seasonYear})*` : '');
+
+      embed.addFields({ name: `📊 Carrière — ${totalGPs} GP(s)  ·  Forme : ${formIcons}`, value: perfLine });
+    }
+
     return interaction.reply({ embeds: [embed] });
   }
 
