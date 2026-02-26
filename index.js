@@ -318,14 +318,20 @@ const TOTAL_STAT_POOL  = 70;
 const MAX_STAT_BONUS   = 30;   // bonus max par stat lors de la création
 
 // Nationalités disponibles (drapeau + label)
+// ⚠️ Discord limite à 25 choix max dans addChoices — liste triée avec équilibre Europe/Amériques/Afrique/Asie
 const NATIONALITIES = [
-  '🇫🇷 Français',    '🇧🇪 Belge',       '🇩🇪 Allemand',   '🇬🇧 Britannique',
-  '🇳🇱 Néerlandais', '🇮🇹 Italien',      '🇪🇸 Espagnol',   '🇲🇨 Monégasque',
-  '🇧🇷 Brésilien',   '🇦🇺 Australien',   '🇨🇦 Canadien',   '🇯🇵 Japonais',
-  '🇺🇸 Américain',   '🇲🇽 Mexicain',     '🇦🇹 Autrichien', '🇸🇪 Suédois',
-  '🇵🇱 Polonais',    '🇷🇺 Russe',        '🇨🇳 Chinois',    '🇦🇪 Émirati',
-  '🇿🇦 Sud-Africain','🇦🇷 Argentin',     '🇵🇹 Portugais',  '🇨🇭 Suisse',
-  '🇩🇰 Danois',      '🇫🇮 Finlandais',   '🇳🇴 Norvégien',  '🇹🇭 Thaïlandais',
+  // Europe
+  '🇫🇷 Français',    '🇧🇪 Belge',        '🇩🇪 Allemand',    '🇬🇧 Britannique',
+  '🇳🇱 Néerlandais', '🇮🇹 Italien',       '🇪🇸 Espagnol',    '🇵🇹 Portugais',
+  '🇨🇭 Suisse',      '🇦🇹 Autrichien',    '🇫🇮 Finlandais',  '🇵🇱 Polonais',
+  // Amériques
+  '🇧🇷 Brésilien',   '🇺🇸 Américain',     '🇨🇦 Canadien',    '🇲🇽 Mexicain',
+  '🇦🇷 Argentin',    '🇨🇴 Colombien',
+  // Afrique
+  '🇨🇮 Ivoirien',    '🇨🇬 Congolais',     '🇸🇳 Sénégalais',  '🇨🇲 Camerounais',
+  '🇲🇦 Marocain',    '🇿🇦 Sud-Africain',
+  // Asie / Océanie / Autre
+  '🇯🇵 Japonais',
 ];
 
 // ============================================================
@@ -2310,11 +2316,16 @@ const commands = [
     .addStringOption(o => o.setName('nom').setDescription('Nom de ton pilote').setRequired(true))
     .addStringOption(o => o.setName('nationalite').setDescription('Nationalité du pilote').setRequired(true)
       .addChoices(...[
+        // Europe (12)
         '🇫🇷 Français','🇧🇪 Belge','🇩🇪 Allemand','🇬🇧 Britannique','🇳🇱 Néerlandais',
-        '🇮🇹 Italien','🇪🇸 Espagnol','🇲🇨 Monégasque','🇧🇷 Brésilien','🇦🇺 Australien',
-        '🇨🇦 Canadien','🇯🇵 Japonais','🇺🇸 Américain','🇲🇽 Mexicain','🇦🇹 Autrichien',
-        '🇵🇱 Polonais','🇷🇺 Russe','🇨🇳 Chinois','🇦🇪 Émirati','🇿🇦 Sud-Africain',
-        '🇦🇷 Argentin','🇵🇹 Portugais','🇨🇭 Suisse','🇩🇰 Danois','🇫🇮 Finlandais',
+        '🇮🇹 Italien','🇪🇸 Espagnol','🇵🇹 Portugais','🇨🇭 Suisse','🇦🇹 Autrichien',
+        '🇫🇮 Finlandais','🇵🇱 Polonais',
+        // Amériques (6)
+        '🇧🇷 Brésilien','🇺🇸 Américain','🇨🇦 Canadien','🇲🇽 Mexicain','🇦🇷 Argentin','🇨🇴 Colombien',
+        // Afrique (6)
+        '🇨🇮 Ivoirien','🇨🇬 Congolais','🇸🇳 Sénégalais','🇨🇲 Camerounais','🇲🇦 Marocain','🇿🇦 Sud-Africain',
+        // Asie / Océanie (1)
+        '🇯🇵 Japonais',
       ].map(n => ({ name: n, value: n })))
     )
     .addIntegerOption(o => o.setName('numero').setDescription('Ton numéro de pilote (1–99)').setRequired(true).setMinValue(1).setMaxValue(99))
@@ -2435,6 +2446,11 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_test_qualif')
     .setDescription('[ADMIN] Simule des qualifications fictives — test narration'),
+
+  new SlashCommandBuilder().setName('admin_reset_pilot')
+    .setDescription('[ADMIN] Supprime le ou les pilotes d\'un joueur (utile pour les tests)')
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur ciblé').setRequired(true))
+    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1, 2, ou laisser vide pour supprimer les DEUX').setMinValue(1).setMaxValue(2)),
 
   new SlashCommandBuilder().setName('admin_help')
     .setDescription('[ADMIN] Liste toutes les commandes administrateur'),
@@ -3761,6 +3777,51 @@ async function handleInteraction(interaction) {
   }
 
   // -- /admin_help --
+  // ── /admin_reset_pilot ────────────────────────────────────
+  if (commandName === 'admin_reset_pilot') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
+
+    const target     = interaction.options.getUser('joueur');
+    const pilotIndex = interaction.options.getInteger('pilote'); // null = tout supprimer
+
+    const query = pilotIndex
+      ? { discordId: target.id, pilotIndex }
+      : { discordId: target.id };
+
+    // Récupérer les pilotes avant suppression pour l'affichage
+    const pilotsToDelete = await Pilot.find(query);
+    if (!pilotsToDelete.length) {
+      return interaction.reply({
+        content: `❌ Aucun pilote trouvé pour <@${target.id}>${pilotIndex ? ` (Pilote ${pilotIndex})` : ''}.`,
+        ephemeral: true,
+      });
+    }
+
+    // Supprimer les contrats liés
+    const pilotIds = pilotsToDelete.map(p => p._id);
+    await Contract.deleteMany({ pilotId: { $in: pilotIds } });
+    await TransferOffer.deleteMany({ pilotId: { $in: pilotIds } });
+    await Standing.deleteMany({ pilotId: { $in: pilotIds } });
+    await Pilot.deleteMany({ _id: { $in: pilotIds } });
+
+    const names = pilotsToDelete.map(p => `**${p.name}** (Pilote ${p.pilotIndex}, #${p.racingNumber || '?'})`).join(', ');
+
+    return interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle('🗑️ Pilote(s) supprimé(s)')
+        .setColor('#FF4444')
+        .setDescription(
+          `Pilote(s) de <@${target.id}> supprimé(s) :\n${names}\n\n` +
+          `✅ Contrats, offres et standings liés également supprimés.\n` +
+          `Le joueur peut maintenant recréer son pilote avec \`/create_pilot\`.`
+        )
+      ],
+      ephemeral: true,
+    });
+  }
+
+  // ── /admin_help ───────────────────────────────────────────
   if (commandName === 'admin_help') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
@@ -3781,6 +3842,7 @@ async function handleInteraction(interaction) {
         ].join('\n') },
         { name: '🖼️ Gestion Pilotes', value: [
           '`/admin_set_photo joueur:@user url:... [pilote:1|2]` — Définit la photo d\'un pilote',
+          '`/admin_reset_pilot joueur:@user [pilote:1|2]` — Supprime le(s) pilote(s) d\'un joueur *(test/reset)*',
         ].join('\n') },
         { name: '🧪 Test & Debug', value: [
           '`/admin_test_race` — Simule une course fictive avec pilotes fictifs (aucune sauvegarde)',
@@ -3860,142 +3922,41 @@ async function handleInteraction(interaction) {
   // ── /concept ──────────────────────────────────────────────
   if (commandName === 'concept') {
     const embed1 = new EmbedBuilder()
-      .setTitle('🏎️  Bienvenue dans F1 PL — Le championnat entre potes !')
+      .setTitle('🏎️ F1 PL — Le championnat entre potes')
       .setColor('#FF1801')
       .setDescription(
-        'Chaque joueur incarne **1 ou 2 pilotes de F1** dans un championnat simulé automatiquement.\n' +
-        'Les courses tournent toutes seules, mais **tes choix de stats, de développement et de contrat font toute la différence**.\n\n' +
-        '**Pas besoin d\'être là à chaque course** — le bot s\'en charge. Tu suis les résultats ici et tu gères ta carrière entre les courses.\n\u200B'
+        'Tu incarnes **1 ou 2 pilotes de F1** dans un championnat simulé automatiquement.\n' +
+        'Les courses tournent toutes seules — tu gères ta carrière entre les épreuves.\n\u200B'
       )
       .addFields(
-        {
-          name: '🗓️  Un week-end de course = 3 événements automatiques',
-          value:
-            '`11h00` 🔧 **Essais Libres** — classement indicatif, découverte du circuit\n' +
-            '`15h00` ⏱️ **Qualifications Q1/Q2/Q3** — détermine ta place sur la grille\n' +
-            '`18h00` 🏁 **Course** — simulation tour par tour : incidents, SC, pneus, météo...',
-          inline: false,
-        },
-        {
-          name: '📅  Calendrier',
-          value:
-            '**24 GP** dans la saison — Bahreïn, Monaco, Monza, Silverstone... Les vrais circuits F1.\n' +
-            'Chaque circuit a un **style** qui valorise certaines stats :\n' +
-            '🏙️ Urbain · 💨 Rapide · ⚙️ Technique · 🔀 Mixte · 🔋 Endurance',
-          inline: false,
-        },
-      );
-
-    const embed2 = new EmbedBuilder()
-      .setTitle('🧬  Tes Pilotes — Création & Personnalisation')
-      .setColor('#FFD700')
-      .setDescription(
-        `Tu peux créer **jusqu'à 2 pilotes** par compte Discord, chacun avec une identité et des stats uniques.\n` +
-        `Chaque pilote possède : **une nationalité**, **un numéro de course** (1–99, unique) et **7 stats personnalisables**.`
+        { name: '📅 Calendrier & Courses', value:
+          '**24 GP** par saison (vrais circuits F1) · Chaque circuit a un style : 🏙️ Urbain · 💨 Rapide · ⚙️ Technique · 🔀 Mixte · 🔋 Endurance\n' +
+          '> `11h` 🔧 Essais · `15h` ⏱️ Qualifs Q1/Q2/Q3 · `18h` 🏁 Course *(auto, Europe/Paris)*' },
+        { name: '🧬 Créer un pilote — `/create_pilot`', value:
+          '• **Nationalité** + **numéro de course** (1–99, unique)\n' +
+          `• **${TOTAL_STAT_POOL} points** à répartir sur 7 stats (base fixe ${BASE_STAT_VALUE} par stat · max +${MAX_STAT_BONUS}/stat)\n` +
+          '• Stats vides → répartition **aléatoire équilibrée**\n' +
+          '• **2 pilotes max** par compte — chacun a ses propres stats, contrat et coins\n' +
+          '> 💡 Toutes les commandes acceptent l\'option `[pilote:1|2]`' },
+        { name: '🎯 Les 7 stats pilote', value:
+          '`Dépassement` `Freinage` `Défense` `Adaptabilité` `Réactions` `Contrôle` `Gestion Pneus`\n' +
+          '→ Chaque style de circuit valorise des stats différentes. Spécialise-toi pour briller sur certains tracés !\n' +
+          '→ 3 upgrades consécutifs sur la même stat = **Spécialisation débloquée** 🏅 (bonus en course)' },
+        { name: '💰 PLcoins', value:
+          'Gagnés à chaque course (points + salaire + primes). Dépensés avec `/ameliorer [pilote:1|2]` pour booster tes stats (+1 par achat, coût croissant).' },
+        { name: '🚗 Écuries & Contrats', value:
+          '**10 écuries** avec des stats voiture qui évoluent chaque course. Chaque contrat a : multiplicateur de coins · salaire · primes V/P · durée.\n' +
+          '→ À la fin de saison : `/admin_transfer` ouvre le mercato, les écuries font des offres auto. Utilise `/offres [pilote:1|2]` pour accepter.' },
+        { name: '🚀 Pour démarrer', value:
+          '1️⃣ `/create_pilot` — crée ton pilote (nationalité, numéro, stats)\n' +
+          '2️⃣ Attends les offres d\'écuries → `/offres` pour accepter\n' +
+          '3️⃣ Suis les résultats ici · `/profil` · `/classement` · `/calendrier`\n' +
+          '4️⃣ Dépense tes gains → `/ameliorer`\n\n' +
+          '> `/f1` pour voir toutes tes commandes · `/profil` pour tes stats complètes' },
       )
-      .addFields(
-        {
-          name: '🏁  Création : /create_pilot',
-          value:
-            '• **Nom** — le nom de ton pilote\n' +
-            '• **Nationalité** — drapeau et pays (🇫🇷 🇧🇪 🇩🇪 🇬🇧 🇳🇱 🇮🇹 ... 28 nationalités disponibles)\n' +
-            '• **Numéro** — ton numéro de course (1–99, unique sur le serveur)\n' +
-            '• **7 stats à répartir** — tu disposes de **' + TOTAL_STAT_POOL + ' points** à distribuer librement\n' +
-            `  Base fixe par stat : **${BASE_STAT_VALUE}** · Bonus max par stat : **${MAX_STAT_BONUS}**\n` +
-            '  Si tu ne remplis pas les stats → répartition **aléatoire équilibrée**\n' +
-            '  *Exemple équilibré :* `/create_pilot ... depassement:10 freinage:10 defense:10 ...`\n' +
-            '  *Exemple spécialisé :* `/create_pilot ... freinage:30 controle:20 defense:20 ...`',
-          inline: false,
-        },
-        {
-          name: '🎯  Les 7 stats pilote',
-          value:
-            '`Dépassement`  → Attaque en piste, DRS, undercut agressif\n' +
-            '`Freinage`     → Performance en Q et zones de freinage tardif\n' +
-            '`Défense`      → Résistance aux tentatives de dépassement\n' +
-            '`Adaptabilité` → Météo changeante, Safety Car, conditions difficiles\n' +
-            '`Réactions`    → Départ, opportunisme, gestion des incidents\n' +
-            '`Contrôle`     → Consistance, gestion des limites de piste\n' +
-            '`Gestion Pneus`→ Préservation des pneus, fenêtre de fonctionnement\n\n' +
-            '**💡 Stratégie :** un pilote spécialisé Freinage/Contrôle excelle sur circuits techniques,\nun pilote Dépassement/Réactions brille sur circuits rapides !',
-          inline: false,
-        },
-        {
-          name: '💰  PLcoins — La monnaie du jeu',
-          value:
-            'Tu gagnes des **PLcoins** à chaque course (points + salaire + primes).\n' +
-            'Tu les dépenses via `/ameliorer [pilote:1|2]` pour booster une stat (+1, coût croissant).\n' +
-            '3 upgrades consécutifs sur la même stat → **Spécialisation débloquée** (bonus en course) !',
-          inline: false,
-        },
-      );
+      .setFooter({ text: 'Bonne saison 🏎️💨' });
 
-    const embed3 = new EmbedBuilder()
-      .setTitle('🚗  Les Écuries — Contrats & Transferts')
-      .setColor('#0099FF')
-      .setDescription('**10 écuries** du bas de grille au top, chacune avec des **stats voiture** qui évoluent en cours de saison.')
-      .addFields(
-        {
-          name: '🔧  Stats voiture (évoluent après chaque course)',
-          value:
-            '`Vitesse Max` · `DRS` · `Refroidissement`\n`Dirty Air` · `Conservation Pneus` · `Vitesse Moyenne`\n' +
-            '→ Les écuries qui marquent des points **développent plus vite**. La hiérarchie bouge !',
-          inline: false,
-        },
-        {
-          name: '📋  Contrats',
-          value:
-            'Chaque contrat a : **multiplicateur PLcoins × · salaire de base · prime victoire · prime podium · durée**.\n' +
-            'Un contrat est **irrévocable** jusqu\'à son terme — choisis bien !\n' +
-            'À la fin de saison → **période de transfert** → nouvelles offres des écuries.\n\n' +
-            '⚠️ **Chacun de tes 2 pilotes a son propre contrat et ses propres offres** (`/offres pilote:1` ou `pilote:2`).',
-          inline: false,
-        },
-      );
-
-    const embed4 = new EmbedBuilder()
-      .setTitle('🚀  Comment démarrer ?')
-      .setColor('#00FF88')
-      .addFields(
-        {
-          name: '1️⃣  Crée ton pilote (ou tes deux pilotes)',
-          value:
-            '`/create_pilot nom:TonNom nationalite:🇫🇷 Français numero:44`\n' +
-            'Stats non renseignées → répartition aléatoire équilibrée.\n' +
-            '*Tu peux relancer `/create_pilot` pour créer un 2ème pilote différent !*',
-          inline: false,
-        },
-        {
-          name: '2️⃣  Attends la période de transfert ou le draft',
-          value: 'Les écuries t\'enverront des offres. Utilise `/offres [pilote:1|2]` pour les voir et les accepter.',
-          inline: false,
-        },
-        {
-          name: '3️⃣  Suis tes courses',
-          value: 'Les résultats tombent ici automatiquement. `/profil` · `/classement` · `/calendrier`',
-          inline: false,
-        },
-        {
-          name: '4️⃣  Investis tes PLcoins',
-          value: '`/ameliorer [pilote:1|2]` pour booster une stat. Accumule des upgrades consécutifs pour débloquer une spécialisation !',
-          inline: false,
-        },
-        {
-          name: '📖  Commandes utiles',
-          value:
-            '`/profil [pilote:1|2]` — Tes stats et classement saison\n' +
-            '`/historique [pilote:1|2]` — Ta carrière complète\n' +
-            '`/ecurie nom:...` — Stats d\'une écurie\n' +
-            '`/classement` — Championnat pilotes\n' +
-            '`/classement_constructeurs` — Championnat écuries\n' +
-            '`/calendrier` — Prochains GP · `/resultats` — Dernière course\n' +
-            '`/palmares` — Hall of Fame · `/rivalite [pilote:1|2]` — Ta rivalité en saison',
-          inline: false,
-        },
-      )
-      .setFooter({ text: 'Bonne saison à tous 🏎️💨 · /f1 pour la liste complète des commandes' });
-
-    return interaction.reply({ embeds: [embed1, embed2, embed3, embed4] });
+    return interaction.reply({ embeds: [embed1] });
   }
 
   // ── /admin_new_season ─────────────────────────────────────
