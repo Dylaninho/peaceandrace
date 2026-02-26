@@ -2420,7 +2420,7 @@ const commands = [
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (si le joueur a 2 pilotes)').setMinValue(1).setMaxValue(2)),
 
   new SlashCommandBuilder().setName('ameliorer')
-    .setDescription('Améliore une stat de ton pilote (+1 par achat, coût variable selon le niveau)')
+    .setDescription('Améliore une stat de ton pilote (coût variable selon le niveau, cumul possible)')
     .addStringOption(o => o.setName('stat').setDescription('Stat à améliorer').setRequired(true)
       .addChoices(
         { name: 'Dépassement    — à partir de 120 🪙', value: 'depassement'  },
@@ -2431,6 +2431,7 @@ const commands = [
         { name: 'Contrôle       — à partir de 110 🪙', value: 'controle'     },
         { name: 'Gestion Pneus  — à partir de  90 🪙', value: 'gestionPneus' },
       ))
+    .addIntegerOption(o => o.setName('quantite').setDescription('Nombre de points à ajouter (défaut: 1). Le coût est cumulatif !').setMinValue(1).setMaxValue(10))
     .addIntegerOption(o => o.setName('pilote').setDescription('Ton Pilote 1 ou Pilote 2 à améliorer (défaut: 1)').setMinValue(1).setMaxValue(2)),
 
   new SlashCommandBuilder().setName('ecuries')
@@ -3083,50 +3084,74 @@ async function handleInteraction(interaction) {
     }
 
     const statKey  = interaction.options.getString('stat');
+    const quantite = interaction.options.getInteger('quantite') || 1;
     const current  = pilot[statKey];
     const MAX_STAT = 99;
 
     if (current >= MAX_STAT) return interaction.reply({ content: '❌ Stat déjà au maximum (99) !', ephemeral: true });
 
-    const cost = calcUpgradeCost(statKey, current);
+    // ── Calcul du coût cumulatif (upgrade 1 par 1, comme si fait séparément) ──
+    const maxPossible = Math.min(quantite, MAX_STAT - current);
+    let totalCost = 0;
+    for (let i = 0; i < maxPossible; i++) {
+      totalCost += calcUpgradeCost(statKey, current + i);
+    }
 
-    if (pilot.plcoins < cost) {
-      const missing = cost - pilot.plcoins;
+    if (pilot.plcoins < totalCost) {
+      const missing = totalCost - pilot.plcoins;
+      // Calculer combien on peut s'offrir avec le solde actuel
+      let affordable = 0;
+      let affordCost = 0;
+      for (let i = 0; i < maxPossible; i++) {
+        const stepCost = calcUpgradeCost(statKey, current + i);
+        if (affordCost + stepCost <= pilot.plcoins) { affordable++; affordCost += stepCost; }
+        else break;
+      }
+      const costBreakdown = maxPossible > 1
+        ? `\n*Détail : ${Array.from({length: maxPossible}, (_, i) => `+1 = ${calcUpgradeCost(statKey, current + i)} 🪙`).join(' · ')}*`
+        : '';
       return interaction.reply({
         embeds: [new EmbedBuilder()
           .setTitle('❌ PLcoins insuffisants')
           .setColor('#CC4444')
           .setDescription(
-            `**${statKey}** est actuellement à **${current}** — coût : **${cost} 🪙**\n` +
-            `Tu as **${pilot.plcoins} 🪙** — il te manque **${missing} 🪙**.\n\n` +
-            `💡 Continue à courir pour accumuler des PLcoins !`
+            `**${statKey}** est actuellement à **${current}** — coût total pour +${maxPossible} : **${totalCost} 🪙**\n` +
+            `Tu as **${pilot.plcoins} 🪙** — il te manque **${missing} 🪙**.` +
+            costBreakdown +
+            (affordable > 0 ? `\n\n💡 Tu peux te permettre **+${affordable}** pour **${affordCost} 🪙** — essaie \`/ameliorer quantite:${affordable}\` !` : '\n\n💡 Continue à courir pour accumuler des PLcoins !')
           )
         ],
         ephemeral: true,
       });
     }
 
-    const gain     = 1;
-    const newValue = Math.min(current + gain, MAX_STAT);
+    const gain     = maxPossible;
+    const ovBefore = overallRating(pilot);
+    const newValue = current + gain;
     const nextCost = newValue < MAX_STAT ? calcUpgradeCost(statKey, newValue) : null;
-    const remaining = pilot.plcoins - cost;
+    const remaining = pilot.plcoins - totalCost;
 
     // ── Tracker de streak de spécialisation ──────────────────
     const isSameStat  = pilot.lastUpgradeStat === statKey;
-    const newStreak   = isSameStat ? (pilot.upgradeStreak || 0) + 1 : 1;
-    // Déblocage : 3 consécutifs ET pas de spécialisation déjà active
+    const newStreak   = isSameStat ? (pilot.upgradeStreak || 0) + gain : gain;
+    // Déblocage : 3 consécutifs cumulés ET pas de spécialisation déjà active
     const unlockSpec  = newStreak >= 3 && !pilot.specialization;
 
     const updateFields = {
-      $inc: { plcoins: -cost },
+      $inc: { plcoins: -totalCost },
       $set: {
         [statKey]       : newValue,
         lastUpgradeStat : statKey,
-        upgradeStreak   : unlockSpec ? 0 : newStreak, // reset après déblocage
+        upgradeStreak   : unlockSpec ? 0 : newStreak,
         ...(unlockSpec ? { specialization: statKey } : {}),
       },
     };
     await Pilot.findByIdAndUpdate(pilot._id, updateFields);
+
+    // ── Calcul du nouvel overall pour détecter un gain ────────
+    const updatedPilot = { ...pilot.toObject(), [statKey]: newValue };
+    const ovAfter = overallRating(updatedPilot);
+    const ovGain  = ovAfter - ovBefore;
 
     const statLabels = {
       depassement: 'Dépassement', freinage: 'Freinage', defense: 'Défense',
@@ -3136,10 +3161,25 @@ async function handleInteraction(interaction) {
     const specMeta = SPECIALIZATION_META[statKey];
     const streakBar = '🔥'.repeat(Math.min(newStreak, 3)) + '⬜'.repeat(Math.max(0, 3 - Math.min(newStreak, 3)));
 
+    const costBreakdownStr = gain > 1
+      ? `\n> *Coût détaillé : ${Array.from({length: gain}, (_, i) => `${calcUpgradeCost(statKey, current + i)} 🪙`).join(' + ')} = **${totalCost} 🪙***`
+      : '';
+
     const descLines = [
-      `**${statLabels[statKey] || statKey}** : ${current} → **${newValue}** (+1)`,
-      `💸 −${cost} 🪙 · Solde : **${remaining} 🪙**`,
+      `**${statLabels[statKey] || statKey}** : ${current} → **${newValue}** (+${gain})`,
+      `💸 −${totalCost} 🪙 · Solde : **${remaining} 🪙**${costBreakdownStr}`,
     ];
+
+    // ── 🌟 Notification gain d'overall ───────────────────────
+    if (ovGain > 0) {
+      const tierBefore = ratingTier(ovBefore);
+      const tierAfter  = ratingTier(ovAfter);
+      const tierChanged = tierBefore.label !== tierAfter.label;
+      descLines.push(
+        `\n⭐ **NOTE GÉNÉRALE : ${ovBefore} → ${ovAfter}** (+${ovGain}) ${ovGain >= 2 ? '🚀' : '📈'}` +
+        (tierChanged ? `\n🎉 **NOUVEAU PALIER : ${tierAfter.badge} ${tierAfter.label} !** *(anciennement ${tierBefore.badge} ${tierBefore.label})*` : '')
+      );
+    }
 
     if (unlockSpec && specMeta) {
       descLines.push(`\n🏅 **SPÉCIALISATION DÉBLOQUÉE !**`);
@@ -3151,7 +3191,7 @@ async function handleInteraction(interaction) {
       descLines.push(`\n✅ Spécialisation active : **${existingSpec?.label || pilot.specialization}**`);
     } else {
       // Progression vers spécialisation
-      const streakDisplay = isSameStat ? `${streakBar} ${newStreak}/3` : `${streakBar} 1/3 *(streak réinitialisé)*`;
+      const streakDisplay = isSameStat ? `${streakBar} ${Math.min(newStreak,3)}/3` : `${streakBar} 1/3 *(streak réinitialisé)*`;
       descLines.push(`\n${newStreak >= 2 ? '🔥' : '📌'} **Progression spécialisation :** ${streakDisplay}`);
       if (newStreak < 3) descLines.push(`*Continue sur **${statLabels[statKey]}** pour débloquer : ${specMeta?.label || ''}*`);
     }
@@ -3159,10 +3199,18 @@ async function handleInteraction(interaction) {
     if (newValue >= MAX_STAT) descLines.push(`\n🔒 **Maximum (99) atteint.**`);
     else if (nextCost) descLines.push(`📌 Prochain upgrade : **${nextCost} 🪙**`);
 
+    const titleBase = unlockSpec
+      ? `🏅 Spécialisation débloquée — ${pilot.name} !`
+      : ovGain > 0
+        ? `⭐ Amélioration — ${pilot.name} monte à **${ovAfter}** !`
+        : gain > 1
+          ? `📈 +${gain} ${statLabels[statKey]} — ${pilot.name} (Pilote ${pilot.pilotIndex})`
+          : `📈 Amélioration — ${pilot.name} (Pilote ${pilot.pilotIndex})`;
+
     return interaction.reply({
       embeds: [new EmbedBuilder()
-        .setTitle(unlockSpec ? `🏅 Spécialisation débloquée — ${pilot.name} !` : `📈 Amélioration — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
-        .setColor(unlockSpec ? '#FF6600' : '#FFD700')
+        .setTitle(titleBase)
+        .setColor(unlockSpec ? '#FF6600' : ovGain > 0 ? '#00C851' : '#FFD700')
         .setDescription(descLines.join('\n'))
       ],
     });
