@@ -2557,6 +2557,14 @@ client.once('ready', async () => {
   await mongoose.connect(MONGO_URI);
   console.log('✅ MongoDB connecté');
 
+  // ── Supprime l'ancien index unique sur discordId (incompatible avec 2 pilotes par user) ──
+  try {
+    await Pilot.collection.dropIndex('discordId_1');
+    console.log('✅ Ancien index unique discordId supprimé');
+  } catch (_) {
+    // L'index n'existe plus (déjà supprimé ou jamais créé) — pas de souci
+  }
+
   const teamCount = await Team.countDocuments();
   if (teamCount === 0) {
     await Team.insertMany(DEFAULT_TEAMS);
