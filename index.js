@@ -109,6 +109,9 @@ const PilotSchema = new mongoose.Schema({
   // ── Rivalités ───────────────────────────────────────────────
   rivalId      : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
   rivalContacts: { type: Number, default: 0 },        // contacts en course cette saison vs rivalId
+  // ── Statut coéquipier ────────────────────────────────────────
+  teamStatus        : { type: String, enum: ['numero1', 'numero2', null], default: null },
+  teammateDuelWins  : { type: Number, default: 0 },   // victoires internes cette saison vs coéquipier
   // État
   teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
   createdAt    : { type: Date, default: Date.now },
@@ -163,6 +166,22 @@ const PilotGPRecordSchema = new mongoose.Schema({
 });
 PilotGPRecordSchema.index({ pilotId: 1, raceDate: -1 });
 const PilotGPRecord = mongoose.model('PilotGPRecord', PilotGPRecordSchema);
+
+// ── CircuitRecord — Meilleur temps par circuit (toutes saisons) ──
+const CircuitRecordSchema = new mongoose.Schema({
+  circuit      : { type: String, required: true, unique: true },
+  circuitEmoji : { type: String, default: '🏁' },
+  gpStyle      : { type: String, default: 'mixte' },
+  bestTimeMs   : { type: Number, required: true },
+  pilotId      : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot' },
+  pilotName    : { type: String },
+  teamName     : { type: String },
+  teamEmoji    : { type: String, default: '🏎️' },
+  seasonYear   : { type: Number },
+  raceId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Race' },
+  setAt        : { type: Date, default: Date.now },
+});
+const CircuitRecord = mongoose.model('CircuitRecord', CircuitRecordSchema);
 
 // ── Team ───────────────────────────────────────────────────
 const TeamSchema = new mongoose.Schema({
@@ -1235,6 +1254,356 @@ function counterAttackDescription(attacker, defender, gpStyle) {
   ]);
 }
 
+// ─── CONFÉRENCE DE PRESSE — Génération combinatoire ──────
+// Injecte les vraies données de course + saison pour un résultat unique à chaque fois
+async function generatePressConference(raceDoc, finalResults, season, allPilots, allTeams, allStandings, constrStandings) {
+  const totalRaces    = 24; // CIRCUITS.length
+  const gpNumber      = raceDoc.index + 1;
+  const seasonPhase   = gpNumber <= 6 ? 'début' : gpNumber <= 16 ? 'mi' : 'fin';
+  const seasonPhaseLabel = gpNumber <= 6 ? `début de saison (GP ${gpNumber}/24)` : gpNumber <= 16 ? `mi-saison (GP ${gpNumber}/24)` : `fin de saison (GP ${gpNumber}/24)`;
+  const styleLabels   = { urbain:'urbain', rapide:'rapide', technique:'technique', mixte:'mixte', endurance:'d\'endurance' };
+
+  const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
+  const pilotMap = new Map(allPilots.map(p => [String(p._id), p]));
+  const standMap = new Map(allStandings.map(s => [String(s.pilotId), s]));
+  const cStandMap= new Map(constrStandings.map(s => [String(s.teamId), s]));
+
+  // Classement constructeurs trié
+  const cStandSorted = [...constrStandings].sort((a,b) => b.points - a.points);
+
+  // Helpers
+  const champLeader = allStandings.sort((a,b) => b.points - a.points)[0];
+  const champLeaderPilot = champLeader ? pilotMap.get(String(champLeader.pilotId)) : null;
+
+  function pilotChampPos(pilotId) {
+    const sorted = [...allStandings].sort((a,b) => b.points - a.points);
+    const idx = sorted.findIndex(s => String(s.pilotId) === String(pilotId));
+    return idx >= 0 ? idx + 1 : null;
+  }
+  function teamConstrPos(teamId) {
+    const idx = cStandSorted.findIndex(s => String(s.teamId) === String(teamId));
+    return idx >= 0 ? idx + 1 : null;
+  }
+  function recentForm(pilotId) {
+    // Sera rempli après la mise à jour des GPRecords — on utilise les standings de la saison
+    const s = standMap.get(String(pilotId));
+    if (!s) return null;
+    return { wins: s.wins, podiums: s.podiums, dnfs: s.dnfs, points: s.points };
+  }
+
+  // Sélectionner les pilotes qui auront une conf de presse
+  // P1 toujours + 1-2 "story of the race" parmi : P2/P3, gros DNF depuis le top3, meilleure remontée, leader du champ. s'il n'est pas P1
+  const finishedSorted = finalResults.filter(r => !r.dnf).sort((a,b) => a.pos - b.pos);
+  const dnfTop3        = finalResults.filter(r => r.dnf && r.pos <= 5); // était haut avant abandon
+
+  const confSubjects = [];
+
+  // P1 obligatoire
+  if (finishedSorted[0]) confSubjects.push({ result: finishedSorted[0], angle: 'winner' });
+
+  // P2 si course serrée ou championship interest
+  if (finishedSorted[1]) {
+    const gap = finishedSorted[1].pos;
+    const champPos = pilotChampPos(String(finishedSorted[1].pilotId));
+    if (champPos && champPos <= 3) confSubjects.push({ result: finishedSorted[1], angle: 'podium_champ' });
+    else confSubjects.push({ result: finishedSorted[1], angle: 'podium' });
+  }
+
+  // Gros DNF dramatique
+  if (dnfTop3.length && confSubjects.length < 3) {
+    confSubjects.push({ result: dnfTop3[0], angle: 'dnf_drama' });
+  }
+
+  // Leader du championnat s'il n'est pas déjà dans la liste (s'il a fini P4+)
+  if (champLeaderPilot) {
+    const alreadyIn = confSubjects.some(s => String(s.result.pilotId) === String(champLeaderPilot._id));
+    if (!alreadyIn) {
+      const r = finalResults.find(r => String(r.pilotId) === String(champLeaderPilot._id));
+      if (r) confSubjects.push({ result: r, angle: 'champ_leader' });
+    }
+  }
+
+  // Générer les blocs de texte
+  const blocks = [];
+
+  for (const { result, angle } of confSubjects.slice(0, 3)) {
+    const pilot    = pilotMap.get(String(result.pilotId));
+    const team     = teamMap.get(String(result.teamId));
+    if (!pilot || !team) continue;
+
+    const stand    = standMap.get(String(pilot._id));
+    const champPos = pilotChampPos(String(pilot._id));
+    const cPos     = teamConstrPos(String(team._id));
+    const form     = recentForm(String(pilot._id));
+    const wins     = form?.wins || 0;
+    const podiums  = form?.podiums || 0;
+    const pts      = form?.points || 0;
+    const dnfs     = form?.dnfs || 0;
+
+    // Trouver le coéquipier
+    const teammate = allPilots.find(p =>
+      String(p.teamId) === String(team._id) &&
+      String(p._id) !== String(pilot._id)
+    );
+    const teammateResult = teammate ? finalResults.find(r => String(r.pilotId) === String(teammate._id)) : null;
+
+    // Trouver le rival
+    const rival = pilot.rivalId ? pilotMap.get(String(pilot.rivalId)) : null;
+    const rivalResult = rival ? finalResults.find(r => String(r.pilotId) === String(rival._id)) : null;
+
+    // Construire le contexte riche
+    const ctx = {
+      name       : pilot.name,
+      emoji      : team.emoji,
+      teamName   : team.name,
+      pos        : result.pos,
+      dnf        : result.dnf,
+      dnfReason  : result.dnfReason,
+      circuit    : raceDoc.circuit,
+      gpStyle    : raceDoc.gpStyle,
+      gpPhase    : seasonPhaseLabel,
+      wins, podiums, pts, dnfs,
+      champPos,
+      cPos,
+      champLeaderName : champLeaderPilot?.name,
+      champLeaderPts  : champLeader?.points || 0,
+      teammate   : teammate?.name,
+      teammatePos: teammateResult?.pos,
+      teammateDnf: teammateResult?.dnf,
+      rival      : rival?.name,
+      rivalPos   : rivalResult?.pos,
+      rivalDnf   : rivalResult?.dnf,
+      seasonPhase,
+    };
+
+    const block = buildPressBlock(ctx, angle);
+    if (block) blocks.push(block);
+  }
+
+  return blocks;
+}
+
+// ── Templates combinatoires de conf de presse ─────────────
+function buildPressBlock(ctx, angle) {
+  const { name, emoji, teamName, pos, dnf, dnfReason, circuit, gpStyle,
+          gpPhase, wins, podiums, pts, champPos, cPos,
+          champLeaderName, champLeaderPts, teammate, teammatePos,
+          rival, rivalPos, rivalDnf, seasonPhase } = ctx;
+
+  // Formule courte du bilan saison
+  const bilanStr = wins > 0
+    ? `${wins} victoire(s) et ${podiums} podium(s) cette saison`
+    : podiums > 0
+      ? `${podiums} podium(s) sans victoire encore cette saison`
+      : `une saison difficile jusqu'ici`;
+
+  // Situation au championnat
+  const champStr = champPos === 1
+    ? `en tête du championnat`
+    : champPos <= 3
+      ? `P${champPos} au championnat`
+      : champPos <= 8
+        ? `P${champPos} au général`
+        : `loin au championnat`;
+
+  // Pression de fin de saison
+  const endPressure = seasonPhase === 'fin' && champPos && champPos <= 4
+    ? pick([
+        `Avec ${24 - (parseInt(gpPhase) || 20)} GPs restants, chaque point compte.`,
+        `On est en fin de championnat — il n'y a plus de place pour l'erreur.`,
+        `Le titre se jouera dans les prochaines courses. On le sait tous.`,
+      ])
+    : '';
+
+  // Réaction coéquipier
+  const teammateStr = teammate && teammatePos
+    ? teammatePos < pos && !dnf
+      ? pick([
+          `Mon coéquipier ${teammate} était devant aujourd'hui — il faut l'accepter.`,
+          `${teammate} a été plus fort ce week-end. Je dois analyser pourquoi.`,
+          `On ne se rend pas service dans la même écurie. Ça mérite une discussion.`,
+        ])
+      : pos < (teammatePos || 99) && !dnf
+        ? pick([
+            `${teammate} était là aussi — mais j'avais le rythme aujourd'hui.`,
+            `Bonne course pour l'équipe dans l'ensemble. Moi devant ${teammate}, c'est bien.`,
+          ])
+        : ''
+    : '';
+
+  // Réaction rival
+  const rivalStr = rival && rivalPos
+    ? rivalDnf
+      ? pick([
+          `${rival} n'a pas terminé — ces choses arrivent. Je reste focus sur ma course.`,
+          `L'abandon de ${rival} ne change rien à mon approche. Je gère ma course.`,
+        ])
+      : rivalPos > pos
+        ? pick([
+            `${rival} était derrière moi aujourd'hui. C'est ce qu'on voulait.`,
+            `On a fait le travail face à ${rival} ce week-end.`,
+          ])
+        : pick([
+            `${rival} était devant — ça pique, mais il a été meilleur aujourd'hui.`,
+            `Pas satisfait de finir derrière ${rival}. On doit retravailler ça.`,
+          ])
+    : '';
+
+  // Style de circuit
+  const styleStr = {
+    urbain    : `Sur un circuit urbain comme ${circuit}, la moindre erreur se paye cash`,
+    rapide    : `Un circuit rapide comme ${circuit} révèle la vraie performance des voitures`,
+    technique : `${circuit} demande une précision absolue — c'est ce qu'on a apporté`,
+    mixte     : `${circuit} est un circuit équilibré, ça convient à notre package`,
+    endurance : `La gestion des pneus sur ${circuit} était la clé aujourd'hui`,
+  }[gpStyle] || `${circuit} était exigeant aujourd'hui`;
+
+  // Constructeurs
+  const constrStr = cPos === 1
+    ? `On reste en tête du championnat constructeurs — l'équipe fait un travail incroyable.`
+    : cPos && cPos <= 3
+      ? `On est P${cPos} chez les constructeurs — l'équipe se bat sur tous les fronts.`
+      : '';
+
+  // ── ANGLES ───────────────────────────────────────────────
+
+  if (angle === 'winner') {
+    const tones = [
+      // Dominant
+      () => {
+        const opener = pick([
+          `"${styleStr}. On a tout contrôlé aujourd'hui."`,
+          `"On a géré la course du début à la fin. La voiture était là, le rythme était là."`,
+          `"Depuis les qualifications, on savait qu'on avait le package. Il fallait l'exécuter."`,
+        ]);
+        const middle = wins >= 3
+          ? pick([
+              `"${wins} victoires en ${gpPhase}. On ne s'attendait pas à ça forcément, mais on le prend."`,
+              `"C'est notre ${wins}ème victoire cette saison. L'élan est là. ${endPressure}"`,
+            ])
+          : wins === 1
+            ? `"Première victoire de la saison — ça fait un bien fou. Maintenant on continue."`
+            : `"Belle victoire pour le moral. ${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. On avance."`;
+        const closer = champPos === 1
+          ? pick([
+              `"${champStr} — mais rien n'est joué. ${endPressure || 'On reste humbles.'}"`,
+              `"En tête du championnat, c'est là où on veut être. ${constrStr}"`,
+            ])
+          : pick([
+              `"On remonte au classement. P${champPos} maintenant — ${champLeaderName} est dans le viseur."`,
+              `"${champLeaderName} a toujours des points d'avance, mais on réduit. ${endPressure}"`,
+            ]);
+        return `${opener}\n${middle}\n${closer}${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
+      },
+      // Soulagement / humble
+      () => {
+        const opener = pick([
+          `"Honnêtement, ça n'était pas la course la plus simple. Mais on a tenu."`,
+          `"Il y a eu des moments de doute — mais l'équipe m'a donné un bon pit stop et j'ai pu gérer."`,
+          `"Je ne vais pas mentir, j'ai eu de la chance à un moment. Mais il faut la provoquer."`,
+        ]);
+        const middle = `"${styleStr}. Ça nous a bien convenu aujourd'hui."`;
+        const closer = champPos === 1
+          ? `"${champStr}. ${endPressure || 'On prend race par race.'}"${constrStr ? ' ' + constrStr : ''}`
+          : `"P${champPos} au championnat avec ${pts} points. ${endPressure || 'Il reste du boulot.'}"`
+        return `${opener}\n${middle}\n${closer}${rivalStr ? '\n*Sur ' + rival + ' :* "' + rivalStr.replace(/^[^"]*"?/, '').replace(/"$/, '') + '"' : ''}`;
+      },
+      // Technique / focus
+      () => {
+        const opener = pick([
+          `"Le travail de l'équipe cette semaine a été remarquable. On a trouvé le bon setup."`,
+          `"On avait identifié les points faibles depuis les essais. On a corrigé. Ça s'est vu en course."`,
+        ]);
+        const middle = seasonPhase === 'début'
+          ? `"En ${gpPhase}, chaque résultat construit quelque chose. Ce résultat confirme notre direction."`
+          : seasonPhase === 'fin'
+            ? `"En ${gpPhase}, une victoire vaut de l'or. ${endPressure}"`
+            : `"Mi-saison, on fait le point. ${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. La tendance est bonne."`;
+        const closer = `"${constrStr || 'L\'équipe mérite ce résultat.'} Prochain GP, même état d'esprit."`;
+        return `${opener}\n${middle}\n${closer}${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
+      },
+    ];
+    const quote = pick(tones)();
+    return `🎤 **${emoji} ${name} — P1, ${circuit}**\n${quote}`;
+  }
+
+  if (angle === 'podium' || angle === 'podium_champ') {
+    const tones = [
+      () => {
+        const opener = pos === 2
+          ? pick([
+              `"P2, c'est bien — mais P1 était l'objectif. On manquait un peu de rythme en fin de course."`,
+              `"Deuxième. La voiture était là, mais pas suffisamment pour inquiéter le leader."`,
+            ])
+          : pick([
+              `"Un podium, c'est toujours une bonne journée. Surtout vu le ${gpPhase}."`,
+              `"P3. On prend les points, on reste dans la course au championnat."`,
+            ]);
+        const middle = champPos && champPos <= 5
+          ? `"On est ${champStr} avec ${pts} points. ${endPressure || 'Le championnat est ouvert.'}"`
+          : `"${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. Un podium de plus dans la besace."`;
+        return `${opener}\n${middle}${rivalStr ? '\n*Sur ' + rival + ' :* "' + rivalStr.replace(/^.*?"/, '"') : ''}`;
+      },
+      () => {
+        const opener = champLeaderName && champPos && champPos <= 3
+          ? pick([
+              `"${champLeaderName} s'échappe un peu, mais rien n'est joué. ${endPressure || 'On reste là.'}"`,
+              `"Le gap avec ${champLeaderName} n'est pas catastrophique. On va le chercher."`,
+            ])
+          : `"P${pos} aujourd'hui. ${styleStr} — notre voiture a bien répondu."`;
+        const closer = constrStr || `"L'équipe a fait du bon travail ce week-end."`;
+        return `${opener}\n"${closer}"${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
+      },
+    ];
+    return `🎤 **${emoji} ${name} — P${pos}, ${circuit}**\n${pick(tones)()}`;
+  }
+
+  if (angle === 'dnf_drama') {
+    const dnfLabel = { CRASH:'l\'accident', MECHANICAL:'la panne mécanique', PUNCTURE:'la crevaison' }[dnfReason] || 'l\'abandon';
+    const tones = [
+      () => {
+        const opener = pick([
+          `"Je n'ai pas grand chose à dire sur ${dnfLabel}. Ces choses arrivent en course. Ça fait mal."`,
+          `"On était bien placés. ${dnfLabel.charAt(0).toUpperCase() + dnfLabel.slice(1)} a tout gâché. C'est cruel."`,
+          `"Ça fait partie du sport. Mais là, aujourd'hui, c'est dur à avaler."`,
+        ]);
+        const middle = champPos && champPos <= 6
+          ? `"On était ${champStr}. Là on perd des points précieux. ${endPressure || 'Il faut rebondir.'}"` 
+          : `"Il faut regarder devant. ${seasonPhase === 'fin' ? 'En fin de saison, chaque point perdu est difficile à récupérer.' : 'On a encore des courses pour se rattraper.'}"`;
+        const closer = pick([
+          `"Le week-end prochain, on revient. Plus fort."`,
+          `"L'équipe ne méritait pas ça. On se relèvera."`,
+          `"La course, c'est ça aussi. On encaisse et on repart."`,
+        ]);
+        return `${opener}\n${middle}\n"${closer}"`;
+      },
+    ];
+    return `🎤 **${emoji} ${name} — ❌ DNF, ${circuit}**\n${pick(tones)()}`;
+  }
+
+  if (angle === 'champ_leader') {
+    const tones = [
+      () => {
+        const opener = pos <= 10 && !dnf
+          ? pick([
+              `"P${pos} aujourd'hui. Pas parfait, mais on marque des points. C'est ça l'essentiel."`,
+              `"Ce n'est pas le résultat voulu, mais on reste ${champStr}. La régularité, c'est notre force."`,
+            ])
+          : dnf
+            ? `"Terrible journée. Mais on reste leaders. Ce n'est pas ce GP qui définit la saison."`
+            : `"P${pos}. On a vécu mieux, mais la situation au général reste correcte."`;
+        const closer = seasonPhase === 'fin'
+          ? `"${endPressure} On garde la tête froide."`
+          : `"En ${gpPhase}, on est ${champStr} avec ${pts} points. L'objectif reste le même."`;
+        return `${opener}\n${closer}`;
+      },
+    ];
+    return `🎤 **${emoji} ${name} — Leader du championnat (P${pos}), ${circuit}**\n${pick(tones)()}`;
+  }
+
+  return null;
+}
+
 // ─── SIMULATION COURSE COMPLÈTE ───────────────────────────
 async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   const totalLaps = race.laps;
@@ -1298,6 +1667,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   let scCooldown       = 0;
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
+  // Charger le record actuel du circuit pour détecter si battu
+  const existingCircuitRecord = await CircuitRecord.findOne({ circuit: race.circuit });
   const raceCollisions = [];
   // battleMap : clé = "idA_idB" (ordre croissant) → { lapsClose, lastPasser, lastPasserLap }
   // Suit les duels persistants entre deux pilotes proches pour générer des contre-attaques
@@ -1974,6 +2345,99 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     );
   await sendEmbed(podiumEmbed);
 
+  // ── Record du circuit ─────────────────────────────────────
+  if (fastestLapHolder && fastestLapMs < Infinity) {
+    const prevRecord = existingCircuitRecord;
+    const isNewRecord = !prevRecord || fastestLapMs < prevRecord.bestTimeMs;
+    if (isNewRecord) {
+      const oldTimeStr = prevRecord ? msToLapStr(prevRecord.bestTimeMs) : null;
+      await CircuitRecord.findOneAndUpdate(
+        { circuit: race.circuit },
+        {
+          circuit      : race.circuit,
+          circuitEmoji : race.emoji || '🏁',
+          gpStyle      : race.gpStyle || 'mixte',
+          bestTimeMs   : fastestLapMs,
+          pilotId      : fastestLapHolder.pilot._id,
+          pilotName    : fastestLapHolder.pilot.name,
+          teamName     : fastestLapHolder.team.name,
+          teamEmoji    : fastestLapHolder.team.emoji,
+          seasonYear   : season.year,
+          raceId       : race._id,
+          setAt        : new Date(),
+        },
+        { upsert: true, new: true }
+      );
+      await sleep(1500);
+      const recordEmbed = new EmbedBuilder()
+        .setTitle(`⏱️ NOUVEAU RECORD DU CIRCUIT ! ${race.emoji} ${race.circuit}`)
+        .setColor('#FF6600')
+        .setDescription(
+          `${fastestLapHolder.team.emoji} **${fastestLapHolder.pilot.name}** pulvérise le record !\n\n` +
+          `⚡ **${msToLapStr(fastestLapMs)}**` +
+          (oldTimeStr ? `\n📉 Ancien record : ~~${oldTimeStr}~~${prevRecord?.pilotName ? ` (${prevRecord.pilotName}, S${prevRecord.seasonYear})` : ''}` : '\n*Premier record établi sur ce circuit !*')
+        );
+      await sendEmbed(recordEmbed);
+    }
+  }
+
+  // ── Statut coéquipier #1 / #2 ────────────────────────────
+  // Pour chaque écurie, comparer les positions des deux pilotes et mettre à jour teammateDuelWins
+  const teamDrivers = new Map();
+  for (const d of finalRanked) {
+    const tid = String(d.team._id);
+    if (!teamDrivers.has(tid)) teamDrivers.set(tid, []);
+    teamDrivers.get(tid).push(d);
+  }
+  for (const [, members] of teamDrivers) {
+    if (members.length < 2) continue;
+    const [a, b] = members; // déjà triés par position finale
+    // a a fini devant b (pos plus petite ou b est DNF)
+    const aWon = !a.dnf && (b.dnf || a.pos < b.pos);
+    if (aWon) {
+      await Pilot.findByIdAndUpdate(a.pilot._id, { $inc: { teammateDuelWins: 1 } });
+    } else if (!b.dnf && (a.dnf || b.pos < a.pos)) {
+      await Pilot.findByIdAndUpdate(b.pilot._id, { $inc: { teammateDuelWins: 1 } });
+    }
+    // Recalculer le statut #1/#2 après mise à jour
+    const [pA, pB] = await Promise.all([
+      Pilot.findById(a.pilot._id),
+      Pilot.findById(b.pilot._id),
+    ]);
+    if (!pA || !pB) continue;
+    const winsA = pA.teammateDuelWins || 0;
+    const winsB = pB.teammateDuelWins || 0;
+    const total = winsA + winsB;
+    // Statut déterminé si écart ≥ 3 duels ou fin de saison
+    if (total >= 3) {
+      const newStatusA = winsA > winsB ? 'numero1' : 'numero2';
+      const newStatusB = winsA > winsB ? 'numero2' : 'numero1';
+      await Pilot.findByIdAndUpdate(pA._id, { teamStatus: newStatusA });
+      await Pilot.findByIdAndUpdate(pB._id, { teamStatus: newStatusB });
+    }
+  }
+
+  // ── Conférence de presse ─────────────────────────────────
+  try {
+    const allPilots      = await Pilot.find();
+    const allTeams2      = await Team.find();
+    const allStandings   = await Standing.find({ seasonId: season._id });
+    const cStandings     = await ConstructorStanding.find({ seasonId: season._id });
+
+    const confBlocks = await generatePressConference(
+      race, results, season, allPilots, allTeams2, allStandings, cStandings
+    );
+
+    if (confBlocks?.length) {
+      await sleep(2500);
+      const confEmbed = new EmbedBuilder()
+        .setTitle(`🎤 Conférence de presse — ${race.emoji} ${race.circuit}`)
+        .setColor('#2B2D31')
+        .setDescription(confBlocks.join('\n\n─────────────────\n\n'));
+      await sendEmbed(confEmbed);
+    }
+  } catch(e) { console.error('Conf de presse erreur:', e); }
+
   return { results, collisions: raceCollisions };
 }
 
@@ -2199,6 +2663,9 @@ async function createNewSeason() {
   const season = await Season.create({ year, status: 'active', regulationSet: regSet });
 
   if (regSet > 1) await applyRegulationChange(season);
+
+  // Reset duels coéquipiers pour la nouvelle saison
+  await Pilot.updateMany({}, { teammateDuelWins: 0, teamStatus: null });
 
   const startDate = new Date();
   startDate.setHours(0,0,0,0);
@@ -2610,6 +3077,10 @@ const commands = [
         { name: '🏎️ Écuries — Historique des équipes', value: 'teams' },
         { name: '📅 Saison — GPs d\'une saison', value: 'season' },
       )),
+
+  new SlashCommandBuilder().setName('record_circuit')
+    .setDescription('⏱️ Consulte le record du meilleur tour sur un circuit')
+    .addStringOption(o => o.setName('circuit').setDescription('Nom du circuit (partiel accepté)').setRequired(true)),
 ];
 
 // ============================================================
@@ -3142,6 +3613,21 @@ async function handleInteraction(interaction) {
       });
     }
 
+    // ── Statut coéquipier ────────────────────────────────────
+    if (team && pilot.teamStatus) {
+      const teammate = await Pilot.findOne({
+        teamId: team._id,
+        _id: { $ne: pilot._id },
+      });
+      const statusLabel = pilot.teamStatus === 'numero1'
+        ? `🔴 **Pilote N°1** — ${pilot.teammateDuelWins || 0} duels gagnés`
+        : `🔵 **Pilote N°2** — ${pilot.teammateDuelWins || 0} duels gagnés`;
+      const teammateStr = teammate
+        ? `vs ${teammate.name} (${teammate.teammateDuelWins || 0} duels)`
+        : '';
+      embed.addFields({ name: '👥 Statut dans l\'équipe', value: `${statusLabel}${teammateStr ? '  ·  ' + teammateStr : ''}` });
+    }
+
     // ── Aperçu rapide des performances (GPRecord) ────────────
     const gpRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
     if (gpRecs.length) {
@@ -3411,21 +3897,53 @@ async function handleInteraction(interaction) {
 
     const pilots = await Pilot.find({ teamId: team._id });
     const bar    = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10-Math.round(v/10));
-    return interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`${team.emoji} ${team.name}`)
-        .setColor(team.color)
-        .setDescription(
-          `\`Vitesse Max       \` ${bar(team.vitesseMax)}  **${team.vitesseMax}**\n` +
-          `\`DRS               \` ${bar(team.drs)}  **${team.drs}**\n` +
-          `\`Refroidissement   \` ${bar(team.refroidissement)}  **${team.refroidissement}**\n` +
-          `\`Dirty Air         \` ${bar(team.dirtyAir)}  **${team.dirtyAir}**\n` +
-          `\`Conservation Pneus\` ${bar(team.conservationPneus)}  **${team.conservationPneus}**\n` +
-          `\`Vitesse Moyenne   \` ${bar(team.vitesseMoyenne)}  **${team.vitesseMoyenne}**\n\n` +
-          `👥 **Pilotes :** ${pilots.length ? pilots.map(p => p.name).join(', ') : 'Aucun'}`
-        )
-      ],
-    });
+    const season = await getActiveSeason();
+    const cStand = season ? await ConstructorStanding.findOne({ seasonId: season._id, teamId: team._id }) : null;
+
+    // Bloc pilotes avec statut coéquipier
+    let pilotBlock = '';
+    if (pilots.length === 0) {
+      pilotBlock = '*Aucun pilote*';
+    } else if (pilots.length === 1) {
+      const p = pilots[0];
+      const ov = overallRating(p);
+      const tier = ratingTier(ov);
+      pilotBlock = `${tier.badge} **${p.name}** — ${ov} overall`;
+    } else {
+      // Deux pilotes — afficher le duel
+      const [p1, p2] = pilots;
+      const ov1 = overallRating(p1), ov2 = overallRating(p2);
+      const t1 = ratingTier(ov1),   t2 = ratingTier(ov2);
+      const s1Label = p1.teamStatus === 'numero1' ? '🔴 N°1' : p1.teamStatus === 'numero2' ? '🔵 N°2' : '⬜';
+      const s2Label = p2.teamStatus === 'numero1' ? '🔴 N°1' : p2.teamStatus === 'numero2' ? '🔵 N°2' : '⬜';
+      const w1 = p1.teammateDuelWins || 0, w2 = p2.teammateDuelWins || 0;
+      const duelBar = w1 + w2 > 0
+        ? `\`${'█'.repeat(w1)}${'░'.repeat(w2)}\` **${w1}–${w2}**`
+        : '*(pas encore de duel)*';
+      pilotBlock =
+        `${s1Label} ${t1.badge} **${p1.name}** — ${ov1}\n` +
+        `${s2Label} ${t2.badge} **${p2.name}** — ${ov2}\n` +
+        `⚔️ Duel interne : ${duelBar}`;
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${team.emoji} ${team.name}`)
+      .setColor(team.color)
+      .setDescription(
+        `\`Vitesse Max       \` ${bar(team.vitesseMax)}  **${team.vitesseMax}**\n` +
+        `\`DRS               \` ${bar(team.drs)}  **${team.drs}**\n` +
+        `\`Refroidissement   \` ${bar(team.refroidissement)}  **${team.refroidissement}**\n` +
+        `\`Dirty Air         \` ${bar(team.dirtyAir)}  **${team.dirtyAir}**\n` +
+        `\`Conservation Pneus\` ${bar(team.conservationPneus)}  **${team.conservationPneus}**\n` +
+        `\`Vitesse Moyenne   \` ${bar(team.vitesseMoyenne)}  **${team.vitesseMoyenne}**`
+      );
+
+    embed.addFields({ name: '👥 Pilotes', value: pilotBlock });
+    if (cStand) {
+      embed.addFields({ name: `🏗️ Saison ${season.year}`, value: `**${cStand.points} pts** au constructeurs` });
+    }
+
+    return interaction.reply({ embeds: [embed] });
   }
 
   // ── /classement ───────────────────────────────────────────
@@ -4377,6 +4895,46 @@ async function handleInteraction(interaction) {
     }
 
     return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /record_circuit ───────────────────────────────────────
+  if (commandName === 'record_circuit') {
+    const query = interaction.options.getString('circuit').toLowerCase();
+
+    // Chercher les records dont le nom contient la query
+    const allRecords = await CircuitRecord.find();
+    const matches = allRecords.filter(r => r.circuit.toLowerCase().includes(query));
+
+    if (!matches.length) {
+      return interaction.reply({ content: `❌ Aucun record trouvé pour "${query}". Les records s'établissent après chaque GP.`, ephemeral: true });
+    }
+
+    if (matches.length === 1) {
+      const rec = matches[0];
+      const embed = new EmbedBuilder()
+        .setTitle(`⏱️ Record du circuit — ${rec.circuitEmoji} ${rec.circuit}`)
+        .setColor('#FF6600')
+        .setDescription(
+          `**⚡ ${msToLapStr(rec.bestTimeMs)}**\n\n` +
+          `${rec.teamEmoji} **${rec.pilotName}** — ${rec.teamName}\n` +
+          `📅 Établi en **Saison ${rec.seasonYear}**\n\n` +
+          `*Style : ${rec.gpStyle || 'mixte'} · Ce record peut être battu à chaque nouveau GP sur ce circuit.*`
+        );
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    // Plusieurs résultats
+    const lines = matches.slice(0, 10).map(rec =>
+      `${rec.circuitEmoji} **${rec.circuit}** — ⚡ ${msToLapStr(rec.bestTimeMs)} par **${rec.pilotName}** *(S${rec.seasonYear})*`
+    ).join('\n');
+    return interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`⏱️ Records de circuit — ${matches.length} résultats`)
+        .setColor('#FF6600')
+        .setDescription(lines + (matches.length > 10 ? '\n*... et plus. Précise ta recherche.*' : ''))
+      ],
+      ephemeral: true,
+    });
   }
 
   // ── /concept ──────────────────────────────────────────────
