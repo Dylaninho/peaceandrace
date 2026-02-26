@@ -677,6 +677,115 @@ async function simulatePractice(race, pilots, teams) {
   return { results, weather };
 }
 
+// ============================================================
+// 🎬  BIBLIOTHÈQUE DE GIFs — une URL brute suffit pour Discord
+//     pick() en prend un au hasard dans chaque catégorie
+// ============================================================
+const RACE_GIFS = {
+
+  // ── Dépassement pour la tête ────────────────────────────
+  overtake_lead: [
+    'https://tenor.com/pCje6tnvEno.gif',
+    'https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExczJ3a3ZvbXV0OHg2cjMyaXFwcGdhMG80c3FkOGMzZXRnZnZvaHZrdSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/0LxtyTiPQaTKx017yr/giphy.gif',
+    'https://cdn.carthrottle.com/uploads/articles/qpogkgm85zjmvc38hssl-5791423a5f7e3.gif',
+  ],
+
+  // ── Dépassement pour le podium (P2/P3) ─────────────────
+  overtake_podium: [
+    'https://c.tenor.com/IB4EgSxeYREAAAAC/f1-max-verstappen.gif',
+    'https://media.tenor.com/BRCHKWF94ZUAAAAM/f1overtake-f1ultrapassagem.gif',
+    'https://jtsportingreviews.com/wp-content/uploads/2021/09/f1-2021-holland-perez-passes-ocon.gif',
+  ],
+
+  // ── Dépassement classique en piste (P4–P10) ─────────────
+  overtake_normal: [
+    'https://i.makeagif.com/media/2-29-2016/SMpwn6.gif',
+    'https://media.tenor.com/QbdwfqcYeuIAAAAM/f1-f1overtake.gif',
+    'https://cdn.makeagif.com/media/12-05-2013/RGyvuA.gif',
+    'https://64.media.tumblr.com/bace9527a9df9d0f6d54a390510f34f1/tumblr_ntm7hr9HJ61s9l8tco4_540.gifv',
+    'https://i.postimg.cc/HxWZBrBJ/Race-Highlights-2021-Italian-Grand-Prix-2.gif',
+  ],
+
+  // ── Crash / accident solo ────────────────────────────────
+  crash_solo: [
+    'https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExbWdmOGF6NnAwNjlxcmhmMGRkYzEzdXBnZjNkZHd1eHoxMDdqNXc4OSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/xULW8xLsh3p9P6Lq5q/giphy.gif',
+    'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbHllZXRhMjFnZXZmYjlzZzFjazRnbzRrZzR2bDB0aGFpbXViZm96ciZlcD12MV9naWZzX3NlYXJjaCZjdD1n/XTYhuf6DwbDri/giphy.gif',
+    'https://64.media.tumblr.com/tumblr_m55twpxti21qlt7lao8_r1_250.gif',
+    'https://i.makeagif.com/media/9-11-2016/SE-F70.gif',
+  ],
+
+  // ── Collision entre deux voitures ───────────────────────
+  crash_collision: [
+    'https://tenor.com/btuTx.gif',
+    'https://i.makeagif.com/media/3-20-2016/-MC6Il.gif',
+    'https://gifdb.com/images/high/f1-red-bull-drift-crash-6gqtnu62ypxatxnq.gif',
+  ],
+
+  // ── Panne mécanique / fumée ─────────────────────────────
+  mechanical: [
+    'https://i.makeagif.com/media/6-25-2021/JmEwic.gif',
+    'https://media.tenor.com/JZWc9Wj9ez8AAAAM/leclerc-ferrari.gif',
+    'https://media.tenor.com/JZhKHG8sWS4AAAAM/kimi-raikkonen-kimi.gif',
+  ],
+
+  // ── Crevaison ───────────────────────────────────────────
+  puncture: [
+    'https://tenor.com/f0PpRM38N76.gif',
+    'https://i.makeagif.com/media/11-07-2015/3KfYhi.gif',
+  ],
+
+  // ── Safety Car déployé ──────────────────────────────────
+  safety_car: [
+    'https://media.tenor.com/5q9Din4vE00AAAAM/f1-safety-car.gif',
+    'https://i.makeagif.com/media/4-26-2017/Z-XYlx.gif',
+    'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExOXh6anIyeTljNThweWJ4bjVtY2RuN2VsdzRiNXBldWV1bGl4ejBsdSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/Urd6nJqt5QJVFTVkoj/giphy.gif',
+  ],
+
+  // ── Virtual Safety Car ──────────────────────────────────
+  vsc: [
+    'https://static.wikia.nocookie.net/f1wikia/images/b/b5/Image-26.png/revision/latest/scale-to-width-down/732?cb=20250903081945',
+    'https://www.pittalk.it/wp-content/uploads/2022/09/vsc-1-1-1-1024x577-1.jpeg',
+  ],
+
+  // ── Green flag / restart ─────────────────────────────────
+  green_flag: [
+    'https://media0.giphy.com/media/v1.Y2lkPTZjMDliOTUyZjhrM25zMWpxd2p3cmUzdGVlMXNvdjlqMWlidjhyeHBxcWx6YnMzdSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/xrP3yQ0W19SGuguEd8/200w.gif',
+  ],
+
+  // ── Arrêt aux stands (pit stop) ─────────────────────────
+  pit_stop: [
+    'https://media1.giphy.com/media/v1.Y2lkPTZjMDliOTUyajQweWdhdzd4czdtb2QwM25yd2F3NjJwcmw0OGMzMnA1OW1yOTY0MyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/6IcNBPp1H79nO/giphy.gif',
+    'https://i.imgur.com/gsyznMd.gif',
+    'https://media.tenor.com/1VEL6y9BYnMAAAAM/f1-pitstop.gif',
+    'https://i.makeagif.com/media/4-14-2016/t8BSsA.gif',
+  ],
+
+  // ── Victoire / drapeau damier ───────────────────────────
+  win: [
+    'https://tenor.com/bNkX4.gif',
+    'https://media.tenor.com/187wbBbM5bEAAAAM/waving-checkered-flag-f1.gif',
+    'https://64.media.tumblr.com/cea8c5fba5064f7d20d8fb5af2911df9/bcde5965de4f08e5-aa/s640x960/20ab168e7bef8084d034b13a9651b82353f1e18b.gif',
+    'https://i.makeagif.com/media/10-24-2022/0sN5ZB.gif',
+  ],
+
+  // ── Départ de course ────────────────────────────────────
+  race_start: [
+    'https://i.imgur.com/xNNASJJ.gif',
+    'https://media2.giphy.com/media/v1.Y2lkPTZjMDliOTUycng5azRjd29yNjRoNDRkd2c2ZnU3ZGF6a2s2eDI2bG52a3JqZ2Q4ZyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/ws8Lpb894KpDGQF0nn/giphy.gif',
+    'https://gifzz.com/storage/gifs/X2hfnFtGZ3Su9Wm0saOKFE1xjv6mM9GMLjyvRW9A.gif',
+  ],
+};
+
+/** Retourne un GIF aléatoire de la catégorie — ou null si tous les PLACEHOLDER */
+function pickGif(category) {
+  const list = RACE_GIFS[category];
+  if (!list || !list.length) return null;
+  const url = pick(list);
+  // Ne pas envoyer les placeholders non remplis
+  if (url.includes('PLACEHOLDER')) return null;
+  return url;
+}
+
 // ─── Bibliothèques de narration ───────────────────────────
 
 // Comment un dépassement se produit physiquement — drama selon le rang impliqué
@@ -990,6 +1099,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   );
   await sleep(4000);
   await send(`🟢⚫ **EXTINCTION DES FEUX — C'EST PARTI !!** 🏁`);
+  const startGif = pickGif('race_start');
+  if (startGif && channel) { try { await channel.send(startGif); } catch(e) {} await sleep(2000); }
 
   // ══════════════════════════════════════════════════════════
   // BOUCLE PRINCIPALE
@@ -1145,6 +1256,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
             nearest.totalTime += damage;
             incidentText = collisionDescription(driver, nearest, lap, true, false, damage);
           }
+          if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('crash_collision') });
         } else {
           // Crash solo
           driver.dnf       = true;
@@ -1153,6 +1265,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           lapDnfs.push({ driver, reason: 'CRASH' });
           lapIncidents.push({ type: 'CRASH' });
           incidentText = crashSoloDescription(driver, lap, gpStyle);
+          if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('crash_solo') });
         }
 
       } else if (incident.type === 'MECHANICAL') {
@@ -1178,6 +1291,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           `⚙️ **T${lap}** — Problème de transmission pour ${nm} (P${pos}) — il ne passe plus les vitesses. ❌ **DNF.**`,
         ];
         incidentText = pick(mechFlavors);
+        if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('mechanical') });
 
       } else if (incident.type === 'PUNCTURE') {
         driver.dnf       = true;
@@ -1200,9 +1314,10 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           `🫧 **T${lap}** — Délamination sur la voiture de ${np} (P${posp}) — c'est fini. ❌ **DNF.**`,
         ];
         incidentText = pick(puncFlavors);
+        if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('puncture') });
       }
 
-      if (incidentText) events.push({ priority: 10, text: incidentText });
+      // (le push générique est maintenant fait dans chaque branche ci-dessus)
     }
 
     // ── Safety Car (APRÈS les incidents — on peut citer la cause) ──
@@ -1238,13 +1353,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         : ` suite à un incident sur la piste`;
 
       if (scState.state === 'SC') {
-        events.push({ priority: 9, text: pick([
+        events.push({ priority: 9, gif: pickGif('safety_car'), text: pick([
           `🚨 **SAFETY CAR DÉPLOYÉ !**${causeStr}\nLe peloton se reforme — les écarts sont effacés. Tout est à refaire !`,
           `🚨 **SC IN !**${causeStr}. La voiture de sécurité prend la tête — qui va rentrer aux stands pour gratter une stratégie ?`,
           `🚨 **SAFETY CAR !** T${lap}${causeStr}. Les commissaires nettoient la piste — ça va redonner du piment à cette course !`,
         ]) });
       } else {
-        events.push({ priority: 9, text: pick([
+        events.push({ priority: 9, gif: pickGif('vsc'), text: pick([
           `🟡 **VIRTUAL SAFETY CAR**${causeStr}. Tout le monde maintient le delta — la course se met en pause.`,
           `🟡 **VSC !**${causeStr}. Les pilotes roulent au ralenti, les gaps se resserrent. La course reprendra bientôt.`,
         ]) });
@@ -1256,7 +1371,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
       scCooldown = 6; // 6 tours de variance réduite après restart
       const rankedRestart = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
       const top3str = rankedRestart.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
-      events.push({ priority: 10, text: pick([
+      events.push({ priority: 10, gif: pickGif('green_flag'), text: pick([
         `🟢 **GREEN FLAG !** T${lap} — La course reprend ! ${top3str}\nLes gaps ont été effacés — tout le monde est dans le même mouchoir. Ça va exploser !`,
         `🟢 **FEU VERT !** T${lap} — On repart ! ${top3str}\nLe peloton est groupé — qui va attaquer en premier ?`,
       ]) });
@@ -1346,7 +1461,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${TIRE[oldTire].emoji} en fin de vie. Passage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort **P${posOut}**.`,
           `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag} — ${TIRE[oldTire].emoji} cramés. L'équipe boulonne les ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. **P${posOut}** à la sortie du pitlane.`,
         ];
-        events.push({ priority: 7, text: pick(pitFlavors) });
+        events.push({ priority: 7, gif: pickGif('pit_stop'), text: pick(pitFlavors) });
       }
     }
 
@@ -1418,9 +1533,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
       const posBlock = `⬆️ **${driver.pilot.name}** → P${ovNewPos}\n⬇️ **${passed.pilot.name}** → P${ovLostPos}`;
 
+      const gifCat = ovForLead ? 'overtake_lead' : ovIsTop3 ? 'overtake_podium' : 'overtake_normal';
       events.push({
         priority: ovForLead ? 9 : ovIsTop3 ? 8 : 6,
         text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapOnLeader}*${rivalTag}`,
+        gif: pickGif(gifCat),
       });
     }
 
@@ -1433,6 +1550,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     // ── Composition et envoi du message ─────────────────────
     events.sort((a,b) => b.priority - a.priority);
     const eventsText = events.map(e => e.text).join('\n\n');
+
+    // GIF : on prend celui de l'event de plus haute priorité (1 seul par tour max)
+    const topGif = events.find(e => e.gif)?.gif ?? null;
 
     const showFullStandings = (lap % 10 === 0) || lap === totalLaps;
     const showTop5          = (lap % 5 === 0 && !showFullStandings) || (scActive && prevScState !== 'NONE');
@@ -1462,6 +1582,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         (scState.state === 'SC'  ? ` 🚨 **SAFETY CAR**` : '') +
         (scState.state === 'VSC' ? ` 🟡 **VSC**`         : '');
       await send([header, eventsText, standingsText].filter(Boolean).join('\n'));
+      // Envoyer le GIF après le texte si disponible
+      if (topGif && channel) {
+        try { await channel.send(topGif); } catch(e) {}
+        await sleep(2000);
+      }
     }
   }
 
@@ -1521,6 +1646,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     `🏁 **FIN DE COURSE !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** franchit la ligne en vainqueur !`,
   ];
   await send(pick(winFlavors));
+  // GIF victoire
+  const winGif = pickGif('win');
+  if (winGif && channel) { try { await channel.send(winGif); } catch(e) {} await sleep(2000); }
 
   // ── Embed podium ─────────────────────────────────────────
   const dnfDrivers = drivers.filter(d => d.dnf);
