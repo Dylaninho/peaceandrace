@@ -433,11 +433,15 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
 
   // Contribution voiture (45% du temps)
   const cScore = carScore(team, gpStyle);
-  const carF = 1 - ((cScore - 70) / 70 * 0.15);
+  const carFRaw = 1 - ((cScore - 70) / 70 * 0.15);
+  // Post-SC : compression des écarts voiture (tout le monde roule au même rythme ~3 tours)
+  const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.15 * (scCooldown / 6)) : carFRaw;
 
   // Contribution pilote (35% du temps)
   const pScore = pilotScore(pilot, gpStyle);
-  const pilotF = 1 - ((pScore - 50) / 50 * 0.12);
+  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.12);
+  // Post-SC : idem compression
+  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.12 * (scCooldown / 6)) : pilotFRaw;
 
   // ── Bonus spécialisation : +3% sur la stat ciblée ────────
   // On traduit ça en réduction de temps selon l'impact de la stat sur ce style
@@ -943,13 +947,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     // Discord limit: 2000 chars per message
     if (msg.length > 1950) msg = msg.slice(0, 1947) + '…';
     try { await channel.send(msg); } catch(e) { console.error('send error:', e.message); }
-    await sleep(2500);
+    await sleep(5500);
   };
 
   const sendEmbed = async (embed) => {
     if (!channel) return;
     try { await channel.send({ embeds: [embed] }); } catch(e) {}
-    await sleep(2500);
+    await sleep(5500);
   };
 
   // ══════════════════════════════════════════════════════════
@@ -1202,36 +1206,32 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     }
 
     // ── Safety Car (APRÈS les incidents — on peut citer la cause) ──
-    // Le SC est résolu ICI (après incidents, avant calcul des temps)
-    // Le bunching est appliqué IMMÉDIATEMENT pour que les gaps du tour suivant soient déjà serrés
     const prevScState = scState.state;
     scState = resolveSafetyCar(scState, lapIncidents);
     const scActive = scState.state !== 'NONE';
 
-    // ── Bunching SC : quand un SC/VSC se déclenche, tous les écarts se resserrent ──
-    // On réfère les positions APRÈS tri, puis on normalise les totalTime
+    // ── Bunching SC : au DÉCLENCHEMENT, resserrer les écarts ──
     if (scState.state !== 'NONE' && prevScState === 'NONE') {
       const aliveSC = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
       if (aliveSC.length > 1) {
         const leaderTime = aliveSC[0].totalTime;
         if (scState.state === 'SC') {
-          // SC complet : tout le monde se regroupe à ~1s maximum entre chaque voiture
+          // SC : tout le monde à ~0.5s max entre chaque voiture
           for (let i = 1; i < aliveSC.length; i++) {
-            const maxGap = i * 900; // 0.9s par position, donc P2 = 0.9s, P10 = 9s du leader
-            aliveSC[i].totalTime = Math.min(aliveSC[i].totalTime, leaderTime + maxGap);
+            const maxGap = i * 500; // 0.5s par position
+            aliveSC[i].totalTime = leaderTime + maxGap;
           }
         } else {
-          // VSC : ralentissement mais groupement partiel (gaps réduits de 60%)
+          // VSC : réduction de 70% des écarts
           for (let i = 1; i < aliveSC.length; i++) {
             const currentGap = aliveSC[i].totalTime - leaderTime;
-            aliveSC[i].totalTime = leaderTime + Math.round(currentGap * 0.4);
+            aliveSC[i].totalTime = leaderTime + Math.round(currentGap * 0.3);
           }
         }
-        // Recalcul des positions après bunching
-        aliveSC.forEach((d, i) => { d.pos = i + 1; });
+        aliveSC.forEach((d, i) => { d.pos = i + 1; d.lastPos = i + 1; });
       }
 
-      // Annonce SC/VSC — APRÈS l'incident dans le même message
+      // Annonce SC/VSC
       const cause    = lapDnfs.length > 0 ? lapDnfs[lapDnfs.length - 1] : null;
       const causeStr = cause
         ? ` suite à l'abandon de **${cause.driver.pilot.name}**`
@@ -1253,7 +1253,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
     // ── Fin de SC/VSC : green flag ────────────────────────────
     if (prevScState !== 'NONE' && scState.state === 'NONE') {
-      scCooldown = 5; // 5 tours de variance réduite après restart
+      scCooldown = 6; // 6 tours de variance réduite après restart
       const rankedRestart = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
       const top3str = rankedRestart.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
       events.push({ priority: 10, text: pick([
@@ -1264,20 +1264,45 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
     // ── Calcul des temps au tour ─────────────────────────────
     if (scCooldown > 0) scCooldown--;
-    for (const driver of drivers.filter(d => !d.dnf)) {
-      let lt = calcLapTime(
-        driver.pilot, driver.team,
-        driver.tireCompound, driver.tireWear,
-        weather, trackEvo, gpStyle, driver.pos,
-        scCooldown  // passer le cooldown pour réduire la variance
-      );
-      if (scActive) lt = Math.round(lt * (scState.state === 'SC' ? 1.35 : 1.18));
 
-      driver.totalTime += lt;
-      driver.tireWear  += 1;
-      driver.tireAge   += 1;
-      if (lt < driver.fastestLap) driver.fastestLap = lt;
-      if (lt < fastestLapMs) { fastestLapMs = lt; fastestLapHolder = driver; }
+    for (const driver of drivers.filter(d => !d.dnf)) {
+      if (scActive) {
+        // ── SOUS SC/VSC : on n'utilise PAS calcLapTime normal ──
+        // Tous les pilotes roulent à la même vitesse (neutre), les écarts restent figés.
+        // On ajoute juste un temps de tour SC identique pour tous (légère variance ~50ms max).
+        const scLapBase = scState.state === 'SC' ? 115_000 : 100_000; // SC = ~1:55, VSC = ~1:40
+        driver.totalTime += scLapBase + randInt(-50, 50);
+        // Pas d'usure pneus sous SC (quasi aucune)
+        driver.tireAge += 1;
+      } else {
+        // ── Hors SC : calcul normal ──
+        let lt = calcLapTime(
+          driver.pilot, driver.team,
+          driver.tireCompound, driver.tireWear,
+          weather, trackEvo, gpStyle, driver.pos,
+          scCooldown
+        );
+        driver.totalTime += lt;
+        driver.tireWear  += 1;
+        driver.tireAge   += 1;
+        if (lt < driver.fastestLap) driver.fastestLap = lt;
+        if (lt < fastestLapMs) { fastestLapMs = lt; fastestLapHolder = driver; }
+      }
+    }
+
+    // ── Après chaque tour de SC, re-serrer les écarts (drift résiduel) ──
+    // Empêche les gap de diverger à nouveau pendant le SC à cause des micro-variances
+    if (scActive) {
+      const aliveMid = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+      if (aliveMid.length > 1) {
+        const lt0 = aliveMid[0].totalTime;
+        const maxGapPerPos = scState.state === 'SC' ? 600 : 2000; // max 0.6s/pos sous SC
+        for (let i = 1; i < aliveMid.length; i++) {
+          const maxAllowed = lt0 + i * maxGapPerPos;
+          if (aliveMid[i].totalTime > maxAllowed) aliveMid[i].totalTime = maxAllowed;
+        }
+        aliveMid.forEach((d, i) => { d.pos = i + 1; });
+      }
     }
 
     // ── Pit stops ────────────────────────────────────────────
@@ -1287,13 +1312,19 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     for (const driver of aliveNow) {
       const myIdx    = aliveNow.findIndex(d => String(d.pilot._id) === String(driver.pilot._id));
       const gapAhead = myIdx > 0 ? driver.totalTime - aliveNow[myIdx - 1].totalTime : null;
-      const { pit, reason } = shouldPit(driver, lapsRemaining, gapAhead);
 
-      if (pit && driver.pitStops < 3 && lapsRemaining > 5) {
+      // Sous SC : pas d'undercut possible, mais on laisse les pits normaux (usure)
+      // On force reason à 'tires_worn' pour ne pas déclencher d'undercut sous SC
+      const { pit, reason: rawReason } = shouldPit(driver, lapsRemaining, gapAhead);
+      const reason = (scActive && rawReason === 'undercut') ? null : rawReason;
+      const doPit  = pit && reason !== null;
+
+      if (doPit && driver.pitStops < 3 && lapsRemaining > 5) {
         const posIn      = driver.pos;
         const oldTire    = driver.tireCompound;
         const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds);
-        const pitTime    = randInt(19_000, 24_000);
+        // Sous SC : arrêt plus rapide (pas de trafic), et perte de position moindre
+        const pitTime    = scActive ? randInt(19_000, 21_000) : randInt(19_000, 24_000);
 
         driver.totalTime   += pitTime;
         driver.tireCompound = newCompound;
@@ -1307,59 +1338,60 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         const posOut = driver.pos;
         const pitDur = (pitTime / 1000).toFixed(1);
 
+        const scPitTag = scActive ? ' 🚨 *sous Safety Car*' : '';
         const pitFlavors = reason === 'undercut' ? [
           `🔧 **T${lap} — UNDERCUT !** ${driver.team.emoji}**${driver.pilot.name}** plonge aux stands depuis **P${posIn}** — ${TIRE[oldTire].emoji} → ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** — arrêt de **${pitDur}s** — ressort **P${posOut}**. La stratégie va-t-elle payer ?`,
           `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** tente l'undercut depuis **P${posIn}** ! Chaussage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s — ressort **P${posOut}**. L'équipe joue le tout pour le tout.`,
         ] : [
-          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}** — pneus ${TIRE[oldTire].emoji} en fin de vie. Passage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort **P${posOut}**.`,
-          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn}) — ${TIRE[oldTire].emoji} cramés. L'équipe boulonne les ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. **P${posOut}** à la sortie du pitlane.`,
+          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${TIRE[oldTire].emoji} en fin de vie. Passage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort **P${posOut}**.`,
+          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag} — ${TIRE[oldTire].emoji} cramés. L'équipe boulonne les ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. **P${posOut}** à la sortie du pitlane.`,
         ];
         events.push({ priority: 7, text: pick(pitFlavors) });
       }
     }
 
-    // ── Reclassement ─────────────────────────────────────────
+    // ── Reclassement final du tour ────────────────────────────
     drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
     const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
 
     // ── Dépassements ─────────────────────────────────────────
-    // Un dépassement en piste ne peut se produire que si les deux pilotes
-    // étaient PROCHES avant ce tour (gap pré-tour < 3s). Sinon c'est un
-    // artefact de simulation (pit mal classifié, écart trop grand).
-    // Après un SC, les gaps sont naturellement très serrés — les dépassements
-    // ne sont autorisés qu'à la reprise (tour suivant le green flag).
+    // Règles strictes :
+    // 1. Pas pendant SC/VSC (aucune exception)
+    // 2. Pas le tour du restart (positions encore trop proches)
+    // 3. Uniquement si positions strictement adjacentes avant le tour
+    // 4. Gap pré-tour max 3s (vrai dépassement en piste, pas artefact)
+    // 5. Aucun des deux n'a pité ce tour
     const justRestarted = prevScState !== 'NONE' && scState.state === 'NONE';
     for (const driver of ranked) {
-      if (driver.pos >= driver.lastPos) continue;          // pas progressé
-      if (driver.pittedThisLap) continue;                  // position due au pit
-      if (scActive) continue;                              // pas pendant SC
-      if (justRestarted) continue;                         // tour de restart = pas de dépassement
+      if (scActive) continue;                               // JAMAIS sous SC
+      if (justRestarted) continue;                          // tour de restart bloqué
       if (lap <= 1) continue;
+      if (driver.pos >= driver.lastPos) continue;           // pas progressé
+      if (driver.pittedThisLap) continue;                   // changement dû au pit
 
-      // Trouver le pilote "passé" : celui qui occupait driver.lastPos avant ce tour
-      // et qui n'a pas lui-même pité — ET qui était juste devant (positions adjacentes)
+      // Le pilote passé : celui qui était juste devant (lastPos = driver.pos + 1 avant ce tour)
+      if (driver.lastPos !== driver.pos + 1) continue;      // saut de plus d'une place → invalide
+
       const passed = ranked.find(d =>
         d.pos === driver.lastPos &&
         !d.pittedThisLap &&
         String(d.pilot._id) !== String(driver.pilot._id)
       );
       if (!passed) continue;
+      // Le pilote passé doit aussi avoir avancé/reculé d'exactement 1 place
+      if (passed.lastPos !== passed.pos - 1) continue;
 
-      // Vérifier que les positions étaient adjacentes AVANT le tour (pas de saut de plusieurs rangs)
-      // driver.lastPos doit être exactement driver.pos + 1 (il était juste derrière)
-      if (driver.lastPos !== driver.pos + 1) continue;
-
-      // Vérifier que le gap PRÉ-tour était réaliste (max ~3s pour un vrai dépassement en piste)
+      // Gap pré-tour : max 3s pour un vrai dépassement en piste
       const preLapDriver = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
       const preLapPassed = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
       const preLapGapMs  = Math.abs(preLapPassed - preLapDriver);
       if (preLapGapMs > 3000) continue;
 
-      // Gap APRÈS le tour (écart résultant)
-      const postGapMs = driver.totalTime - passed.totalTime;
-      const gapStr    = Math.abs(postGapMs) < 1000
-        ? `${Math.abs(postGapMs)}ms`
-        : `${(Math.abs(postGapMs) / 1000).toFixed(3)}s`;
+      // Gap APRÈS le tour
+      const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
+      const gapStr    = postGapMs < 1000
+        ? `${postGapMs}ms`
+        : `${(postGapMs / 1000).toFixed(3)}s`;
 
       const gapOnLeader = driver.pos > 1
         ? ` · ${((driver.totalTime - ranked[0].totalTime) / 1000).toFixed(3)}s du leader`
@@ -1368,7 +1400,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
       const drsTag  = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
       const howDesc = overtakeDescription(driver, passed, gpStyle);
 
-      // Mention rivalité si les deux pilotes sont rivaux déclarés
       const areRivals = (
         (driver.pilot.rivalId && String(driver.pilot.rivalId) === String(passed.pilot._id)) ||
         (passed.pilot.rivalId && String(passed.pilot.rivalId) === String(driver.pilot._id))
@@ -1385,7 +1416,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           ? `***⚔️ T${lap} — DÉPASSEMENT DANS LE TOP 3 !***${drsTag}`
           : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
 
-      // Bloc de changement de positions (clair et lisible)
       const posBlock = `⬆️ **${driver.pilot.name}** → P${ovNewPos}\n⬇️ **${passed.pilot.name}** → P${ovLostPos}`;
 
       events.push({
