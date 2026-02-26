@@ -3930,8 +3930,8 @@ async function handleInteraction(interaction) {
       )
       .addFields(
         { name: '📅 Calendrier & Courses', value:
-          '**24 GP** par saison (vrais circuits F1) · Chaque circuit a un style : 🏙️ Urbain · 💨 Rapide · ⚙️ Technique · 🔀 Mixte · 🔋 Endurance\n' +
-          '> `11h` 🔧 Essais · `15h` ⏱️ Qualifs Q1/Q2/Q3 · `18h` 🏁 Course *(auto, Europe/Paris)*' },
+          '**24 GP** par saison (vrais circuits F1) · **1 weekend par jour** · Chaque circuit a un style : 🏙️ Urbain · 💨 Rapide · ⚙️ Technique · 🔀 Mixte · 🔋 Endurance\n' +
+          '> `11h` 🔧 Essais · `15h` ⏱️ Qualifs Q1/Q2/Q3 · `18h` 🏁 Course *(heure Europe/Paris, auto)*' },
         { name: '🧬 Créer un pilote — `/create_pilot`', value:
           '• **Nationalité** + **numéro de course** (1–99, unique)\n' +
           `• **${TOTAL_STAT_POOL} points** à répartir sur 7 stats (base fixe ${BASE_STAT_VALUE} par stat · max +${MAX_STAT_BONUS}/stat)\n` +
@@ -3944,12 +3944,14 @@ async function handleInteraction(interaction) {
           '→ 3 upgrades consécutifs sur la même stat = **Spécialisation débloquée** 🏅 (bonus en course)' },
         { name: '💰 PLcoins', value:
           'Gagnés à chaque course (points + salaire + primes). Dépensés avec `/ameliorer [pilote:1|2]` pour booster tes stats (+1 par achat, coût croissant).' },
-        { name: '🚗 Écuries & Contrats', value:
-          '**10 écuries** avec des stats voiture qui évoluent chaque course. Chaque contrat a : multiplicateur de coins · salaire · primes V/P · durée.\n' +
-          '→ À la fin de saison : `/admin_transfer` ouvre le mercato, les écuries font des offres auto. Utilise `/offres [pilote:1|2]` pour accepter.' },
+        { name: '🚗 Écuries & Contrats — La Draft', value:
+          '**Au début de saison**, pas d\'offres directes : c\'est une **draft** organisée par les admins.\n' +
+          'Les écuries choisissent leurs pilotes dans l\'ordre — ton classement stats influence ton attractivité.\n' +
+          '**En cours de saison** : le mercato s\'ouvre en fin de saison via `/admin_transfer`, les écuries font alors des offres auto. Utilise `/offres [pilote:1|2]` pour accepter.\n' +
+          '> **10 écuries** · stats voiture évolutives · chaque contrat a : multiplicateur coins · salaire · primes V/P · durée' },
         { name: '🚀 Pour démarrer', value:
           '1️⃣ `/create_pilot` — crée ton pilote (nationalité, numéro, stats)\n' +
-          '2️⃣ Attends les offres d\'écuries → `/offres` pour accepter\n' +
+          '2️⃣ Attends la **draft** organisée par les admins pour rejoindre une écurie\n' +
           '3️⃣ Suis les résultats ici · `/profil` · `/classement` · `/calendrier`\n' +
           '4️⃣ Dépense tes gains → `/ameliorer`\n\n' +
           '> `/f1` pour voir toutes tes commandes · `/profil` pour tes stats complètes' },
