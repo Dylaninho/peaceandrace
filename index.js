@@ -314,26 +314,22 @@ const DraftSession = mongoose.model('DraftSession', DraftSchema);
 // ============================================================
 
 const DEFAULT_TEAMS = [
-  { name:'Red Horizon',   emoji:'🔵', color:'#1E3A5F', budget:160,
-    vitesseMax:95, drs:95, refroidissement:90, dirtyAir:88, conservationPneus:88, vitesseMoyenne:93, devPoints:0 },
-  { name:'Scuderia Alfa', emoji:'🔴', color:'#DC143C', budget:150,
-    vitesseMax:92, drs:90, refroidissement:88, dirtyAir:85, conservationPneus:85, vitesseMoyenne:90, devPoints:0 },
-  { name:'Silver Arrow',  emoji:'⚪', color:'#C0C0C0', budget:145,
-    vitesseMax:90, drs:88, refroidissement:92, dirtyAir:82, conservationPneus:87, vitesseMoyenne:88, devPoints:0 },
-  { name:'McLaren PL',    emoji:'🟠', color:'#FF7722', budget:130,
-    vitesseMax:85, drs:84, refroidissement:82, dirtyAir:80, conservationPneus:83, vitesseMoyenne:85, devPoints:0 },
-  { name:'Aston Speed',   emoji:'🟢', color:'#006400', budget:120,
-    vitesseMax:80, drs:80, refroidissement:80, dirtyAir:78, conservationPneus:80, vitesseMoyenne:80, devPoints:0 },
-  { name:'Alpine Bleu',   emoji:'💙', color:'#0066CC', budget:110,
-    vitesseMax:75, drs:76, refroidissement:78, dirtyAir:75, conservationPneus:76, vitesseMoyenne:76, devPoints:0 },
-  { name:'Williams PL',   emoji:'🔷', color:'#00B4D8', budget:90,
-    vitesseMax:70, drs:71, refroidissement:74, dirtyAir:70, conservationPneus:72, vitesseMoyenne:70, devPoints:0 },
-  { name:'Haas PL',       emoji:'⬜', color:'#AAAAAA', budget:75,
-    vitesseMax:65, drs:65, refroidissement:68, dirtyAir:65, conservationPneus:67, vitesseMoyenne:65, devPoints:0 },
-  { name:'Sauber PL',     emoji:'🟤', color:'#8B4513', budget:60,
-    vitesseMax:60, drs:60, refroidissement:63, dirtyAir:60, conservationPneus:62, vitesseMoyenne:60, devPoints:0 },
-  { name:'RB Junior',     emoji:'🟡', color:'#FFD700', budget:50,
-    vitesseMax:55, drs:56, refroidissement:58, dirtyAir:55, conservationPneus:57, vitesseMoyenne:55, devPoints:0 },
+  { name:'Red Bull Racing', emoji:'🔵', color:'#1E3A5F', budget:100,
+    vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
+  { name:'Ferrari',         emoji:'🔴', color:'#DC143C', budget:100,
+    vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
+  { name:'Mercedes',        emoji:'⚪', color:'#00D2BE', budget:100,
+    vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
+  { name:'McLaren',         emoji:'🟠', color:'#FF7722', budget:100,
+    vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
+  { name:'Aston Martin',    emoji:'🟢', color:'#006400', budget:100,
+    vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
+  { name:'Alpine',          emoji:'💙', color:'#0066CC', budget:100,
+    vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
+  { name:'Williams',        emoji:'🔷', color:'#00B4D8', budget:100,
+    vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
+  { name:'Haas',            emoji:'⬜', color:'#AAAAAA', budget:100,
+    vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
 ];
 
 // ── Circuits avec style de GP ──────────────────────────────
@@ -3043,9 +3039,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 function buildTestFixtures() {
   const ObjectId = require('mongoose').Types.ObjectId;
   const testTeamDefs = [
-    { name:'Red Horizon TEST',  emoji:'🔵', color:'#1E3A5F', budget:160, vitesseMax:95, drs:95, refroidissement:90, dirtyAir:88, conservationPneus:88, vitesseMoyenne:93, devPoints:0 },
+    { name:'Red Bull Racing TEST', emoji:'🔵', color:'#1E3A5F', budget:160, vitesseMax:95, drs:95, refroidissement:90, dirtyAir:88, conservationPneus:88, vitesseMoyenne:93, devPoints:0 },
     { name:'Scuderia TEST',     emoji:'🔴', color:'#DC143C', budget:150, vitesseMax:92, drs:90, refroidissement:88, dirtyAir:85, conservationPneus:85, vitesseMoyenne:90, devPoints:0 },
-    { name:'Silver Arrow TEST', emoji:'⚪', color:'#C0C0C0', budget:145, vitesseMax:90, drs:88, refroidissement:92, dirtyAir:82, conservationPneus:87, vitesseMoyenne:88, devPoints:0 },
+    { name:'Mercedes TEST', emoji:'⚪', color:'#00D2BE', budget:145, vitesseMax:90, drs:88, refroidissement:92, dirtyAir:82, conservationPneus:87, vitesseMoyenne:88, devPoints:0 },
     { name:'McLaren TEST',      emoji:'🟠', color:'#FF7722', budget:130, vitesseMax:85, drs:84, refroidissement:82, dirtyAir:80, conservationPneus:83, vitesseMoyenne:85, devPoints:0 },
     { name:'Alpine TEST',       emoji:'💙', color:'#0066CC', budget:110, vitesseMax:75, drs:76, refroidissement:78, dirtyAir:75, conservationPneus:76, vitesseMoyenne:76, devPoints:0 },
   ];
@@ -3352,7 +3348,7 @@ async function startTransferPeriod() {
     if (slotsAvailable <= 0) continue; // écurie pleine
 
     const teamRank   = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
-    const budgetRatio = team.budget / 160; // 160 = budget max (Red Horizon)
+    const budgetRatio = team.budget / 100; // 100 = budget égal pour toutes les écuries au départ
 
     // ── Philosophie de recrutement selon budget ──────────────
     // Riche  (>120) : cherche la performance brute, évite les rookies
@@ -3560,7 +3556,7 @@ const commands = [
     .addIntegerOption(o => o.setName('pilote').setDescription('Ton Pilote 1 ou Pilote 2 à améliorer (défaut: 1)').setMinValue(1).setMaxValue(2)),
 
   new SlashCommandBuilder().setName('ecuries')
-    .setDescription('Liste des 10 écuries'),
+    .setDescription('Liste des 8 écuries'),
 
   new SlashCommandBuilder().setName('ecurie')
     .setDescription('Détail d\'une écurie (stats voiture)')
@@ -3723,7 +3719,7 @@ client.once('ready', async () => {
   const teamCount = await Team.countDocuments();
   if (teamCount === 0) {
     await Team.insertMany(DEFAULT_TEAMS);
-    console.log('✅ 10 écuries créées');
+    console.log('✅ 8 écuries créées');
   }
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -5272,33 +5268,30 @@ async function handleInteraction(interaction) {
         ].join('\n') },
         { name: '🔄 Transferts & Draft', value: [
           '`/admin_transfer` — Ouvre la période de transfert (IA génère les offres automatiquement)',
-          '`/admin_draft_start` — Lance le draft snake (S1 uniquement — les saisons suivantes = transferts auto)',
-        ].join('\n') },
-        { name: '🗞️ News', value: [
-          '`/admin_news_force` — Force la publication d\'un article de news immédiatement',
+          '`/admin_draft_start` — Lance le draft snake (attribution manuelle des écuries)',
         ].join('\n') },
         { name: '🖼️ Gestion Pilotes', value: [
           '`/admin_set_photo joueur:@user url:... [pilote:1|2]` — Définit la photo d\'un pilote',
-          '`/admin_reset_pilot joueur:@user [pilote:1|2]` — Supprime le(s) pilote(s) d\'un joueur',
+          '`/admin_reset_pilot joueur:@user [pilote:1|2]` — Supprime le(s) pilote(s) d\'un joueur *(test/reset)*',
         ].join('\n') },
         { name: '🧪 Test & Debug', value: [
-          '`/admin_test_race` — Simule une course fictive fictifs (aucune sauvegarde)',
+          '`/admin_test_race` — Simule une course fictive avec pilotes fictifs (aucune sauvegarde)',
           '`/admin_test_practice` — Simule des essais libres fictifs',
           '`/admin_test_qualif` — Simule des qualifs Q1/Q2/Q3 fictives',
         ].join('\n') },
         { name: '📋 Procédure de démarrage', value: [
           '1️⃣ Les joueurs créent leurs pilotes : `/create_pilot` (2 pilotes max par joueur)',
-          '2️⃣ `/admin_draft_start` — draft snake S1 pour attribuer les écuries',
+          '2️⃣ Attribution des écuries via `/admin_draft_start` (snake draft) ou `/admin_transfer`',
           '3️⃣ `/admin_new_season` — crée la saison et les 24 GP',
-          '4️⃣ Courses auto : **11h** Essais · **15h** Qualifs · **18h** Course (Europe/Paris)',
-          '5️⃣ Fin de saison → mercato auto déclenché 24h après la cérémonie',
+          '4️⃣ Courses auto planifiées : **11h** Essais · **15h** Qualifs · **18h** Course',
+          '5️⃣ Fin de saison : `/admin_transfer` — IA génère les offres de transfert',
         ].join('\n') },
         { name: '⚙️ Infos système', value: [
-          '🏎️ **2 pilotes max** par joueur · nationalité, numéro et stats personnalisables',
-          `📊 **${TOTAL_STAT_POOL} points** à répartir à la création (base ${BASE_STAT_VALUE}/stat)`,
-          '🔔 Keep-alive · ping toutes les 8 min · news auto 1-2×/jour',
+          '🏎️ **2 pilotes max** par joueur Discord — nationalité, numéro et stats personnalisables',
+          `📊 **${TOTAL_STAT_POOL} points** à répartir à la création (base ${BASE_STAT_VALUE} par stat)`,
+          '🔔 Keep-alive actif · Ping toutes les 8 min · Courses auto 11h/15h/18h (Europe/Paris)',
         ].join('\n') },
-      ).setFooter({ text: 'F1 PL Bot — Panneau Admin v2.2' });
+      ).setFooter({ text: 'F1 PL Bot — Panneau Admin v2.1' });
     return interaction.editReply({ embeds: [adminHelpEmbed], ephemeral: true });
   }
 
@@ -5332,11 +5325,11 @@ async function handleInteraction(interaction) {
         ].join('\n') },
         { name: '🏎️ Écuries & Pilotes', value: [
           '`/pilotes` — Classement général par note (style FIFA)',
-          '`/ecuries` — Liste des 10 écuries avec leurs pilotes',
+          '`/ecuries` — Liste des 8 écuries avec leurs pilotes',
           '`/ecurie nom:...` — Stats voiture détaillées d\'une écurie',
           '`/record_circuit circuit:...` — Record du meilleur tour sur un circuit',
         ].join('\n') },
-        { name: '🗞️ Actualités paddock', value: '`/news [page]` — Rumeurs, drama, rivalités, title fight… 1-2 articles/jour + 2 max après chaque GP' },
+        { name: '🗞️ Actualités paddock', value: '`/news [page]` — Rumeurs, drama, rivalités, title fight… mis à jour après chaque GP et toutes les ~40h' },
         { name: '📋 Contrats & Transferts', value: [
           '`/mon_contrat [pilote:1|2]` — Ton contrat actuel',
           '`/offres [pilote:1|2]` — Offres en attente (boutons interactifs)',
@@ -5667,7 +5660,7 @@ async function handleInteraction(interaction) {
           '**Au début de saison**, pas d\'offres directes : c\'est une **draft** organisée par les admins.\n' +
           'Les écuries choisissent leurs pilotes dans l\'ordre — ton classement stats influence ton attractivité.\n' +
           '**En cours de saison** : le mercato s\'ouvre en fin de saison via `/admin_transfer`, les écuries font alors des offres auto. Utilise `/offres [pilote:1|2]` pour accepter.\n' +
-          '> **10 écuries** · stats voiture évolutives · chaque contrat a : multiplicateur coins · salaire · primes V/P · durée' },
+          '> **8 écuries** · stats voiture évolutives · chaque contrat a : multiplicateur coins · salaire · primes V/P · durée' },
         { name: '🚀 Pour démarrer', value:
           '1️⃣ `/create_pilot` — crée ton pilote (nationalité, numéro, stats)\n' +
           '2️⃣ Attends la **draft** organisée par les admins pour rejoindre une écurie\n' +
