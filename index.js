@@ -3703,8 +3703,14 @@ const client = new Client({
 
 client.once('ready', async () => {
   console.log(`✅ Bot connecté : ${client.user.tag}`);
-  await mongoose.connect(MONGO_URI);
-  console.log('✅ MongoDB connecté');
+  try {
+    await mongoose.connect(MONGO_URI);
+    console.log('✅ MongoDB connecté');
+  } catch(mongoErr) {
+    console.error('❌ ERREUR MongoDB connexion :', mongoErr.message);
+    console.error('❌ URI utilisée :', MONGO_URI ? MONGO_URI.replace(/:([^@]+)@/, ':***@') : 'NON DÉFINIE');
+    process.exit(1);
+  }
 
   // ── Supprime l'ancien index unique sur discordId (incompatible avec 2 pilotes par user) ──
   try {
@@ -3721,23 +3727,29 @@ client.once('ready', async () => {
   }
 
   const rest = new REST({ version: '10' }).setToken(TOKEN);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-    body: commands.map(c => c.toJSON()),
-  });
-  console.log('✅ Slash commands enregistrées');
+  try {
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
+      body: commands.map(c => c.toJSON()),
+    });
+    console.log('✅ Slash commands enregistrées');
+  } catch(cmdErr) {
+    console.error('❌ ERREUR enregistrement slash commands :', cmdErr.message);
+    console.error('❌ CLIENT_ID:', CLIENT_ID || 'NON DÉFINI');
+    console.error('❌ GUILD_ID:', GUILD_ID || 'NON DÉFINI');
+  }
   startScheduler();
 
-  // ── Job news toutes les 40h (±8h de variation) pour du naturel ──
-  const NEWS_INTERVAL_BASE = 40 * 60 * 60 * 1000;
+  // ── Job news 1-2 fois par jour (base 18h ±6h de variation) ──
+  const NEWS_INTERVAL_BASE = 18 * 60 * 60 * 1000;
   const scheduleNextNews = () => {
-    const jitter = (Math.random() - 0.5) * 8 * 60 * 60 * 1000; // ±8h
+    const jitter = (Math.random() - 0.5) * 12 * 60 * 60 * 1000; // ±6h → entre 12h et 24h
     setTimeout(async () => {
       try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news error:', e); }
       scheduleNextNews();
     }, NEWS_INTERVAL_BASE + jitter);
   };
   scheduleNextNews();
-  console.log('✅ Job news planifié (toutes les ~40h)');
+  console.log('✅ Job news planifié (1-2 fois par jour, entre 12h et 24h)');
 });
 
 // ============================================================
@@ -6231,6 +6243,20 @@ function startScheduler() {
   console.log('✅ Keep-alive : ping toutes les 15min');
 }
 
+// ── Vérification des variables d'environnement ──────────────
+const REQUIRED_ENV = { DISCORD_TOKEN: TOKEN, CLIENT_ID, GUILD_ID, MONGODB_URI: MONGO_URI };
+let missingEnv = false;
+for (const [key, val] of Object.entries(REQUIRED_ENV)) {
+  if (!val) {
+    console.error(`❌ Variable d'environnement manquante : ${key}`);
+    missingEnv = true;
+  }
+}
+if (missingEnv) {
+  console.error('❌ Bot arrêté — configure les variables manquantes sur Render/Railway.');
+  process.exit(1);
+}
+
 // ── Sécurité globale — empêche le crash sur erreurs non catchées ──
 process.on('unhandledRejection', (reason, promise) => {
   console.error('⚠️  unhandledRejection (bot stable) :', reason?.message || reason);
@@ -6242,7 +6268,12 @@ client.on('error', (err) => {
   console.error('⚠️  Discord client error :', err.message);
 });
 
-client.login(TOKEN);
+console.log('🔄 Connexion Discord en cours...');
+client.login(TOKEN).catch(err => {
+  console.error('❌ ERREUR login Discord :', err.message);
+  console.error('❌ Vérifie que DISCORD_TOKEN est correct dans les variables Render.');
+  process.exit(1);
+});
 
 /*
 ============================================================
