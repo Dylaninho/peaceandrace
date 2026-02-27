@@ -83,11 +83,8 @@ cron.schedule('*/8 * * * *', selfPing, { timezone: 'Europe/Paris' });
 
 // ── Pilot ──────────────────────────────────────────────────
 const PilotSchema = new mongoose.Schema({
-  discordId    : { type: String, required: true },           // plus unique : 2 pilotes par user
-  pilotIndex   : { type: Number, default: 1 },               // 1 ou 2 (index du pilote pour ce joueur)
+  discordId    : { type: String, required: true, unique: true },
   name         : { type: String, required: true },
-  nationality  : { type: String, default: '🏳️ Inconnu' },   // ex: '🇫🇷 Français'
-  racingNumber : { type: Number, default: null },             // numéro de voiture (1-99, unique côté logique)
   // Stats pilote (0-100) — influencent directement la simulation
   depassement  : { type: Number, default: 50 },  // overtaking en ligne droite / attaque
   freinage     : { type: Number, default: 50 },  // performance en zone de freinage tardif
@@ -101,103 +98,11 @@ const PilotSchema = new mongoose.Schema({
   totalEarned  : { type: Number, default: 0 },
   // Photo de profil (URL définie par un admin via /admin_set_photo)
   photoUrl     : { type: String, default: null },
-  // ── Spécialisation ──────────────────────────────────────────
-  // 3 upgrades consécutifs sur la même stat → tag débloqué
-  lastUpgradeStat : { type: String, default: null },  // ex: 'freinage'
-  upgradeStreak   : { type: Number, default: 0 },     // 1→2→3 = trigger
-  specialization  : { type: String, default: null },  // ex: 'freinage' (unique par pilote)
-  // ── Rivalités ───────────────────────────────────────────────
-  rivalId      : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
-  rivalContacts: { type: Number, default: 0 },        // contacts en course cette saison vs rivalId
-  // ── Statut coéquipier ────────────────────────────────────────
-  teamStatus        : { type: String, enum: ['numero1', 'numero2', null], default: null },
-  teammateDuelWins  : { type: Number, default: 0 },   // victoires internes cette saison vs coéquipier
   // État
   teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
   createdAt    : { type: Date, default: Date.now },
 });
 const Pilot = mongoose.model('Pilot', PilotSchema);
-
-// ── HallOfFame ─────────────────────────────────────────────
-const HallOfFameSchema = new mongoose.Schema({
-  seasonYear       : { type: Number, required: true, unique: true },
-  champPilotId     : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot' },
-  champPilotName   : String,
-  champTeamName    : String,
-  champTeamEmoji   : String,
-  champPoints      : Number,
-  champWins        : Number,
-  champPodiums     : Number,
-  champDnfs        : Number,
-  champConstrName  : String,
-  champConstrEmoji : String,
-  champConstrPoints: Number,
-  mostWinsName     : String,
-  mostWinsCount    : Number,
-  mostDnfsName     : String,
-  mostDnfsCount    : Number,
-  topRatedName     : String,   // meilleur overall en fin de saison
-  topRatedOv       : Number,
-  createdAt        : { type: Date, default: Date.now },
-});
-const HallOfFame = mongoose.model('HallOfFame', HallOfFameSchema);
-
-// ── PilotGPRecord — Historique détaillé par GP ────────────
-// Un document par pilote par course — alimente /performances
-const PilotGPRecordSchema = new mongoose.Schema({
-  pilotId      : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', required: true },
-  seasonId     : { type: mongoose.Schema.Types.ObjectId, ref: 'Season' },
-  seasonYear   : { type: Number, required: true },
-  raceId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Race' },
-  circuit      : { type: String, required: true },
-  circuitEmoji : { type: String, default: '🏁' },
-  gpStyle      : { type: String, default: 'mixte' },
-  teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team' },
-  teamName     : { type: String, default: '?' },
-  teamEmoji    : { type: String, default: '🏎️' },
-  startPos     : { type: Number, default: null },   // position sur la grille
-  finishPos    : { type: Number, required: true },  // position finale
-  dnf          : { type: Boolean, default: false },
-  dnfReason    : { type: String, default: null },
-  points       : { type: Number, default: 0 },
-  coins        : { type: Number, default: 0 },
-  fastestLap   : { type: Boolean, default: false },
-  raceDate     : { type: Date, default: Date.now },
-});
-PilotGPRecordSchema.index({ pilotId: 1, raceDate: -1 });
-const PilotGPRecord = mongoose.model('PilotGPRecord', PilotGPRecordSchema);
-
-// ── CircuitRecord — Meilleur temps par circuit (toutes saisons) ──
-const CircuitRecordSchema = new mongoose.Schema({
-  circuit      : { type: String, required: true, unique: true },
-  circuitEmoji : { type: String, default: '🏁' },
-  gpStyle      : { type: String, default: 'mixte' },
-  bestTimeMs   : { type: Number, required: true },
-  pilotId      : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot' },
-  pilotName    : { type: String },
-  teamName     : { type: String },
-  teamEmoji    : { type: String, default: '🏎️' },
-  seasonYear   : { type: Number },
-  raceId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Race' },
-  setAt        : { type: Date, default: Date.now },
-});
-const CircuitRecord = mongoose.model('CircuitRecord', CircuitRecordSchema);
-
-// ── NewsArticle — Tabloïd de paddock ──────────────────────
-const NewsArticleSchema = new mongoose.Schema({
-  type       : { type: String, required: true },  // 'rivalry','transfer_rumor','drama','hype','form_crisis','teammate_duel','dev_vague','scandal','title_fight'
-  source     : { type: String, required: true },  // 'pitlane_insider','paddock_whispers','pl_racing_news','f1_weekly'
-  headline   : { type: String, required: true },
-  body       : { type: String, required: true },
-  pilotIds   : [{ type: mongoose.Schema.Types.ObjectId, ref: 'Pilot' }],
-  teamIds    : [{ type: mongoose.Schema.Types.ObjectId, ref: 'Team' }],
-  raceId     : { type: mongoose.Schema.Types.ObjectId, ref: 'Race', default: null },
-  seasonYear : { type: Number },
-  publishedAt: { type: Date, default: Date.now },
-  triggered  : { type: String, default: 'auto' }, // 'post_race' | 'scheduled' | 'manual'
-});
-NewsArticleSchema.index({ publishedAt: -1 });
-const NewsArticle = mongoose.model('NewsArticle', NewsArticleSchema);
 
 // ── Team ───────────────────────────────────────────────────
 const TeamSchema = new mongoose.Schema({
@@ -368,32 +273,6 @@ const CIRCUITS = [
 // Points F1
 const F1_POINTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
 
-// ─── Création de pilote ───────────────────────────────────
-// Chaque pilote a une base fixe + un pool de points à répartir
-// Base : 40 par stat × 7 = 280 points de base (identique pour tous)
-// Pool : 70 points à répartir librement (0–30 par stat)
-// → Total possible : 50 par stat en moyenne (même niveau global)
-const BASE_STAT_VALUE  = 40;
-const TOTAL_STAT_POOL  = 70;
-const MAX_STAT_BONUS   = 30;   // bonus max par stat lors de la création
-
-// Nationalités disponibles (drapeau + label)
-// ⚠️ Discord limite à 25 choix max dans addChoices — liste triée avec équilibre Europe/Amériques/Afrique/Asie
-const NATIONALITIES = [
-  // Europe
-  '🇫🇷 Français',    '🇧🇪 Belge',        '🇩🇪 Allemand',    '🇬🇧 Britannique',
-  '🇳🇱 Néerlandais', '🇮🇹 Italien',       '🇪🇸 Espagnol',    '🇵🇹 Portugais',
-  '🇨🇭 Suisse',      '🇦🇹 Autrichien',    '🇫🇮 Finlandais',  '🇵🇱 Polonais',
-  // Amériques
-  '🇧🇷 Brésilien',   '🇺🇸 Américain',     '🇨🇦 Canadien',    '🇲🇽 Mexicain',
-  '🇦🇷 Argentin',    '🇨🇴 Colombien',
-  // Afrique
-  '🇨🇮 Ivoirien',    '🇨🇬 Congolais',     '🇸🇳 Sénégalais',  '🇨🇲 Camerounais',
-  '🇲🇦 Marocain',    '🇿🇦 Sud-Africain',
-  // Asie / Océanie / Autre
-  '🇯🇵 Japonais',
-];
-
 // ============================================================
 // ███╗   ███╗ ██████╗ ████████╗███████╗██╗   ██╗██████╗
 // ████╗ ████║██╔═══██╗╚══██╔══╝██╔════╝██║   ██║██╔══██╗
@@ -470,96 +349,19 @@ function draftTeamAtIndex(order, idx) {
   return round % 2 === 0 ? order[pos] : order[n - 1 - pos];
 }
 
-// ── Draft : select menu des pilotes disponibles ───────────
+// Construit le select menu des pilotes disponibles pour le draft
 function buildDraftSelectMenu(freePilots, draftId) {
   const options = freePilots.slice(0, 25).map(p => {
     const ov = overallRating(p);
     const t  = ratingTier(ov);
-    const flag = p.nationality?.split(' ')[0] || '';
-    return {
-      label      : `${t.badge} ${ov} — ${p.name}`,
-      value      : String(p._id),
-      description: `${flag} #${p.racingNumber || '?'} · Dép ${p.depassement} · Frei ${p.freinage} · Ctrl ${p.controle}`,
-    };
+    return { label: `${t.badge} ${ov} — ${p.name}`, value: String(p._id), description: `Frein ${p.freinage} | Ctrl ${p.controle} | Dep ${p.depassement}` };
   });
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`draft_pick_${draftId}`)
-      .setPlaceholder('🔍 Sélectionner un pilote...')
+      .setPlaceholder('Choisissez un pilote...')
       .addOptions(options)
   );
-}
-
-// ── Draft : embed "On The Clock" affiché avant chaque pick ─
-function buildOnTheClockPayload(team, globalPick, totalPicks, round, pickInRound, totalInRound, freePilots, draftId) {
-  const suspensePhrases = [
-    `Les scouts de **${team.name}** s'activent en coulisses...`,
-    `Tout le monde retient son souffle. **${team.name}** a la parole.`,
-    `Le war room de **${team.name}** est en pleine réflexion...`,
-    `C'est le moment de vérité pour **${team.name}**. Qui rejoindra l'écurie ?`,
-    `Les négociations sont intenses du côté de **${team.name}**...`,
-    `**${team.name}** consulte ses données. Le chrono tourne.`,
-  ];
-  const phrase = suspensePhrases[globalPick % suspensePhrases.length];
-
-  const embed = new EmbedBuilder()
-    .setColor(team.color || '#FFD700')
-    .setAuthor({ name: `DRAFT F1 PL — ROUND ${round} · PICK ${pickInRound}/${totalInRound}` })
-    .setTitle(`⏳  ${team.emoji}  ${team.name.toUpperCase()}  EST AU CHOIX`)
-    .setDescription(`\n${phrase}\n\u200B`)
-    .addFields({
-      name: '📋 Pilotes restants',
-      value: freePilots.slice(0, 10).map(p => {
-        const ov = overallRating(p);
-        const t  = ratingTier(ov);
-        const flag = p.nationality?.split(' ')[0] || '';
-        return `${t.badge} **${ov}** — ${flag} ${p.name} #${p.racingNumber || '?'}`;
-      }).join('\n') + (freePilots.length > 10 ? `\n*…et ${freePilots.length - 10} autres*` : ''),
-    })
-    .setFooter({ text: `Pick global #${globalPick + 1}/${totalPicks} · Seul un admin peut sélectionner` });
-
-  const selectRow = buildDraftSelectMenu(freePilots, draftId);
-  return { embeds: [embed], components: [selectRow] };
-}
-
-// ── Draft : embed de révélation après un pick ─────────────
-function buildPickRevealEmbed(team, pilot, globalPick, totalPicks, round, pickInRound, totalInRound) {
-  const ov   = overallRating(pilot);
-  const tier = ratingTier(ov);
-  const flag = pilot.nationality || '🏳️ Inconnu';
-  const isLast = globalPick + 1 >= totalPicks;
-
-  const revealPhrases = [
-    `L'écurie a tranché. Il n'y a plus de doute.`,
-    `Le suspens est terminé. Le choix est officiel.`,
-    `La signature est posée. C'est confirmé.`,
-    `Après délibération, le verdict est tombé.`,
-    `Le transfert est acté. Bienvenue dans l'écurie !`,
-  ];
-  const phrase = revealPhrases[globalPick % revealPhrases.length];
-
-  const embed = new EmbedBuilder()
-    .setColor(team.color || '#FFD700')
-    .setAuthor({ name: `${team.emoji} ${team.name} — PICK OFFICIEL` })
-    .setTitle(`🎯  ${pilot.name.toUpperCase()}`)
-    .setDescription(
-      `${phrase}\n\n` +
-      `**${team.emoji} ${team.name}** sélectionne **${tier.badge} ${pilot.name}** !\n\u200B`
-    )
-    .addFields(
-      { name: '🌍 Nationalité',   value: flag,              inline: true },
-      { name: '🔢 Numéro',        value: `#${pilot.racingNumber || '?'}`, inline: true },
-      { name: '⭐ Overall',        value: `**${tier.badge} ${ov}**`,       inline: true },
-      { name: '📊 Stats clés', value:
-        `Dép \`${pilot.depassement}\` · Frei \`${pilot.freinage}\` · Déf \`${pilot.defense}\`\n` +
-        `Réact \`${pilot.reactions}\` · Ctrl \`${pilot.controle}\` · Adapt \`${pilot.adaptabilite}\` · Pneus \`${pilot.gestionPneus}\``,
-      },
-    )
-    .setFooter({ text: isLast ? '🏁 Dernier pick de la draft !' : `Round ${round} · Pick ${pickInRound}/${totalInRound}` });
-
-  if (pilot.photoUrl) embed.setThumbnail(pilot.photoUrl);
-
-  return embed;
 }
 
 // ─── Score voiture pondéré selon le style de GP ───────────
@@ -593,30 +395,17 @@ function pilotScore(pilot, gpStyle) {
 }
 
 // ─── Calcul du lap time ───────────────────────────────────
-function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0) {
+function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position) {
   const BASE = 90_000;
   const w = GP_STYLE_WEIGHTS[gpStyle];
 
   // Contribution voiture (45% du temps)
   const cScore = carScore(team, gpStyle);
-  const carFRaw = 1 - ((cScore - 70) / 70 * 0.15);
-  // Post-SC : compression des écarts voiture (tout le monde roule au même rythme ~3 tours)
-  const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.15 * (scCooldown / 6)) : carFRaw;
+  const carF = 1 - ((cScore - 70) / 70 * 0.15);
 
   // Contribution pilote (35% du temps)
   const pScore = pilotScore(pilot, gpStyle);
-  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.12);
-  // Post-SC : idem compression
-  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.12 * (scCooldown / 6)) : pilotFRaw;
-
-  // ── Bonus spécialisation : +3% sur la stat ciblée ────────
-  // On traduit ça en réduction de temps selon l'impact de la stat sur ce style
-  let specF = 1.0;
-  if (pilot.specialization) {
-    const specWeight = GP_STYLE_WEIGHTS[gpStyle]?.pilot?.[pilot.specialization] || 1.0;
-    // Bonus : 0.3% de réduction par unité de poids (max ~0.5% de gain en temps)
-    specF = 1 - (specWeight * 0.003);
-  }
+  const pilotF = 1 - ((pScore - 50) / 50 * 0.12);
 
   // Pneus
   const tireData = TIRE[tireCompound];
@@ -632,18 +421,14 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   let dirtyAirF = 1.0;
   if (position > 1) {
     const dirtyAirPenalty = (100 - team.dirtyAir) / 100 * 0.012;
-    // Pendant le cooldown post-SC, le dirty air est réduit (DRS train, peloton compact)
-    const daRandom = scCooldown > 0 ? Math.random() * 0.3 : Math.random();
-    dirtyAirF = 1 + dirtyAirPenalty * daRandom;
+    dirtyAirF = 1 + dirtyAirPenalty * Math.random();
   }
 
   // Track evolution
   const trackF = 1 - (trackEvo / 100 * 0.015);
 
   // Variabilité (controle réduit les erreurs de pilotage)
-  // Après un SC/VSC, la variance est réduite pour maintenir le peloton groupé (~5 tours)
-  const cooldownFactor = scCooldown > 0 ? 0.25 : 1.0; // 75% de réduction pendant le cooldown
-  const errorRange = (100 - pilot.controle) / 100 * 0.6 / 100 * cooldownFactor;
+  const errorRange = (100 - pilot.controle) / 100 * 0.6 / 100;
   const randF = 1 + (Math.random() - 0.5) * errorRange;
 
   // Météo — adaptabilite réduit la perte par temps variable
@@ -658,7 +443,7 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
     weatherF *= 1 + ((100 - team.refroidissement) / 100 * 0.02);
   }
 
-  return Math.round(BASE * carF * pilotF * specF * tireF * dirtyAirF * trackF * randF * weatherF);
+  return Math.round(BASE * carF * pilotF * tireF * dirtyAirF * trackF * randF * weatherF);
 }
 
 // ─── Calcul Q time (tour lancé, pneus neufs) ──────────────
@@ -761,72 +546,22 @@ function checkIncident(pilot, team) {
   const crashF   = ((100 - pilot.controle) / 100 * 0.005) + ((100 - pilot.reactions) / 100 * 0.003);
   if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
   if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
-  if (roll < 0.003)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
+  if (roll < 0.008)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
   return null;
 }
 
-// ─── SIMULATION QUALIFICATIONS Q1/Q2/Q3 ──────────────────
-// Q1 (tous) → élimine les 5 derniers → P16-20
-// Q2 (15 restants) → élimine 5 autres → P11-15
-// Q3 (10 restants) → shoot-out pour la grille de pole
-// Chaque pilote fait UN tour chrono par segment, avec variabilité.
+// ─── SIMULATION QUALIFICATIONS ────────────────────────────
 async function simulateQualifying(race, pilots, teams) {
-  const weather = pick(['DRY','DRY','DRY','WET','INTER']);
-  const n = pilots.length;
-  // Taille des groupes selon nb de pilotes (scalable)
-  const q3Size = Math.min(10, Math.max(3, Math.floor(n * 0.5)));
-  const q2Size = Math.min(15, Math.max(q3Size + 2, Math.floor(n * 0.75)));
-  // Q1 : tous les pilotes — 1 tour chrono + variation (tentative d'amélioration ~50% de chance)
-  function doLap(pilot, team, extraVariation = 0) {
-    const base = calcQualiTime(pilot, team, weather, race.gpStyle);
-    const variance = randInt(-300, 300) + extraVariation;
-    return base + variance;
-  }
-
-  const allTimes = pilots.map(pilot => {
+  const weather = pick(['DRY','DRY','DRY','WET']);
+  const results = [];
+  for (const pilot of pilots) {
     const team = teams.find(t => String(t._id) === String(pilot.teamId));
-    if (!team) return null;
-    const t1 = doLap(pilot, team);
-    // 60% de chance d'améliorer le temps
-    const t2 = Math.random() > 0.4 ? doLap(pilot, team, -randInt(50, 200)) : t1 + randInt(0, 500);
-    return { pilot, team, time: Math.min(t1, t2) };
-  }).filter(Boolean);
-
-  allTimes.sort((a, b) => a.time - b.time);
-
-  // Q2 : top q2Size relancent un tour
-  const q2Pilots = allTimes.slice(0, q2Size);
-  const q2Elim   = allTimes.slice(q2Size); // P16+ éliminés en Q1
-  q2Pilots.forEach(e => {
-    const t = doLap(e.pilot, e.team, -randInt(0, 150));
-    if (t < e.time) e.time = t;
-  });
-  q2Pilots.sort((a, b) => a.time - b.time);
-
-  // Q3 : top q3Size — dernier tour "à tout donner" (plus grande variance positive)
-  const q3Pilots = q2Pilots.slice(0, q3Size);
-  const q3Elim   = q2Pilots.slice(q3Size); // P11-15 éliminés en Q2
-  q3Pilots.forEach(e => {
-    const t = doLap(e.pilot, e.team, -randInt(100, 350));
-    if (t < e.time) e.time = t;
-  });
-  q3Pilots.sort((a, b) => a.time - b.time);
-
-  // Assembler la grille finale : Q3 → Q2 éliminés → Q1 éliminés
-  const finalGrid = [
-    ...q3Pilots,
-    ...q3Elim,
-    ...q2Elim,
-  ].map((e, i) => ({
-    pilotId  : e.pilot._id,
-    pilotName: e.pilot.name,
-    teamName : e.team.name,
-    teamEmoji: e.team.emoji,
-    time     : e.time,
-    segment  : i < q3Size ? 'Q3' : i < q2Size ? 'Q2' : 'Q1',
-  }));
-
-  return { grid: finalGrid, weather, q3Size, q2Size };
+    if (!team) continue;
+    const time = calcQualiTime(pilot, team, weather, race.gpStyle);
+    results.push({ pilotId: pilot._id, pilotName: pilot.name, teamName: team.name, teamEmoji: team.emoji, time });
+  }
+  results.sort((a,b) => a.time - b.time);
+  return { grid: results, weather };
 }
 
 // ─── SIMULATION ESSAIS LIBRES ─────────────────────────────
@@ -841,115 +576,6 @@ async function simulatePractice(race, pilots, teams) {
   }
   results.sort((a,b) => a.time - b.time);
   return { results, weather };
-}
-
-// ============================================================
-// 🎬  BIBLIOTHÈQUE DE GIFs — une URL brute suffit pour Discord
-//     pick() en prend un au hasard dans chaque catégorie
-// ============================================================
-const RACE_GIFS = {
-
-  // ── Dépassement pour la tête ────────────────────────────
-  overtake_lead: [
-    'https://tenor.com/pCje6tnvEno.gif',
-    'https://media3.giphy.com/media/v1.Y2lkPTc5MGI3NjExczJ3a3ZvbXV0OHg2cjMyaXFwcGdhMG80c3FkOGMzZXRnZnZvaHZrdSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/0LxtyTiPQaTKx017yr/giphy.gif',
-    'https://cdn.carthrottle.com/uploads/articles/qpogkgm85zjmvc38hssl-5791423a5f7e3.gif',
-  ],
-
-  // ── Dépassement pour le podium (P2/P3) ─────────────────
-  overtake_podium: [
-    'https://c.tenor.com/IB4EgSxeYREAAAAC/f1-max-verstappen.gif',
-    'https://media.tenor.com/BRCHKWF94ZUAAAAM/f1overtake-f1ultrapassagem.gif',
-    'https://jtsportingreviews.com/wp-content/uploads/2021/09/f1-2021-holland-perez-passes-ocon.gif',
-  ],
-
-  // ── Dépassement classique en piste (P4–P10) ─────────────
-  overtake_normal: [
-    'https://i.makeagif.com/media/2-29-2016/SMpwn6.gif',
-    'https://media.tenor.com/QbdwfqcYeuIAAAAM/f1-f1overtake.gif',
-    'https://cdn.makeagif.com/media/12-05-2013/RGyvuA.gif',
-    'https://64.media.tumblr.com/bace9527a9df9d0f6d54a390510f34f1/tumblr_ntm7hr9HJ61s9l8tco4_540.gifv',
-    'https://i.postimg.cc/HxWZBrBJ/Race-Highlights-2021-Italian-Grand-Prix-2.gif',
-  ],
-
-  // ── Crash / accident solo ────────────────────────────────
-  crash_solo: [
-    'https://media4.giphy.com/media/v1.Y2lkPTc5MGI3NjExbWdmOGF6NnAwNjlxcmhmMGRkYzEzdXBnZjNkZHd1eHoxMDdqNXc4OSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/xULW8xLsh3p9P6Lq5q/giphy.gif',
-    'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExbHllZXRhMjFnZXZmYjlzZzFjazRnbzRrZzR2bDB0aGFpbXViZm96ciZlcD12MV9naWZzX3NlYXJjaCZjdD1n/XTYhuf6DwbDri/giphy.gif',
-    'https://64.media.tumblr.com/tumblr_m55twpxti21qlt7lao8_r1_250.gif',
-    'https://i.makeagif.com/media/9-11-2016/SE-F70.gif',
-  ],
-
-  // ── Collision entre deux voitures ───────────────────────
-  crash_collision: [
-    'https://tenor.com/btuTx.gif',
-    'https://i.makeagif.com/media/3-20-2016/-MC6Il.gif',
-    'https://gifdb.com/images/high/f1-red-bull-drift-crash-6gqtnu62ypxatxnq.gif',
-  ],
-
-  // ── Panne mécanique / fumée ─────────────────────────────
-  mechanical: [
-    'https://i.makeagif.com/media/6-25-2021/JmEwic.gif',
-    'https://media.tenor.com/JZWc9Wj9ez8AAAAM/leclerc-ferrari.gif',
-    'https://media.tenor.com/JZhKHG8sWS4AAAAM/kimi-raikkonen-kimi.gif',
-  ],
-
-  // ── Crevaison ───────────────────────────────────────────
-  puncture: [
-    'https://tenor.com/f0PpRM38N76.gif',
-    'https://i.makeagif.com/media/11-07-2015/3KfYhi.gif',
-  ],
-
-  // ── Safety Car déployé ──────────────────────────────────
-  safety_car: [
-    'https://media.tenor.com/5q9Din4vE00AAAAM/f1-safety-car.gif',
-    'https://i.makeagif.com/media/4-26-2017/Z-XYlx.gif',
-    'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExOXh6anIyeTljNThweWJ4bjVtY2RuN2VsdzRiNXBldWV1bGl4ejBsdSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/Urd6nJqt5QJVFTVkoj/giphy.gif',
-  ],
-
-  // ── Virtual Safety Car ──────────────────────────────────
-  vsc: [
-    'https://static.wikia.nocookie.net/f1wikia/images/b/b5/Image-26.png/revision/latest/scale-to-width-down/732?cb=20250903081945',
-    'https://www.pittalk.it/wp-content/uploads/2022/09/vsc-1-1-1-1024x577-1.jpeg',
-  ],
-
-  // ── Green flag / restart ─────────────────────────────────
-  green_flag: [
-    'https://media0.giphy.com/media/v1.Y2lkPTZjMDliOTUyZjhrM25zMWpxd2p3cmUzdGVlMXNvdjlqMWlidjhyeHBxcWx6YnMzdSZlcD12MV9naWZzX3NlYXJjaCZjdD1n/xrP3yQ0W19SGuguEd8/200w.gif',
-  ],
-
-  // ── Arrêt aux stands (pit stop) ─────────────────────────
-  pit_stop: [
-    'https://media1.giphy.com/media/v1.Y2lkPTZjMDliOTUyajQweWdhdzd4czdtb2QwM25yd2F3NjJwcmw0OGMzMnA1OW1yOTY0MyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/6IcNBPp1H79nO/giphy.gif',
-    'https://i.imgur.com/gsyznMd.gif',
-    'https://media.tenor.com/1VEL6y9BYnMAAAAM/f1-pitstop.gif',
-    'https://i.makeagif.com/media/4-14-2016/t8BSsA.gif',
-  ],
-
-  // ── Victoire / drapeau damier ───────────────────────────
-  win: [
-    'https://tenor.com/bNkX4.gif',
-    'https://media.tenor.com/187wbBbM5bEAAAAM/waving-checkered-flag-f1.gif',
-    'https://64.media.tumblr.com/cea8c5fba5064f7d20d8fb5af2911df9/bcde5965de4f08e5-aa/s640x960/20ab168e7bef8084d034b13a9651b82353f1e18b.gif',
-    'https://i.makeagif.com/media/10-24-2022/0sN5ZB.gif',
-  ],
-
-  // ── Départ de course ────────────────────────────────────
-  race_start: [
-    'https://i.imgur.com/xNNASJJ.gif',
-    'https://media2.giphy.com/media/v1.Y2lkPTZjMDliOTUycng5azRjd29yNjRoNDRkd2c2ZnU3ZGF6a2s2eDI2bG52a3JqZ2Q4ZyZlcD12MV9naWZzX3NlYXJjaCZjdD1n/ws8Lpb894KpDGQF0nn/giphy.gif',
-    'https://gifzz.com/storage/gifs/X2hfnFtGZ3Su9Wm0saOKFE1xjv6mM9GMLjyvRW9A.gif',
-  ],
-};
-
-/** Retourne un GIF aléatoire de la catégorie — ou null si tous les PLACEHOLDER */
-function pickGif(category) {
-  const list = RACE_GIFS[category];
-  if (!list || !list.length) return null;
-  const url = pick(list);
-  // Ne pas envoyer les placeholders non remplis
-  if (url.includes('PLACEHOLDER')) return null;
-  return url;
 }
 
 // ─── Bibliothèques de narration ───────────────────────────
@@ -1110,1090 +736,46 @@ function collisionDescription(attacker, victim, lap, attackerDnf, victimDnf, dam
   return pick(intros) + consequence;
 }
 
-// Ambiance aléatoire play-by-play — TOUJOURS quelque chose à dire
-function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle) {
+// Ambiance aléatoire play-by-play — drama uniquement si ça concerne le haut du classement
+function atmosphereLine(ranked, lap, totalLaps, weather, scState) {
   if (!ranked.length) return null;
   const leader = ranked[0];
   const second = ranked[1];
   const third  = ranked[2];
   const pct    = lap / totalLaps;
+  if (scState.state !== 'NONE') return null;
 
   const lines = [];
 
-  // ── Sous SC/VSC : commentaire spécifique ───────────────
-  if (scState.state === 'SC') {
-    const pit4 = ranked.slice(0,6).map(d => `${d.team.emoji}**${d.pilot.name}**`).join(' · ');
-    lines.push(pick([
-      `🚨 Le peloton roule en file derrière la voiture de sécurité... ${pit4} — les équipes analysent les stratégies. Qui va rentrer ?`,
-      `🚨 La course est gelée. Les mécaniciens sont en alerte dans les stands — l'arrêt sous SC peut tout changer !`,
-      `🚨 Le Safety Car maintient le rythme... Les pilotes gardent leurs pneus au chaud. Le restart va être explosif.`,
-    ]));
-    return pick(lines);
-  }
-  if (scState.state === 'VSC') {
-    lines.push(pick([
-      `🟡 VSC en cours — tout le monde roule au delta. Personne ne peut attaquer, personne ne peut défendre.`,
-      `🟡 Virtual Safety Car toujours actif. La course reprendra bientôt — les gaps se figent.`,
-    ]));
-    return pick(lines);
-  }
-
-  // ── Gaps en tête — drama si serré ───────────────────────
   if (second) {
     const gapTop = (second.totalTime - leader.totalTime) / 1000;
-    if (gapTop < 0.3) {
-      lines.push(pick([
-        `***👀 ${second.team.emoji}${second.pilot.name} DANS LE DRS !!! ${gapTop.toFixed(3)}s — LA BOMBE VA EXPLOSER !!!***`,
-        `***🔥 ${gapTop.toFixed(3)}s !!! ${second.team.emoji}${second.pilot.name} colle aux roues de ${leader.team.emoji}${leader.pilot.name} — ÇA VA PASSER OU ÇA VA CASSER !!!***`,
-      ]));
-    } else if (gapTop < 1.0) {
-      lines.push(pick([
-        `***⚡ T${lap} — ${second.team.emoji}${second.pilot.name} est à **${gapTop.toFixed(3)}s** de ${leader.team.emoji}${leader.pilot.name}*** — la pression est maximale !`,
-        `😤 **${second.team.emoji}${second.pilot.name}** fond sur **${leader.team.emoji}${leader.pilot.name}** — ${gapTop.toFixed(3)}s seulement. Ça chauffait déjà, ça brûle maintenant.`,
-      ]));
-    } else if (gapTop < 2.5 && third) {
+    if (gapTop < 0.5) {
+      lines.push(`***👀 MOINS D'UNE DEMI-SECONDE !!! ${second.team.emoji}${second.pilot.name} EST DANS LE DRS DE ${leader.team.emoji}${leader.pilot.name} !!! RIEN N'EST JOUÉ !***`);
+      lines.push(`***🔥 ${second.team.emoji}${second.pilot.name} EST COLLÉ !!! ${gapTop.toFixed(3)}s — ÇA VA EXPLOSER !!!***`);
+    } else if (gapTop < 1.5) {
+      lines.push(`***⚡ Moins d'une seconde entre ${leader.team.emoji}${leader.pilot.name} et ${second.team.emoji}${second.pilot.name}*** — la pression est ***MAXIMALE*** en tête !`);
+      lines.push(`😤 ${second.team.emoji}**${second.pilot.name}** colle aux roues de ${leader.team.emoji}**${leader.pilot.name}** — ça va exploser d'une seconde à l'autre !`);
+    } else if (gapTop < 3 && third) {
       const gap3 = (third.totalTime - second.totalTime) / 1000;
-      if (gap3 < 1.5) lines.push(`🏎️ **Bagarre à trois !** ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tous dans le même mouchoir !`);
-      else lines.push(`🏎️ ${leader.team.emoji}**${leader.pilot.name}** devant — **${gapTop.toFixed(1)}s** sur ${second.team.emoji}**${second.pilot.name}**. La pression monte.`);
-    } else if (gapTop > 20) {
-      lines.push(pick([
-        `🏃 ${leader.team.emoji}**${leader.pilot.name}** file seul en tête — **${gapTop.toFixed(1)}s** d'avance. On dirait une autre course là-devant.`,
-        `💨 ${leader.team.emoji}**${leader.pilot.name}** maîtrise parfaitement son Grand Prix. **+${gapTop.toFixed(1)}s** — c'est impressionnant.`,
-      ]));
-    } else {
-      // Gap moyen — commentaire générique sur la course
-      lines.push(pick([
-        `🏎️ T${lap}/${totalLaps} — ${leader.team.emoji}**${leader.pilot.name}** en tête avec **+${gapTop.toFixed(1)}s** sur ${second.team.emoji}**${second.pilot.name}**. La course suit son cours.`,
-        `⏱ T${lap} — Ordre stable en tête. ${leader.team.emoji}**${leader.pilot.name}** administre son avantage.`,
-        `🎙 T${lap} — ${leader.team.emoji}**${leader.pilot.name}** reste au commandement. ${second.team.emoji}**${second.pilot.name}** surveille ses pneus.`,
-      ]));
-    }
-  } else {
-    lines.push(`🏁 ${leader.team.emoji}**${leader.pilot.name}** seul en piste — tous les adversaires ont abandonné !`);
-  }
-
-  // ── Commentaires sur les pneus / stratégie ───────────────
-  const hardPushers = ranked.filter(d => d.tireWear > 30 && d.pos <= 8);
-  if (hardPushers.length > 0) {
-    const p = hardPushers[0];
-    lines.push(pick([
-      `🔥 **${p.team.emoji}${p.pilot.name}** (P${p.pos}) est en train de griller ses ${TIRE[p.tireCompound].emoji}**${TIRE[p.tireCompound].label}** — il va devoir s'arrêter bientôt.`,
-      `⚠️ Usure critique sur la voiture de **${p.team.emoji}${p.pilot.name}** — les pneus ${TIRE[p.tireCompound].emoji} sont en limite. La stratégie va être décisive.`,
-    ]));
-  }
-
-  // ── Météo ────────────────────────────────────────────────
-  if (weather === 'WET')   lines.push(pick([
-    `🌧️ Pluie battante — la piste est traîtresse. Chaque virage demande une concentration maximale.`,
-    `🌧️ Les spray derrière les voitures réduisent la visibilité. Difficile de dépasser dans ces conditions.`,
-  ]));
-  if (weather === 'HOT')   lines.push(`🔥 La chaleur est intense — **${Math.floor(50 + Math.random()*10)}°C** en piste. Les pneus souffrent énormément aujourd'hui.`);
-  if (weather === 'INTER') lines.push(pick([
-    `🌦️ Piste mixte — ni sec, ni mouillé. La fenêtre des slicks pourrait s'ouvrir dans quelques tours.`,
-    `🌦️ Conditions délicates. Un pilote sur intermédiaires peut perdre des secondes par tour si la piste sèche.`,
-  ]));
-
-  // ── Étapes clés de la course ─────────────────────────────
-  if (pct > 0.24 && pct < 0.28) {
-    lines.push(`📊 **Premier quart de course** passé — les stratèges commencent à calculer les fenêtres de pit stop.`);
-  }
-  if (pct > 0.48 && pct < 0.52) {
-    lines.push(`⏱ **Mi-course !** T${lap}/${totalLaps} — qui va jouer la stratégie, qui va rester dehors ?`);
-  }
-  if (pct > 0.74 && pct < 0.78) {
-    lines.push(pick([
-      `🏁 **Dernier quart de course.** Les positions se cristallisent — ou pas. Tout peut encore arriver.`,
-      `🏁 Plus que ${totalLaps - lap} tours ! Les mécaniciens croisent les doigts. Les pilotes donnent tout.`,
-    ]));
-  }
-
-  // ── Battle dans le peloton ───────────────────────────────
-  for (let i = 1; i < Math.min(ranked.length, 12); i++) {
-    const behind = ranked[i];
-    const ahead  = ranked[i-1];
-    const gap = (behind.totalTime - ahead.totalTime) / 1000;
-    if (gap < 1.5 && gap > 0.3) {
-      lines.push(pick([
-        `👁 **Surveillance !** ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) est à **${gap.toFixed(3)}s** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). Ça fume derrière !`,
-        `🔭 **P${i} vs P${i+1} —** ${ahead.team.emoji}**${ahead.pilot.name}** sous pression de ${behind.team.emoji}**${behind.pilot.name}** · **+${gap.toFixed(3)}s** entre eux.`,
-      ]));
-      break;
+      if (gap3 < 2) lines.push(`🏎️ Bagarre à trois ! ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tout le monde dans le même peloton !`);
+    } else if (gapTop > 15) {
+      lines.push(`🏃 ${leader.team.emoji}**${leader.pilot.name}** file seul en tête — **${gapTop.toFixed(1)}s** d'avance. La course semble pliée...`);
     }
   }
 
-  // ── Style de circuit ────────────────────────────────────
-  if (gpStyle === 'urbain' && Math.random() < 0.25) {
-    lines.push(pick([
-      `🏙️ Sur ce circuit urbain, les murs sont partout — la concentration doit être totale.`,
-      `🏙️ Les virages à angle droit du tracé urbain rendent les dépassements très difficiles. La qualif' était cruciale.`,
-    ]));
-  }
-  if (gpStyle === 'rapide' && Math.random() < 0.25) {
-    lines.push(pick([
-      `💨 Circuit rapide — les voitures passent à plus de 300 km/h dans les lignes droites. Impressionnant.`,
-      `💨 À ces vitesses, le moindre écart de trajectoire se paie cash. La précision est reine.`,
-    ]));
+  if (weather === 'WET')   lines.push(`🌧️ La piste est toujours glissante — chaque virage est une loterie par ce temps.`);
+  if (weather === 'HOT')   lines.push(`🔥 La chaleur est intense — les pneus souffrent énormément.`);
+  if (weather === 'INTER') lines.push(`🌦️ Piste mixte délicate — la moindre erreur et c'est dans le mur.`);
+
+  if (pct > 0.45 && pct < 0.55) lines.push(`⏱ Mi-course franchie — les stratèges ont les yeux rivés sur les données. Qui va bouger ?`);
+  if (pct > 0.75 && second) {
+    const gap = (second.totalTime - leader.totalTime) / 1000;
+    if (gap < 5) lines.push(`***🏁 Dernier quart — ${leader.team.emoji}${leader.pilot.name} en tête mais ${second.team.emoji}${second.pilot.name} à ${gap.toFixed(1)}s... C'est pas encore joué !***`);
+    else         lines.push(`🏁 Dernier quart de course — les positions semblent figées. Il faudrait un miracle maintenant.`);
   }
 
-  if (!lines.length) {
-    // Fallback universel
-    lines.push(`🎙 T${lap}/${totalLaps} — La course continue. ${ranked[0]?.team.emoji}**${ranked[0]?.pilot.name}** reste en tête.`);
-  }
+  if (!lines.length) return null;
   return pick(lines);
-}
-
-// ─── Descriptions de DÉFENSE ────────────────────────────────
-function defenseDescription(defender, attacker, gpStyle) {
-  const a = `${attacker.team.emoji}**${attacker.pilot.name}**`;
-  const d = `${defender.team.emoji}**${defender.pilot.name}**`;
-  const defHigh = defender.pilot.defense > 75;
-  const freinage = defender.pilot.freinage > 70;
-  return pick([
-    `🛡️ ${d} ferme la porte — couvre l'intérieur, ${a} doit lever le pied !`,
-    `🛡️ ${d} résiste ! Freinage tardif${freinage ? ' au millimètre' : ''} — il repousse ${a} dehors. ${defHigh ? '**Défense magistrale.**' : ''}`,
-    `💪 ${a} tente le coup, mais ${d} couvre chaque virage. Pas de passage !`,
-    `🔒 ${d} en mode défensif — il change de trajectoire juste avant le point de corde. ${a} est bloqué !`,
-    `🏎️ Bras de fer entre ${a} et ${d} — le défenseur est cramponné à sa position. Magnifique lutte !`,
-  ]);
-}
-
-// ─── Descriptions de CONTRE-ATTAQUE (repasse après avoir été passé) ─────────
-function counterAttackDescription(attacker, defender, gpStyle) {
-  const a = `${attacker.team.emoji}**${attacker.pilot.name}**`;
-  const d = `${defender.team.emoji}**${defender.pilot.name}**`;
-  return pick([
-    `***⚡ CONTRE-ATTAQUE IMMÉDIATE !*** ${a} avait passé ${d}, mais ${d} retarde son freinage au maximum — ***il REPASSE !*** Incroyable !`,
-    `***🔄 IL REPREND SA PLACE !*** ${d} passe à l'intérieur du prochain virage — ${a} ne s'y attendait pas ! ***INVERSION !***`,
-    `***😤 PAS QUESTION DE LAISSER ÇA !*** ${d} répond dans la foulée — il force son chemin et reprend la position ! ***FANTASTIQUE !***`,
-    `***💥 RÉPONSE IMMÉDIATE !*** ${a} avait cru avoir fait le plus dur, mais ${d} est là — freinage tardif, corde parfaite. ***Il revient !***`,
-    `🔄 ${d} ne se laisse pas faire — il trouve l'ouverture au virage suivant et récupère sa position dans la foulée !`,
-  ]);
-}
-
-// ─── CONFÉRENCE DE PRESSE — Génération combinatoire ──────
-// Injecte les vraies données de course + saison pour un résultat unique à chaque fois
-async function generatePressConference(raceDoc, finalResults, season, allPilots, allTeams, allStandings, constrStandings) {
-  const totalRaces    = 24; // CIRCUITS.length
-  const gpNumber      = raceDoc.index + 1;
-  const seasonPhase   = gpNumber <= 6 ? 'début' : gpNumber <= 16 ? 'mi' : 'fin';
-  const seasonPhaseLabel = gpNumber <= 6 ? `début de saison (GP ${gpNumber}/24)` : gpNumber <= 16 ? `mi-saison (GP ${gpNumber}/24)` : `fin de saison (GP ${gpNumber}/24)`;
-  const styleLabels   = { urbain:'urbain', rapide:'rapide', technique:'technique', mixte:'mixte', endurance:'d\'endurance' };
-
-  const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
-  const pilotMap = new Map(allPilots.map(p => [String(p._id), p]));
-  const standMap = new Map(allStandings.map(s => [String(s.pilotId), s]));
-  const cStandMap= new Map(constrStandings.map(s => [String(s.teamId), s]));
-
-  // Classement constructeurs trié
-  const cStandSorted = [...constrStandings].sort((a,b) => b.points - a.points);
-
-  // Helpers
-  const champLeader = allStandings.sort((a,b) => b.points - a.points)[0];
-  const champLeaderPilot = champLeader ? pilotMap.get(String(champLeader.pilotId)) : null;
-
-  function pilotChampPos(pilotId) {
-    const sorted = [...allStandings].sort((a,b) => b.points - a.points);
-    const idx = sorted.findIndex(s => String(s.pilotId) === String(pilotId));
-    return idx >= 0 ? idx + 1 : null;
-  }
-  function teamConstrPos(teamId) {
-    const idx = cStandSorted.findIndex(s => String(s.teamId) === String(teamId));
-    return idx >= 0 ? idx + 1 : null;
-  }
-  function recentForm(pilotId) {
-    // Sera rempli après la mise à jour des GPRecords — on utilise les standings de la saison
-    const s = standMap.get(String(pilotId));
-    if (!s) return null;
-    return { wins: s.wins, podiums: s.podiums, dnfs: s.dnfs, points: s.points };
-  }
-
-  // Sélectionner les pilotes qui auront une conf de presse
-  // P1 toujours + 1-2 "story of the race" parmi : P2/P3, gros DNF depuis le top3, meilleure remontée, leader du champ. s'il n'est pas P1
-  const finishedSorted = finalResults.filter(r => !r.dnf).sort((a,b) => a.pos - b.pos);
-  const dnfTop3        = finalResults.filter(r => r.dnf && r.pos <= 5); // était haut avant abandon
-
-  const confSubjects = [];
-
-  // P1 obligatoire
-  if (finishedSorted[0]) confSubjects.push({ result: finishedSorted[0], angle: 'winner' });
-
-  // P2 si course serrée ou championship interest
-  if (finishedSorted[1]) {
-    const gap = finishedSorted[1].pos;
-    const champPos = pilotChampPos(String(finishedSorted[1].pilotId));
-    if (champPos && champPos <= 3) confSubjects.push({ result: finishedSorted[1], angle: 'podium_champ' });
-    else confSubjects.push({ result: finishedSorted[1], angle: 'podium' });
-  }
-
-  // Gros DNF dramatique
-  if (dnfTop3.length && confSubjects.length < 3) {
-    confSubjects.push({ result: dnfTop3[0], angle: 'dnf_drama' });
-  }
-
-  // Leader du championnat s'il n'est pas déjà dans la liste (s'il a fini P4+)
-  if (champLeaderPilot) {
-    const alreadyIn = confSubjects.some(s => String(s.result.pilotId) === String(champLeaderPilot._id));
-    if (!alreadyIn) {
-      const r = finalResults.find(r => String(r.pilotId) === String(champLeaderPilot._id));
-      if (r) confSubjects.push({ result: r, angle: 'champ_leader' });
-    }
-  }
-
-  // Générer les blocs de texte
-  const blocks = [];
-
-  for (const { result, angle } of confSubjects.slice(0, 3)) {
-    const pilot    = pilotMap.get(String(result.pilotId));
-    const team     = teamMap.get(String(result.teamId));
-    if (!pilot || !team) continue;
-
-    const stand    = standMap.get(String(pilot._id));
-    const champPos = pilotChampPos(String(pilot._id));
-    const cPos     = teamConstrPos(String(team._id));
-    const form     = recentForm(String(pilot._id));
-    const wins     = form?.wins || 0;
-    const podiums  = form?.podiums || 0;
-    const pts      = form?.points || 0;
-    const dnfs     = form?.dnfs || 0;
-
-    // Trouver le coéquipier
-    const teammate = allPilots.find(p =>
-      String(p.teamId) === String(team._id) &&
-      String(p._id) !== String(pilot._id)
-    );
-    const teammateResult = teammate ? finalResults.find(r => String(r.pilotId) === String(teammate._id)) : null;
-
-    // Trouver le rival
-    const rival = pilot.rivalId ? pilotMap.get(String(pilot.rivalId)) : null;
-    const rivalResult = rival ? finalResults.find(r => String(r.pilotId) === String(rival._id)) : null;
-
-    // Construire le contexte riche
-    const ctx = {
-      name       : pilot.name,
-      emoji      : team.emoji,
-      teamName   : team.name,
-      pos        : result.pos,
-      dnf        : result.dnf,
-      dnfReason  : result.dnfReason,
-      circuit    : raceDoc.circuit,
-      gpStyle    : raceDoc.gpStyle,
-      gpPhase    : seasonPhaseLabel,
-      wins, podiums, pts, dnfs,
-      champPos,
-      cPos,
-      champLeaderName : champLeaderPilot?.name,
-      champLeaderPts  : champLeader?.points || 0,
-      teammate   : teammate?.name,
-      teammatePos: teammateResult?.pos,
-      teammateDnf: teammateResult?.dnf,
-      rival      : rival?.name,
-      rivalPos   : rivalResult?.pos,
-      rivalDnf   : rivalResult?.dnf,
-      seasonPhase,
-    };
-
-    const block = buildPressBlock(ctx, angle);
-    if (block) blocks.push(block);
-  }
-
-  return blocks;
-}
-
-// ── Templates combinatoires de conf de presse ─────────────
-function buildPressBlock(ctx, angle) {
-  const { name, emoji, teamName, pos, dnf, dnfReason, circuit, gpStyle,
-          gpPhase, wins, podiums, pts, champPos, cPos,
-          champLeaderName, champLeaderPts, teammate, teammatePos,
-          rival, rivalPos, rivalDnf, seasonPhase } = ctx;
-
-  // Formule courte du bilan saison
-  const bilanStr = wins > 0
-    ? `${wins} victoire(s) et ${podiums} podium(s) cette saison`
-    : podiums > 0
-      ? `${podiums} podium(s) sans victoire encore cette saison`
-      : `une saison difficile jusqu'ici`;
-
-  // Situation au championnat
-  const champStr = champPos === 1
-    ? `en tête du championnat`
-    : champPos <= 3
-      ? `P${champPos} au championnat`
-      : champPos <= 8
-        ? `P${champPos} au général`
-        : `loin au championnat`;
-
-  // Pression de fin de saison
-  const endPressure = seasonPhase === 'fin' && champPos && champPos <= 4
-    ? pick([
-        `Avec ${24 - (parseInt(gpPhase) || 20)} GPs restants, chaque point compte.`,
-        `On est en fin de championnat — il n'y a plus de place pour l'erreur.`,
-        `Le titre se jouera dans les prochaines courses. On le sait tous.`,
-      ])
-    : '';
-
-  // Réaction coéquipier
-  const teammateStr = teammate && teammatePos
-    ? teammatePos < pos && !dnf
-      ? pick([
-          `Mon coéquipier ${teammate} était devant aujourd'hui — il faut l'accepter.`,
-          `${teammate} a été plus fort ce week-end. Je dois analyser pourquoi.`,
-          `On ne se rend pas service dans la même écurie. Ça mérite une discussion.`,
-        ])
-      : pos < (teammatePos || 99) && !dnf
-        ? pick([
-            `${teammate} était là aussi — mais j'avais le rythme aujourd'hui.`,
-            `Bonne course pour l'équipe dans l'ensemble. Moi devant ${teammate}, c'est bien.`,
-          ])
-        : ''
-    : '';
-
-  // Réaction rival
-  const rivalStr = rival && rivalPos
-    ? rivalDnf
-      ? pick([
-          `${rival} n'a pas terminé — ces choses arrivent. Je reste focus sur ma course.`,
-          `L'abandon de ${rival} ne change rien à mon approche. Je gère ma course.`,
-        ])
-      : rivalPos > pos
-        ? pick([
-            `${rival} était derrière moi aujourd'hui. C'est ce qu'on voulait.`,
-            `On a fait le travail face à ${rival} ce week-end.`,
-          ])
-        : pick([
-            `${rival} était devant — ça pique, mais il a été meilleur aujourd'hui.`,
-            `Pas satisfait de finir derrière ${rival}. On doit retravailler ça.`,
-          ])
-    : '';
-
-  // Style de circuit
-  const styleStr = {
-    urbain    : `Sur un circuit urbain comme ${circuit}, la moindre erreur se paye cash`,
-    rapide    : `Un circuit rapide comme ${circuit} révèle la vraie performance des voitures`,
-    technique : `${circuit} demande une précision absolue — c'est ce qu'on a apporté`,
-    mixte     : `${circuit} est un circuit équilibré, ça convient à notre package`,
-    endurance : `La gestion des pneus sur ${circuit} était la clé aujourd'hui`,
-  }[gpStyle] || `${circuit} était exigeant aujourd'hui`;
-
-  // Constructeurs
-  const constrStr = cPos === 1
-    ? `On reste en tête du championnat constructeurs — l'équipe fait un travail incroyable.`
-    : cPos && cPos <= 3
-      ? `On est P${cPos} chez les constructeurs — l'équipe se bat sur tous les fronts.`
-      : '';
-
-  // ── ANGLES ───────────────────────────────────────────────
-
-  if (angle === 'winner') {
-    const tones = [
-      // Dominant
-      () => {
-        const opener = pick([
-          `"${styleStr}. On a tout contrôlé aujourd'hui."`,
-          `"On a géré la course du début à la fin. La voiture était là, le rythme était là."`,
-          `"Depuis les qualifications, on savait qu'on avait le package. Il fallait l'exécuter."`,
-        ]);
-        const middle = wins >= 3
-          ? pick([
-              `"${wins} victoires en ${gpPhase}. On ne s'attendait pas à ça forcément, mais on le prend."`,
-              `"C'est notre ${wins}ème victoire cette saison. L'élan est là. ${endPressure}"`,
-            ])
-          : wins === 1
-            ? `"Première victoire de la saison — ça fait un bien fou. Maintenant on continue."`
-            : `"Belle victoire pour le moral. ${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. On avance."`;
-        const closer = champPos === 1
-          ? pick([
-              `"${champStr} — mais rien n'est joué. ${endPressure || 'On reste humbles.'}"`,
-              `"En tête du championnat, c'est là où on veut être. ${constrStr}"`,
-            ])
-          : pick([
-              `"On remonte au classement. P${champPos} maintenant — ${champLeaderName} est dans le viseur."`,
-              `"${champLeaderName} a toujours des points d'avance, mais on réduit. ${endPressure}"`,
-            ]);
-        return `${opener}\n${middle}\n${closer}${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
-      },
-      // Soulagement / humble
-      () => {
-        const opener = pick([
-          `"Honnêtement, ça n'était pas la course la plus simple. Mais on a tenu."`,
-          `"Il y a eu des moments de doute — mais l'équipe m'a donné un bon pit stop et j'ai pu gérer."`,
-          `"Je ne vais pas mentir, j'ai eu de la chance à un moment. Mais il faut la provoquer."`,
-        ]);
-        const middle = `"${styleStr}. Ça nous a bien convenu aujourd'hui."`;
-        const closer = champPos === 1
-          ? `"${champStr}. ${endPressure || 'On prend race par race.'}"${constrStr ? ' ' + constrStr : ''}`
-          : `"P${champPos} au championnat avec ${pts} points. ${endPressure || 'Il reste du boulot.'}"`
-        return `${opener}\n${middle}\n${closer}${rivalStr ? '\n*Sur ' + rival + ' :* "' + rivalStr.replace(/^[^"]*"?/, '').replace(/"$/, '') + '"' : ''}`;
-      },
-      // Technique / focus
-      () => {
-        const opener = pick([
-          `"Le travail de l'équipe cette semaine a été remarquable. On a trouvé le bon setup."`,
-          `"On avait identifié les points faibles depuis les essais. On a corrigé. Ça s'est vu en course."`,
-        ]);
-        const middle = seasonPhase === 'début'
-          ? `"En ${gpPhase}, chaque résultat construit quelque chose. Ce résultat confirme notre direction."`
-          : seasonPhase === 'fin'
-            ? `"En ${gpPhase}, une victoire vaut de l'or. ${endPressure}"`
-            : `"Mi-saison, on fait le point. ${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. La tendance est bonne."`;
-        const closer = `"${constrStr || 'L\'équipe mérite ce résultat.'} Prochain GP, même état d'esprit."`;
-        return `${opener}\n${middle}\n${closer}${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
-      },
-    ];
-    const quote = pick(tones)();
-    return `🎤 **${emoji} ${name} — P1, ${circuit}**\n${quote}`;
-  }
-
-  if (angle === 'podium' || angle === 'podium_champ') {
-    const tones = [
-      () => {
-        const opener = pos === 2
-          ? pick([
-              `"P2, c'est bien — mais P1 était l'objectif. On manquait un peu de rythme en fin de course."`,
-              `"Deuxième. La voiture était là, mais pas suffisamment pour inquiéter le leader."`,
-            ])
-          : pick([
-              `"Un podium, c'est toujours une bonne journée. Surtout vu le ${gpPhase}."`,
-              `"P3. On prend les points, on reste dans la course au championnat."`,
-            ]);
-        const middle = champPos && champPos <= 5
-          ? `"On est ${champStr} avec ${pts} points. ${endPressure || 'Le championnat est ouvert.'}"`
-          : `"${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. Un podium de plus dans la besace."`;
-        return `${opener}\n${middle}${rivalStr ? '\n*Sur ' + rival + ' :* "' + rivalStr.replace(/^.*?"/, '"') : ''}`;
-      },
-      () => {
-        const opener = champLeaderName && champPos && champPos <= 3
-          ? pick([
-              `"${champLeaderName} s'échappe un peu, mais rien n'est joué. ${endPressure || 'On reste là.'}"`,
-              `"Le gap avec ${champLeaderName} n'est pas catastrophique. On va le chercher."`,
-            ])
-          : `"P${pos} aujourd'hui. ${styleStr} — notre voiture a bien répondu."`;
-        const closer = constrStr || `"L'équipe a fait du bon travail ce week-end."`;
-        return `${opener}\n"${closer}"${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
-      },
-    ];
-    return `🎤 **${emoji} ${name} — P${pos}, ${circuit}**\n${pick(tones)()}`;
-  }
-
-  if (angle === 'dnf_drama') {
-    const dnfLabel = { CRASH:'l\'accident', MECHANICAL:'la panne mécanique', PUNCTURE:'la crevaison' }[dnfReason] || 'l\'abandon';
-    const tones = [
-      () => {
-        const opener = pick([
-          `"Je n'ai pas grand chose à dire sur ${dnfLabel}. Ces choses arrivent en course. Ça fait mal."`,
-          `"On était bien placés. ${dnfLabel.charAt(0).toUpperCase() + dnfLabel.slice(1)} a tout gâché. C'est cruel."`,
-          `"Ça fait partie du sport. Mais là, aujourd'hui, c'est dur à avaler."`,
-        ]);
-        const middle = champPos && champPos <= 6
-          ? `"On était ${champStr}. Là on perd des points précieux. ${endPressure || 'Il faut rebondir.'}"` 
-          : `"Il faut regarder devant. ${seasonPhase === 'fin' ? 'En fin de saison, chaque point perdu est difficile à récupérer.' : 'On a encore des courses pour se rattraper.'}"`;
-        const closer = pick([
-          `"Le week-end prochain, on revient. Plus fort."`,
-          `"L'équipe ne méritait pas ça. On se relèvera."`,
-          `"La course, c'est ça aussi. On encaisse et on repart."`,
-        ]);
-        return `${opener}\n${middle}\n"${closer}"`;
-      },
-    ];
-    return `🎤 **${emoji} ${name} — ❌ DNF, ${circuit}**\n${pick(tones)()}`;
-  }
-
-  if (angle === 'champ_leader') {
-    const tones = [
-      () => {
-        const opener = pos <= 10 && !dnf
-          ? pick([
-              `"P${pos} aujourd'hui. Pas parfait, mais on marque des points. C'est ça l'essentiel."`,
-              `"Ce n'est pas le résultat voulu, mais on reste ${champStr}. La régularité, c'est notre force."`,
-            ])
-          : dnf
-            ? `"Terrible journée. Mais on reste leaders. Ce n'est pas ce GP qui définit la saison."`
-            : `"P${pos}. On a vécu mieux, mais la situation au général reste correcte."`;
-        const closer = seasonPhase === 'fin'
-          ? `"${endPressure} On garde la tête froide."`
-          : `"En ${gpPhase}, on est ${champStr} avec ${pts} points. L'objectif reste le même."`;
-        return `${opener}\n${closer}`;
-      },
-    ];
-    return `🎤 **${emoji} ${name} — Leader du championnat (P${pos}), ${circuit}**\n${pick(tones)()}`;
-  }
-
-  return null;
-}
-
-// ─── MOTEUR DE NEWS — Tabloïd de paddock ─────────────────
-
-const NEWS_SOURCES = {
-  pitlane_insider  : { name: '🔥 PitLane Insider',    color: '#FF4444' },
-  paddock_whispers : { name: '🤫 Paddock Whispers',   color: '#9B59B6' },
-  pl_racing_news   : { name: '🗞️ PL Racing News',     color: '#2C3E50' },
-  f1_weekly        : { name: '📡 F1 Weekly',          color: '#2980B9' },
-};
-
-// Publier un article dans le channel de course
-async function publishNews(article, channel) {
-  if (!channel) return;
-  const src = NEWS_SOURCES[article.source];
-  const embed = new EmbedBuilder()
-    .setAuthor({ name: src.name })
-    .setTitle(article.headline)
-    .setColor(src.color)
-    .setDescription(article.body)
-    .setFooter({ text: `Saison ${article.seasonYear} · ${new Date(article.publishedAt).toLocaleDateString('fr-FR')}` });
-  try { await channel.send({ embeds: [embed] }); } catch(e) { console.error('News publish error:', e); }
-}
-
-// ── Générateurs par type ──────────────────────────────────
-
-function genRivalryArticle(pA, pB, teamA, teamB, contacts, circuit, seasonYear) {
-  const sources = ['pitlane_insider', 'paddock_whispers'];
-  const source  = pick(sources);
-
-  const headlines = [
-    `${pA.name} vs ${pB.name} : la guerre froide du paddock`,
-    `Encore un accrochage — ${pA.name} et ${pB.name} au bord du clash`,
-    `"Ça va finir mal" — la rivalité ${pA.name}/${pB.name} inquiète le paddock`,
-    `${teamA.emoji}${pA.name} et ${teamB.emoji}${pB.name} : la tension monte d'un cran`,
-    `La FIA surveille — ${contacts} incidents entre ${pA.name} et ${pB.name} cette saison`,
-  ];
-
-  const bodies = [
-    `${contacts} contacts en course cette saison entre les deux pilotes — le dernier en date à ${circuit} n'a pas arrangé les choses.\n\n` +
-    pick([
-      `Selon nos sources, ${pA.name} aurait demandé à la direction de course d'examiner les manœuvres de ${pB.name}. "Il prend trop de risques", aurait-il déclaré en privé.`,
-      `${pB.name} a refusé de commenter après la course. Ce silence en dit parfois plus long qu'un discours.`,
-      `Dans les couloirs du paddock, on murmure que les deux camps ne se saluent plus. Ambiance.`,
-    ]),
-
-    `À ${circuit}, la ligne entre racing et provocation a une nouvelle fois été franchie.\n\n` +
-    pick([
-      `"C'était délibéré ou stupide — dans les deux cas c'est inacceptable." Une source proche de ${teamA.name} n'a pas mâché ses mots.`,
-      `${pA.name} a regardé droit dans les yeux ${pB.name} lors de la pesée. Aucun mot échangé. Tout était dit.`,
-      `La FIA a officiellement "pris note" de l'incident. En langage FIA, ça veut dire qu'ils regardent de très près.`,
-    ]),
-
-    `${pA.name} et ${pB.name} partagent la piste depuis le début de saison. ${contacts} contacts plus tard, on se demande comment ça n'a pas encore explosé.\n\n` +
-    pick([
-      `Les équipes ont tenté de calmer le jeu en interne. Sans succès apparent.`,
-      `"Ils se respectent mais ne s'apprécient pas" — une formule qu'on entend souvent dans ce paddock.`,
-      `Le prochain GP va être à surveiller de très près. L'un des deux va craquer.`,
-    ]),
-  ];
-
-  return {
-    type: 'rivalry', source,
-    headline: pick(headlines),
-    body: pick(bodies),
-    pilotIds: [pA._id, pB._id],
-    teamIds: [teamA._id, teamB._id],
-    seasonYear,
-  };
-}
-
-function genTransferRumorArticle(pilot, currentTeam, targetTeam, seasonYear) {
-  const source = pick(['paddock_whispers', 'pitlane_insider']);
-
-  const headlines = [
-    `${pilot.name} chez ${targetTeam.emoji}${targetTeam.name} ? La rumeur enfle`,
-    `Transfert choc : ${targetTeam.name} viserait ${pilot.name}`,
-    `${pilot.name} sur le départ ? ${targetTeam.name} aux aguets`,
-    `"Des discussions ont eu lieu" — ${pilot.name} et ${targetTeam.name}, le feuilleton continue`,
-    `Exclusif : ${pilot.name} aurait rencontré des dirigeants de ${targetTeam.name}`,
-  ];
-
-  const bodies = [
-    `Selon nos informations, le nom de ${pilot.name} circule avec insistance dans l'entourage de ${targetTeam.emoji}${targetTeam.name}.\n\n` +
-    pick([
-      `Son équipe actuelle ${currentTeam?.emoji || ''}${currentTeam?.name || 'son écurie'} dément tout contact. Ce qui, dans ce milieu, veut souvent dire le contraire.`,
-      `"Aucune approche n'a été faite." C'est ce qu'on nous a répondu — la formule classique qui n'engage à rien.`,
-      `Les deux parties font profil bas. Mais les regards échangés dans le paddock parlent d'eux-mêmes.`,
-    ]),
-
-    `Un dîner discret. Des agents aperçus ensemble. Et soudain, le nom de ${pilot.name} revient dans toutes les conversations.\n\n` +
-    pick([
-      `${targetTeam.name} cherche à renforcer son line-up. ${pilot.name} coche beaucoup de cases.`,
-      `La question n'est peut-être pas de savoir si c'est vrai — mais si ${currentTeam?.name || 'son écurie actuelle'} serait prête à le laisser partir.`,
-      `Notre source : "Les discussions en sont à un stade très préliminaire. Mais elles existent."`,
-    ]),
-
-    `On ne prête qu'aux riches — et en ce moment, le nom de ${pilot.name} est sur toutes les lèvres.\n\n` +
-    pick([
-      `${targetTeam.emoji}${targetTeam.name} a les moyens de ses ambitions. ${pilot.name} a les ambitions de ses moyens. L'équation est simple.`,
-      `Rien d'officiel. Mais dans ce paddock, "rien d'officiel" est souvent le début de quelque chose.`,
-      `Paddock Whispers maintient ses informations. La balle est dans le camp des dirigeants.`,
-    ]),
-  ];
-
-  return {
-    type: 'transfer_rumor', source,
-    headline: pick(headlines),
-    body: pick(bodies),
-    pilotIds: [pilot._id],
-    teamIds: [targetTeam._id, ...(currentTeam ? [currentTeam._id] : [])],
-    seasonYear,
-  };
-}
-
-function genDramaArticle(pilotA, pilotB, teamA, teamB, seasonYear, context = {}) {
-  const source = pick(['pitlane_insider', 'paddock_whispers', 'pl_racing_news']);
-
-  const dramaTypes = [
-    // Clash verbal fictif
-    () => ({
-      headline: pick([
-        `${pilotA.name} lâche une pique — ${pilotB.name} visé ?`,
-        `Tension en conf de presse : ${pilotA.name} ne mâche pas ses mots`,
-        `"Certains pilotes devraient regarder leurs propres erreurs" — ${pilotA.name}`,
-      ]),
-      body:
-        `En conférence de presse, ${pilotA.name} n'a pas pu s'empêcher : ${pick([
-          `"Il y a des pilotes sur cette grille qui oublient les règles de base du respect en course."`,
-          `"Je préfère ne pas nommer qui, mais tout le monde sait de qui je parle."`,
-          `"Mon ingénieur m'a demandé de rester calme. J'essaie."`,
-        ])}\n\n` +
-        pick([
-          `Une pique à peine voilée vers ${teamB.emoji}${pilotB.name} ? L'intéressé n'a pas commenté — pour l'instant.`,
-          `${pilotB.name}, interrogé dans la foulée, a souri. "Je n'ai rien à ajouter." Ambiance.`,
-          `Le paddock a retenu son souffle. ${pilotB.name} a été prévenu de la déclaration — sa réaction sera à surveiller au prochain GP.`,
-        ]),
-    }),
-    // Guerre des chiffres / ego
-    () => ({
-      headline: pick([
-        `${pilotA.name} vs ${pilotB.name} : la bataille des egos`,
-        `Qui est le meilleur ? ${pilotA.name} et ${pilotB.name} ne sont pas d'accord`,
-        `${pilotA.name} : "Je mérite mieux que ça" — sous-entendu ?`,
-      ]),
-      body:
-        `${pick([
-          `${pilotA.name} estime ne pas être reconnu à sa juste valeur sur cette grille.`,
-          `"Je ne suis pas là pour finir derrière ${pilotB.name}. Ce n'est pas mon niveau." Des mots forts.`,
-          `Dans une interview accordée à nos confrères, ${pilotA.name} a laissé entendre que la hiérarchie actuelle ne reflétait pas la réalité des performances.`,
-        ])}\n\n` +
-        pick([
-          `${teamB.emoji}${pilotB.name} a été informé de ces déclarations. "Qu'il vienne me le dire en piste" aurait-il répondu selon nos sources.`,
-          `Le clan ${pilotB.name} reste serein. Les chiffres sont là — et pour l'instant, ils donnent raison à ${pilotB.name}.`,
-          `Le paddock observe. Quand deux pilotes de ce niveau s'accrochent verbalement, ça finit toujours par se régler en piste.`,
-        ]),
-    }),
-    // Drama ingénieur / équipe
-    () => ({
-      headline: pick([
-        `Tensions en interne chez ${teamA.emoji}${teamA.name}`,
-        `${pilotA.name} et son équipe sur la même longueur d'onde ? Pas si sûr`,
-        `La stratégie fait débat — ${pilotA.name} mécontent ?`,
-      ]),
-      body:
-        `${pick([
-          `Selon une source proche du garage, ${pilotA.name} et son ingénieur de course traversent une période de "friction" depuis quelques GP.`,
-          `Le choix stratégique du dernier GP n'aurait pas été du goût de ${pilotA.name}. En interne, des mots auraient été échangés.`,
-          `"Il y a des désaccords normaux dans toute équipe. Mais là, c'est un peu plus que ça." Une source qui souhaite rester anonyme.`,
-        ])}\n\n` +
-        pick([
-          `${teamA.name} dément toute tension. Classique.`,
-          `${pilotA.name} a souri en conférence de presse. Un peu trop peut-être.`,
-          `Reste à voir si ça se règle avant le prochain GP — ou si ça empire.`,
-        ]),
-    }),
-  ];
-
-  const chosen = pick(dramaTypes)();
-  return {
-    type: 'drama', source,
-    headline: chosen.headline,
-    body: chosen.body,
-    pilotIds: [pilotA._id, pilotB._id],
-    teamIds: [teamA._id, teamB._id],
-    seasonYear,
-  };
-}
-
-function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
-  const source = pick(['pitlane_insider', 'f1_weekly', 'pl_racing_news']);
-
-  const headlines = [
-    `${pilot.name} : et si c'était lui le grand nom de cette saison ?`,
-    `La révélation ${team.emoji}${team.name} : ${pilot.name} crève l'écran`,
-    `${pilot.name} en feu — le paddock commence à vraiment prendre note`,
-    `"On n'attendait pas ça" — ${pilot.name} déjoue tous les pronostics`,
-    `${wins > 1 ? wins + ' victoires' : podiums + ' podiums'} — ${pilot.name} n'est plus une surprise, c'est une menace`,
-  ];
-
-  const bodies = [
-    `${pick([
-      `Personne ne l'avait mis sur la liste des favoris en début de saison.`,
-      `En début de saison, peu de monde aurait parié sur ${pilot.name} pour jouer ce rôle.`,
-      `Les données de préparation de saison n'indiquaient pas ça. Et pourtant.`,
-    ])} ${wins > 0 ? `${wins} victoire(s) et ${podiums} podium(s) plus tard` : `${podiums} podium(s) plus tard`}, ${pilot.name} impose le respect.\n\n` +
-    pick([
-      `"Il a quelque chose de différent dans l'approche des GP. Une maturité qu'on ne voit pas souvent." Une voix du paddock.`,
-      `${team.emoji}${team.name} a clairement trouvé quelque chose. La question : est-ce durable ?`,
-      `P${champPos} au championnat. Si ça continue, les grandes écuries vont s'intéresser à lui de près.`,
-    ]),
-
-    `On cherche souvent les grands noms. Parfois, les grands noms viennent nous chercher.\n\n` +
-    `${pilot.name} est P${champPos} au championnat avec ${wins > 0 ? `${wins} victoire(s)` : `${podiums} podium(s)`} cette saison. ` +
-    pick([
-      `Son ingénieur est le premier à le dire : "Il repousse les limites à chaque sortie."`,
-      `Les données télémétrie ne mentent pas — il pousse la voiture dans des zones que peu osent explorer.`,
-      `Plusieurs membres du paddock ont discrètement demandé à en savoir plus sur lui. Signal fort.`,
-    ]),
-  ];
-
-  return {
-    type: 'hype', source,
-    headline: pick(headlines),
-    body: pick(bodies),
-    pilotIds: [pilot._id],
-    teamIds: [team._id],
-    seasonYear,
-  };
-}
-
-function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear) {
-  const source = pick(['pitlane_insider', 'pl_racing_news', 'paddock_whispers']);
-
-  const headlines = [
-    `${pilot.name} dans le dur — jusqu'où ?`,
-    `La spirale ${pilot.name} : accident de parcours ou signal d'alarme ?`,
-    `${team.emoji}${team.name} commence à s'interroger sur ${pilot.name}`,
-    `"Il faut que ça change" — ${pilot.name} sous pression`,
-    `${dnfs} abandons — ${pilot.name} traverse sa pire période`,
-  ];
-
-  const bodies = [
-    `${dnfs} abandons ${lastResults ? `et des résultats en dessous des attentes` : ''} — la série noire de ${pilot.name} commence à faire parler.\n\n` +
-    pick([
-      `En interne, on reste solidaire officiellement. Mais les questions existent.`,
-      `"Tout le monde traverse des creux. La différence c'est comment tu en sors." Message reçu ?`,
-      `${pilot.name} s'est entraîné en simulateur pendant 6 heures hier soir. La réponse sera en piste.`,
-    ]),
-
-    `Il y a quelques GP, ${pilot.name} semblait intouchable. Aujourd'hui, chaque course apporte son lot de mauvaises nouvelles.\n\n` +
-    pick([
-      `La pression commence à se faire sentir. ${team.emoji}${team.name} a des attentes — et pour l'instant, elles ne sont pas remplies.`,
-      `Selon une source interne : "On ne remet pas en question le pilote. On remet en question la dynamique actuelle."`,
-      `Des rumeurs de changement d'ingénieur de course ont commencé à circuler. Rien de confirmé.`,
-    ]),
-  ];
-
-  return {
-    type: 'form_crisis', source,
-    headline: pick(headlines),
-    body: pick(bodies),
-    pilotIds: [pilot._id],
-    teamIds: [team._id],
-    seasonYear,
-  };
-}
-
-function genTeammateDuelArticle(winner, loser, teamObj, winsW, winsL, seasonYear) {
-  const source = pick(['f1_weekly', 'pl_racing_news', 'pitlane_insider']);
-
-  const headlines = [
-    `${winner.name} écrase ${loser.name} en interne — le statut N°1 ne fait plus débat`,
-    `Duel interne ${teamObj.emoji}${teamObj.name} : ${winner.name} prend le dessus`,
-    `${loser.name} dans l'ombre de ${winner.name} — la situation devient inconfortable`,
-    `${winsW}–${winsL} : les chiffres parlent pour ${winner.name}`,
-  ];
-
-  const bodies = [
-    `${winsW}–${winsL} en duels directs cette saison. Les chiffres sont implacables : ${winner.name} domine ${loser.name} chez ${teamObj.emoji}${teamObj.name}.\n\n` +
-    pick([
-      `${loser.name} ne cache pas son inconfort : "Je sais ce que je dois améliorer. Je travaille."`,
-      `L'écurie continue d'afficher une égalité de traitement officielle. Mais dans les faits, la hiérarchie est claire.`,
-      `"La voiture numéro 1 a commencé à recevoir les mises à jour en priorité." Officiellement démenti, bien sûr.`,
-    ]),
-
-    `En début de saison, on parlait d'un duo équilibré chez ${teamObj.emoji}${teamObj.name}. Plusieurs GP plus tard, le tableau est différent.\n\n` +
-    `${winner.name} finit devant son coéquipier ${winsW} fois sur ${winsW + winsL} — ` +
-    pick([
-      `une domination que même les plus grands supporters de ${loser.name} ont du mal à relativiser.`,
-      `la tendance semble s'installer. La question : ${loser.name} va-t-il accepter ce rôle ?`,
-      `${loser.name} a demandé une réunion technique en interne. Pas de résultat pour l'instant.`,
-    ]),
-  ];
-
-  return {
-    type: 'teammate_duel', source,
-    headline: pick(headlines),
-    body: pick(bodies),
-    pilotIds: [winner._id, loser._id],
-    teamIds: [teamObj._id],
-    seasonYear,
-  };
-}
-
-function genScandalArticle(teams, pilots, seasonYear) {
-  const teamA = pick(teams), teamB = pick(teams.filter(t => String(t._id) !== String(teamA._id)));
-  if (!teamB) return null;
-  const source = pick(['paddock_whispers', 'pitlane_insider']);
-
-  const scandals = [
-    {
-      headline: `${teamA.emoji}${teamA.name} accusée de copie — l'enquête FIA ouverte`,
-      body:
-        `Une plainte formelle aurait été déposée par ${teamB.emoji}${teamB.name} contre ${teamA.emoji}${teamA.name} concernant une supposée "similarité suspecte" dans la conception de l'aileron avant.\n\n` +
-        pick([
-          `La FIA a confirmé avoir "pris note de la requête". Traduction : enquête préliminaire ouverte.`,
-          `${teamA.name} nie catégoriquement. "Nos conceptions sont le fruit d'un travail indépendant." Classique.`,
-          `Si la plainte aboutit, des points pourraient être retirés rétroactivement. Le paddock retient son souffle.`,
-        ]),
-    },
-    {
-      headline: `Carburant illégal ? Les rumeurs autour de ${teamA.emoji}${teamA.name}`,
-      body:
-        `Des mesures de telémétrie inhabituelles auraient attiré l'attention des commissaires lors du dernier GP.\n\n` +
-        pick([
-          `${teamA.name} parle d'"anomalie de capteur". D'autres parlent d'autre chose.`,
-          `La FIA n'a pas encore officiellement communiqué. Mais les prélèvements ont bien eu lieu.`,
-          `Si les tests s'avèrent positifs, on parlerait d'une disqualification rétroactive. Énorme.`,
-        ]),
-    },
-    {
-      headline: `Budget cap : ${teamA.emoji}${teamA.name} dans le viseur ?`,
-      body:
-        `Des questions commencent à se poser sur les dépenses de ${teamA.emoji}${teamA.name} cette saison.\n\n` +
-        pick([
-          `Plusieurs équipes auraient soulevé la question lors d'une réunion de la commission F1 PL. Sans résultat pour l'instant.`,
-          `"On respecte toutes les règles financières à la lettre." Le communiqué de ${teamA.name} est arrivé vite. Trop vite ?`,
-          `Si une infraction est confirmée, les sanctions vont de l'amende à la déduction de points constructeurs.`,
-        ]),
-    },
-  ];
-
-  const chosen = pick(scandals);
-  return {
-    type: 'scandal', source,
-    headline: chosen.headline,
-    body: chosen.body,
-    pilotIds: [],
-    teamIds: [teamA._id, teamB._id],
-    seasonYear,
-  };
-}
-
-function genDevVagueArticle(team, seasonYear) {
-  const source = pick(['f1_weekly', 'pl_racing_news']);
-
-  const headlines = [
-    `${team.emoji}${team.name} apporte des modifications discrètes — les chronos intriguent`,
-    `Développement silencieux chez ${team.emoji}${team.name} : quelque chose se prépare`,
-    `${team.name} : "On travaille" — mais sur quoi exactement ?`,
-    `Les essais libres de ${team.emoji}${team.name} ont fait hausser des sourcils`,
-  ];
-
-  const bodies = [
-    `Rien d'officiel — ${team.name} n'a communiqué sur aucune mise à jour majeure. Mais les observateurs attentifs ont noté des changements de configuration ce week-end.\n\n` +
-    pick([
-      `Les temps en essais libres suggèrent un gain en vitesse de pointe. Léger, mais réel.`,
-      `"On affine des détails aérodynamiques." C'est tout ce que le directeur technique a consenti à dire.`,
-      `Si ces gains se confirment en course, le rapport de force pourrait légèrement évoluer.`,
-    ]),
-
-    `${team.emoji}${team.name} a travaillé fort en usine ces dernières semaines. Les premiers signes arrivent en piste.\n\n` +
-    pick([
-      `Pas de révolution — mais une évolution cohérente qui pourrait faire la différence sur les prochains circuits.`,
-      `Les ingénieurs rivaux ont été vus observer attentivement la voiture au parc fermé. Signe que quelque chose a changé.`,
-      `"On ne commente pas le travail des autres." La réponse de ${pick(teams => team.name)} masque peut-être une certaine inquiétude.`,
-    ]),
-  ];
-
-  return {
-    type: 'dev_vague', source,
-    headline: pick(headlines),
-    body: pick(bodies),
-    pilotIds: [],
-    teamIds: [team._id],
-    seasonYear,
-  };
-}
-
-function genTitleFightArticle(leader, challenger, leaderTeam, challengerTeam, gap, gpLeft, seasonYear) {
-  const source = pick(['f1_weekly', 'pl_racing_news', 'pitlane_insider']);
-
-  const headlines = [
-    `${gap} points — le titre se joue maintenant`,
-    `${leader.name} vs ${challenger.name} : le duel pour l'histoire`,
-    `${gpLeft} GPs restants — tout est encore possible`,
-    `La pression monte : ${challenger.name} n'a plus le droit à l'erreur`,
-    `${leader.name} tient les rênes — mais ${challenger.name} n'abdique pas`,
-  ];
-
-  const bodies = [
-    `${gap} points séparent ${leaderTeam.emoji}${leader.name} de ${challengerTeam.emoji}${challenger.name} à ${gpLeft} GP(s) de la fin.\n\n` +
-    pick([
-      `La mathématique est cruelle : ${challenger.name} doit gagner et espérer. ${leader.name} doit gérer et ne pas craquer.`,
-      `"Je ne regarde pas le classement. Je cours pour gagner chaque GP." ${leader.name} a dit ça. Personne ne le croit vraiment.`,
-      `Deux styles opposés, deux approches opposées. Ce championnat ressemble à un test de caractère autant que de vitesse.`,
-    ]),
-
-    `Le titre ne se gagne pas — il se perd. Et les deux protagonistes le savent.\n\n` +
-    `${leaderTeam.emoji}${leader.name} en tête avec ${gap} points d'avance. ` +
-    pick([
-      `Confortable sur le papier. Pas si confortable dans la tête d'un pilote qui a tout à perdre.`,
-      `${challengerTeam.emoji}${challenger.name} a gagné les 2 derniers GP. La dynamique a changé — et tout le monde l'a senti.`,
-      `Les prochains circuits favorisent qui ? Les deux camps analysent. Le suspense est total.`,
-    ]),
-  ];
-
-  return {
-    type: 'title_fight', source,
-    headline: pick(headlines),
-    body: pick(bodies),
-    pilotIds: [leader._id, challenger._id],
-    teamIds: [leaderTeam._id, challengerTeam._id],
-    seasonYear,
-  };
-}
-
-// ── Orchestrateur post-GP ─────────────────────────────────
-async function generatePostRaceNews(race, finalResults, season, channel) {
-  const allPilots  = await Pilot.find({ teamId: { $ne: null } });
-  const allTeams   = await Team.find();
-  const standings  = await Standing.find({ seasonId: season._id }).sort({ points: -1 });
-  const totalRaces = await Race.countDocuments({ seasonId: season._id });
-  const doneRaces  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
-  const gpLeft     = totalRaces - doneRaces;
-
-  const pilotMap = new Map(allPilots.map(p => [String(p._id), p]));
-  const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
-
-  const articlesToPost = [];
-
-  // 1. RIVALITÉ — si contacts cette course
-  const rivalPairs = new Map();
-  for (const p of allPilots) {
-    if (!p.rivalId) continue;
-    const key = [String(p._id), String(p.rivalId)].sort().join('_');
-    if (!rivalPairs.has(key)) {
-      const pA = p, pB = pilotMap.get(String(p.rivalId));
-      if (pB && p.rivalContacts >= 2) {
-        rivalPairs.set(key, { pA, pB });
-      }
-    }
-  }
-  for (const { pA, pB } of rivalPairs.values()) {
-    const tA = teamMap.get(String(pA.teamId));
-    const tB = teamMap.get(String(pB.teamId));
-    if (tA && tB) {
-      articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year));
-    }
-  }
-
-  // 2. TITLE FIGHT — si écart < 30pts et > 2 GPs restants
-  if (standings.length >= 2 && gpLeft > 2) {
-    const s1 = standings[0], s2 = standings[1];
-    const gap = s1.points - s2.points;
-    if (gap <= 30 && gap >= 0) {
-      const p1 = pilotMap.get(String(s1.pilotId));
-      const p2 = pilotMap.get(String(s2.pilotId));
-      const t1 = p1 ? teamMap.get(String(p1.teamId)) : null;
-      const t2 = p2 ? teamMap.get(String(p2.teamId)) : null;
-      if (p1 && p2 && t1 && t2) {
-        articlesToPost.push(genTitleFightArticle(p1, p2, t1, t2, gap, gpLeft, season.year));
-      }
-    }
-  }
-
-  // 3. HYPE — pilote avec 2+ victoires ou 4+ podiums, P1-5 au champ
-  for (let i = 0; i < Math.min(standings.length, 5); i++) {
-    const s = standings[i];
-    const pilot = pilotMap.get(String(s.pilotId));
-    const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
-    if (pilot && team && (s.wins >= 2 || s.podiums >= 4)) {
-      if (Math.random() < 0.4) { // 40% de chance par GP pour ne pas spammer
-        articlesToPost.push(genHypeArticle(pilot, team, s.wins, s.podiums, season.year, i + 1));
-        break;
-      }
-    }
-  }
-
-  // 4. CRISE DE FORME — pilote avec 2+ DNFs et mauvaise position
-  for (const s of standings.slice(5)) {
-    const pilot = pilotMap.get(String(s.pilotId));
-    const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
-    if (pilot && team && s.dnfs >= 2 && Math.random() < 0.35) {
-      articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year));
-      break;
-    }
-  }
-
-  // 5. DUEL COÉQUIPIER — si écart ≥ 4 duels
-  const processed = new Set();
-  for (const p of allPilots) {
-    const tid = String(p.teamId);
-    if (processed.has(tid)) continue;
-    const teammates = allPilots.filter(x => String(x.teamId) === tid);
-    if (teammates.length < 2) continue;
-    processed.add(tid);
-    const [a, b] = teammates;
-    const wA = a.teammateDuelWins || 0, wB = b.teammateDuelWins || 0;
-    if (Math.abs(wA - wB) >= 4 && Math.random() < 0.3) {
-      const team = teamMap.get(tid);
-      if (!team) continue;
-      const winner = wA > wB ? a : b, loser = wA > wB ? b : a;
-      articlesToPost.push(genTeammateDuelArticle(winner, loser, team, Math.max(wA, wB), Math.min(wA, wB), season.year));
-    }
-  }
-
-  // Limiter à 3 articles max par GP pour ne pas noyer le channel
-  const toPost = articlesToPost.slice(0, 3);
-
-  for (const articleData of toPost) {
-    const article = await NewsArticle.create({ ...articleData, raceId: race._id, triggered: 'post_race', publishedAt: new Date() });
-    await sleep(3000);
-    await publishNews(article, channel);
-  }
-}
-
-// ── Job planifié — gossip toutes les 36-48h ───────────────
-async function runScheduledNews(discordClient) {
-  const channel = RACE_CHANNEL ? discordClient.channels.cache.get(RACE_CHANNEL) : null;
-  if (!channel) return;
-
-  const season = await getActiveSeason();
-  if (!season) return;
-
-  const allPilots = await Pilot.find({ teamId: { $ne: null } });
-  const allTeams  = await Team.find();
-  if (!allPilots.length || !allTeams.length) return;
-
-  const teamMap = new Map(allTeams.map(t => [String(t._id), t]));
-
-  // Choisir un type au hasard parmi : drama, transfer_rumor, dev_vague, scandal
-  const roll = Math.random();
-  let articleData = null;
-
-  if (roll < 0.3) {
-    // DRAMA — deux pilotes random de teams différentes
-    const pA = pick(allPilots);
-    const others = allPilots.filter(p => String(p.teamId) !== String(pA.teamId));
-    const pB = others.length ? pick(others) : null;
-    if (pB) {
-      const tA = teamMap.get(String(pA.teamId));
-      const tB = teamMap.get(String(pB.teamId));
-      if (tA && tB) articleData = genDramaArticle(pA, pB, tA, tB, season.year);
-    }
-  } else if (roll < 0.6) {
-    // RUMEUR TRANSFERT — pilote random, équipe cible random (différente)
-    const pilot = pick(allPilots);
-    const currentTeam = teamMap.get(String(pilot.teamId));
-    const otherTeams  = allTeams.filter(t => String(t._id) !== String(pilot.teamId));
-    const targetTeam  = otherTeams.length ? pick(otherTeams) : null;
-    if (targetTeam) articleData = genTransferRumorArticle(pilot, currentTeam, targetTeam, season.year);
-  } else if (roll < 0.85) {
-    // DEV VAGUE — équipe random
-    const team = pick(allTeams);
-    articleData = genDevVagueArticle(team, season.year);
-  } else {
-    // SCANDALE — deux équipes random
-    if (allTeams.length >= 2) articleData = genScandalArticle(allTeams, allPilots, season.year);
-  }
-
-  if (articleData) {
-    const article = await NewsArticle.create({ ...articleData, triggered: 'scheduled', publishedAt: new Date() });
-    await publishNews(article, channel);
-  }
 }
 
 // ─── SIMULATION COURSE COMPLÈTE ───────────────────────────
@@ -2256,28 +838,21 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   }).filter(Boolean);
 
   let scState          = { state: 'NONE', lapsLeft: 0 };
-  let scCooldown       = 0;
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
-  // Charger le record actuel du circuit pour détecter si battu
-  const existingCircuitRecord = await CircuitRecord.findOne({ circuit: race.circuit });
-  const raceCollisions = [];
-  // battleMap : clé = "idA_idB" (ordre croissant) → { lapsClose, lastPasser, lastPasserLap }
-  // Suit les duels persistants entre deux pilotes proches pour générer des contre-attaques
-  const battleMap = new Map();
 
   const send = async (msg) => {
     if (!channel) return;
     // Discord limit: 2000 chars per message
     if (msg.length > 1950) msg = msg.slice(0, 1947) + '…';
     try { await channel.send(msg); } catch(e) { console.error('send error:', e.message); }
-    await sleep(5500);
+    await sleep(2500);
   };
 
   const sendEmbed = async (embed) => {
     if (!channel) return;
     try { await channel.send({ embeds: [embed] }); } catch(e) {}
-    await sleep(5500);
+    await sleep(2500);
   };
 
   // ══════════════════════════════════════════════════════════
@@ -2314,8 +889,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   );
   await sleep(4000);
   await send(`🟢⚫ **EXTINCTION DES FEUX — C'EST PARTI !!** 🏁`);
-  const startGif = pickGif('race_start');
-  if (startGif && channel) { try { await channel.send(startGif); } catch(e) {} await sleep(2000); }
 
   // ══════════════════════════════════════════════════════════
   // BOUCLE PRINCIPALE
@@ -2389,18 +962,15 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         if (!d || !ahead) continue;
         const reactDiff = d.pilot.reactions - ahead.pilot.reactions;
         if (reactDiff > 12 && Math.random() > 0.52) {
-          // Swap des objets dans le tableau
           [drivers[i], drivers[i - 1]] = [drivers[i - 1], drivers[i]];
-          // Après le swap : drivers[i-1] est l'ancien d (qui monte), drivers[i] est l'ancien ahead (qui descend)
-          drivers[i - 1].pos = i;      // d monte à la position i (1-based)
-          drivers[i].pos     = i + 1;  // ahead descend à i+1
+          drivers[i].pos     = i + 1;
+          drivers[i - 1].pos = i;
           startSwaps.push(`${d.team.emoji}**${d.pilot.name}** P${i+1}→**P${i}** dépasse ${ahead.team.emoji}**${ahead.pilot.name}**`);
         }
       }
-      // Recalcul propre des positions selon l'ordre final du tableau
       drivers.sort((a,b) => a.pos - b.pos).forEach((d,i) => d.pos = i+1);
       alive.forEach(d => { d.lastPos = d.pos; });
-      const startLeader = drivers.find(d => d.pos === 1) || drivers[0];
+      const startLeader = drivers[0];
       if (startSwaps.length) {
         events.push({ priority: 9, text:
           `🚦 **BAGARRE AU PREMIER VIRAGE !**\n${startSwaps.slice(0,4).map(s => `  › ${s}`).join('\n')}\n  › ${startLeader.team.emoji}**${startLeader.pilot.name}** mène à l'issue du premier tour !`
@@ -2460,8 +1030,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           driver.dnfReason = 'CRASH';
           lapDnfs.push({ driver, reason: 'CRASH' });
           lapIncidents.push({ type: 'CRASH' });
-          // Tracker rivalité : mémoriser la paire de pilotes impliqués
-          raceCollisions.push({ attackerId: String(driver.pilot._id), victimId: String(nearest.pilot._id) });
 
           if (victimDnf) {
             nearest.dnf       = true;
@@ -2474,7 +1042,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
             nearest.totalTime += damage;
             incidentText = collisionDescription(driver, nearest, lap, true, false, damage);
           }
-          if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('crash_collision') });
         } else {
           // Crash solo
           driver.dnf       = true;
@@ -2483,7 +1050,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           lapDnfs.push({ driver, reason: 'CRASH' });
           lapIncidents.push({ type: 'CRASH' });
           incidentText = crashSoloDescription(driver, lap, gpStyle);
-          if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('crash_solo') });
         }
 
       } else if (incident.type === 'MECHANICAL') {
@@ -2509,7 +1075,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           `⚙️ **T${lap}** — Problème de transmission pour ${nm} (P${pos}) — il ne passe plus les vitesses. ❌ **DNF.**`,
         ];
         incidentText = pick(mechFlavors);
-        if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('mechanical') });
 
       } else if (incident.type === 'PUNCTURE') {
         driver.dnf       = true;
@@ -2532,10 +1097,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           `🫧 **T${lap}** — Délamination sur la voiture de ${np} (P${posp}) — c'est fini. ❌ **DNF.**`,
         ];
         incidentText = pick(puncFlavors);
-        if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('puncture') });
       }
 
-      // (le push générique est maintenant fait dans chaque branche ci-dessus)
+      if (incidentText) events.push({ priority: 8, text: incidentText });
     }
 
     // ── Safety Car (APRÈS les incidents — on peut citer la cause) ──
@@ -2543,99 +1107,53 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     scState = resolveSafetyCar(scState, lapIncidents);
     const scActive = scState.state !== 'NONE';
 
-    // ── Bunching SC : au DÉCLENCHEMENT, resserrer les écarts ──
     if (scState.state !== 'NONE' && prevScState === 'NONE') {
-      const aliveSC = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
-      if (aliveSC.length > 1) {
-        const leaderTime = aliveSC[0].totalTime;
-        if (scState.state === 'SC') {
-          // SC : tout le monde à ~0.5s max entre chaque voiture
-          for (let i = 1; i < aliveSC.length; i++) {
-            const maxGap = i * 500; // 0.5s par position
-            aliveSC[i].totalTime = leaderTime + maxGap;
-          }
-        } else {
-          // VSC : réduction de 70% des écarts
-          for (let i = 1; i < aliveSC.length; i++) {
-            const currentGap = aliveSC[i].totalTime - leaderTime;
-            aliveSC[i].totalTime = leaderTime + Math.round(currentGap * 0.3);
-          }
-        }
-        aliveSC.forEach((d, i) => { d.pos = i + 1; d.lastPos = i + 1; });
-      }
-
-      // Annonce SC/VSC
-      const cause    = lapDnfs.length > 0 ? lapDnfs[lapDnfs.length - 1] : null;
-      const causeStr = cause
-        ? ` suite à l'abandon de **${cause.driver.pilot.name}**`
+      // Trouver la cause probable (dernier DNF du tour)
+      const cause     = lapDnfs.length > 0 ? lapDnfs[lapDnfs.length - 1] : null;
+      const causeStr  = cause
+        ? ` à cause de **l'abandon de ${cause.driver.pilot.name}**`
         : ` suite à un incident sur la piste`;
 
       if (scState.state === 'SC') {
-        events.push({ priority: 9, gif: pickGif('safety_car'), text: pick([
-          `🚨 **SAFETY CAR DÉPLOYÉ !**${causeStr}\nLe peloton se reforme — les écarts sont effacés. Tout est à refaire !`,
-          `🚨 **SC IN !**${causeStr}. La voiture de sécurité prend la tête — qui va rentrer aux stands pour gratter une stratégie ?`,
-          `🚨 **SAFETY CAR !** T${lap}${causeStr}. Les commissaires nettoient la piste — ça va redonner du piment à cette course !`,
-        ]) });
+        const scFlavors = [
+          `🚨 **SAFETY CAR DÉPLOYÉ AU TOUR ${lap}**${causeStr} !\nLe peloton se reforme — tous les écarts sont effacés. C'est reparti de zéro !`,
+          `🚨 **SAFETY CAR !** Tour ${lap}${causeStr}. La direction de course intervient — la voiture de sécurité prend la tête. Qui va rentrer aux stands ?`,
+          `🚨 **SC IN !** Tour ${lap}${causeStr}. Les commissaires nettoient la piste. Le peloton se compacte — ça va redonner du piment à cette course !`,
+        ];
+        events.push({ priority: 10, text: pick(scFlavors) });
       } else {
-        events.push({ priority: 9, gif: pickGif('vsc'), text: pick([
-          `🟡 **VIRTUAL SAFETY CAR**${causeStr}. Tout le monde maintient le delta — la course se met en pause.`,
-          `🟡 **VSC !**${causeStr}. Les pilotes roulent au ralenti, les gaps se resserrent. La course reprendra bientôt.`,
-        ]) });
+        const vscFlavors = [
+          `🟡 **VIRTUAL SAFETY CAR** déployé au tour ${lap}${causeStr}. Tout le monde roule au ralenti — pas de double yellow dans les stands.`,
+          `🟡 **VSC !** Tour ${lap}${causeStr}. Les pilotes maintiennent le delta. La course se met en pause le temps de sécuriser la zone.`,
+        ];
+        events.push({ priority: 10, text: pick(vscFlavors) });
       }
     }
 
-    // ── Fin de SC/VSC : green flag ────────────────────────────
     if (prevScState !== 'NONE' && scState.state === 'NONE') {
-      scCooldown = 6; // 6 tours de variance réduite après restart
-      const rankedRestart = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
-      const top3str = rankedRestart.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
-      events.push({ priority: 10, gif: pickGif('green_flag'), text: pick([
-        `🟢 **GREEN FLAG !** T${lap} — La course reprend ! ${top3str}\nLes gaps ont été effacés — tout le monde est dans le même mouchoir. Ça va exploser !`,
-        `🟢 **FEU VERT !** T${lap} — On repart ! ${top3str}\nLe peloton est groupé — qui va attaquer en premier ?`,
-      ]) });
+      const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+      const top3   = ranked.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
+      const gfFlavors = [
+        `🟢 **GREEN FLAG !** Tour ${lap} — La course est relancée ! ${top3}\nLes stratèges se grattent la tête — qui va attaquer en premier ?`,
+        `🟢 **FEU VERT !** Tour ${lap} — On repart ! Classement : ${top3}\nLa course va reprendre de plus belle — tensions garanties !`,
+      ];
+      events.push({ priority: 10, text: pick(gfFlavors) });
     }
 
     // ── Calcul des temps au tour ─────────────────────────────
-    if (scCooldown > 0) scCooldown--;
-
     for (const driver of drivers.filter(d => !d.dnf)) {
-      if (scActive) {
-        // ── SOUS SC/VSC : on n'utilise PAS calcLapTime normal ──
-        // Tous les pilotes roulent à la même vitesse (neutre), les écarts restent figés.
-        // On ajoute juste un temps de tour SC identique pour tous (légère variance ~50ms max).
-        const scLapBase = scState.state === 'SC' ? 115_000 : 100_000; // SC = ~1:55, VSC = ~1:40
-        driver.totalTime += scLapBase + randInt(-50, 50);
-        // Pas d'usure pneus sous SC (quasi aucune)
-        driver.tireAge += 1;
-      } else {
-        // ── Hors SC : calcul normal ──
-        let lt = calcLapTime(
-          driver.pilot, driver.team,
-          driver.tireCompound, driver.tireWear,
-          weather, trackEvo, gpStyle, driver.pos,
-          scCooldown
-        );
-        driver.totalTime += lt;
-        driver.tireWear  += 1;
-        driver.tireAge   += 1;
-        if (lt < driver.fastestLap) driver.fastestLap = lt;
-        if (lt < fastestLapMs) { fastestLapMs = lt; fastestLapHolder = driver; }
-      }
-    }
+      let lt = calcLapTime(
+        driver.pilot, driver.team,
+        driver.tireCompound, driver.tireWear,
+        weather, trackEvo, gpStyle, driver.pos
+      );
+      if (scActive) lt = Math.round(lt * (scState.state === 'SC' ? 1.35 : 1.18));
 
-    // ── Après chaque tour de SC, re-serrer les écarts (drift résiduel) ──
-    // Empêche les gap de diverger à nouveau pendant le SC à cause des micro-variances
-    if (scActive) {
-      const aliveMid = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
-      if (aliveMid.length > 1) {
-        const lt0 = aliveMid[0].totalTime;
-        const maxGapPerPos = scState.state === 'SC' ? 600 : 2000; // max 0.6s/pos sous SC
-        for (let i = 1; i < aliveMid.length; i++) {
-          const maxAllowed = lt0 + i * maxGapPerPos;
-          if (aliveMid[i].totalTime > maxAllowed) aliveMid[i].totalTime = maxAllowed;
-        }
-        aliveMid.forEach((d, i) => { d.pos = i + 1; });
-      }
+      driver.totalTime += lt;
+      driver.tireWear  += 1;
+      driver.tireAge   += 1;
+      if (lt < driver.fastestLap) driver.fastestLap = lt;
+      if (lt < fastestLapMs) { fastestLapMs = lt; fastestLapHolder = driver; }
     }
 
     // ── Pit stops ────────────────────────────────────────────
@@ -2645,19 +1163,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     for (const driver of aliveNow) {
       const myIdx    = aliveNow.findIndex(d => String(d.pilot._id) === String(driver.pilot._id));
       const gapAhead = myIdx > 0 ? driver.totalTime - aliveNow[myIdx - 1].totalTime : null;
+      const { pit, reason } = shouldPit(driver, lapsRemaining, gapAhead);
 
-      // Sous SC : pas d'undercut possible, mais on laisse les pits normaux (usure)
-      // On force reason à 'tires_worn' pour ne pas déclencher d'undercut sous SC
-      const { pit, reason: rawReason } = shouldPit(driver, lapsRemaining, gapAhead);
-      const reason = (scActive && rawReason === 'undercut') ? null : rawReason;
-      const doPit  = pit && reason !== null;
-
-      if (doPit && driver.pitStops < 3 && lapsRemaining > 5) {
+      if (pit && driver.pitStops < 3 && lapsRemaining > 5) {
         const posIn      = driver.pos;
         const oldTire    = driver.tireCompound;
         const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds);
-        // Sous SC : arrêt plus rapide (pas de trafic), et perte de position moindre
-        const pitTime    = scActive ? randInt(19_000, 21_000) : randInt(19_000, 24_000);
+        const pitTime    = randInt(19_000, 24_000);
 
         driver.totalTime   += pitTime;
         driver.tireCompound = newCompound;
@@ -2671,155 +1183,85 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         const posOut = driver.pos;
         const pitDur = (pitTime / 1000).toFixed(1);
 
-        const scPitTag = scActive ? ' 🚨 *sous Safety Car*' : '';
         const pitFlavors = reason === 'undercut' ? [
           `🔧 **T${lap} — UNDERCUT !** ${driver.team.emoji}**${driver.pilot.name}** plonge aux stands depuis **P${posIn}** — ${TIRE[oldTire].emoji} → ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** — arrêt de **${pitDur}s** — ressort **P${posOut}**. La stratégie va-t-elle payer ?`,
           `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** tente l'undercut depuis **P${posIn}** ! Chaussage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s — ressort **P${posOut}**. L'équipe joue le tout pour le tout.`,
         ] : [
-          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${TIRE[oldTire].emoji} en fin de vie. Passage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort **P${posOut}**.`,
-          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag} — ${TIRE[oldTire].emoji} cramés. L'équipe boulonne les ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. **P${posOut}** à la sortie du pitlane.`,
+          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}** — pneus ${TIRE[oldTire].emoji} en fin de vie. Passage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort **P${posOut}**.`,
+          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn}) — ${TIRE[oldTire].emoji} cramés. L'équipe boulonne les ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. **P${posOut}** à la sortie du pitlane.`,
         ];
-        events.push({ priority: 7, gif: pickGif('pit_stop'), text: pick(pitFlavors) });
+        events.push({ priority: 7, text: pick(pitFlavors) });
       }
     }
 
-    // ── Reclassement final du tour ────────────────────────────
+    // ── Reclassement ─────────────────────────────────────────
     drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
     const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
 
-    // ── Mise à jour du battleMap ──────────────────────────────
-    // Pour chaque paire de pilotes adjacents distants de < 2s, on incrémente lapsClose
-    if (!scActive) {
-      for (let i = 0; i < ranked.length - 1; i++) {
-        const ahead  = ranked[i];
-        const behind = ranked[i + 1];
-        const gap = behind.totalTime - ahead.totalTime;
-        const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
-        if (gap < 2000) {
-          const existing = battleMap.get(bkey) || { lapsClose: 0, lastPasser: null, lastPasserLap: -99 };
-          battleMap.set(bkey, { ...existing, lapsClose: existing.lapsClose + 1 });
-        } else {
-          // Trop loin → reset
-          battleMap.delete(bkey);
-        }
-      }
-    }
-
-    // ── Dépassements & Batailles ──────────────────────────────
-    // Règles :
-    // 1. Jamais sous SC/VSC
-    // 2. Pas tour de restart
-    // 3. Positions adjacentes AVANT le tour (driver.lastPos = driver.pos + 1)
-    // 4. Gap pré-tour < 3s
-    // 5. Ni attaquant ni défenseur n'ont pité
-    // 6. Contre-attaque possible si le pilote vient d'être passé au tour précédent
-    const justRestarted = prevScState !== 'NONE' && scState.state === 'NONE';
-
+    // ── Dépassements ─────────────────────────────────────────
+    // Un dépassement en piste ne peut se produire que si les deux pilotes
+    // étaient PROCHES avant ce tour (gap pré-tour < 4s). Sinon c'est un
+    // artefact de simulation (pit mal classifié, écart trop grand).
     for (const driver of ranked) {
-      if (scActive) continue;
-      if (justRestarted) continue;
+      if (driver.pos >= driver.lastPos) continue;          // pas progressé
+      if (driver.pittedThisLap) continue;                  // position due au pit
+      if (scActive) continue;                              // pas pendant SC
       if (lap <= 1) continue;
-      if (driver.pittedThisLap) continue;
 
-      const movedUp   = driver.pos < driver.lastPos;
-      const movedDown = driver.pos > driver.lastPos;
+      // Trouver le pilote "passé" : celui qui occupait driver.lastPos
+      // et qui n'a pas lui-même pité
+      const passed = ranked.find(d =>
+        d.pos === driver.lastPos &&
+        !d.pittedThisLap &&
+        String(d.pilot._id) !== String(driver.pilot._id)
+      );
+      if (!passed) continue;
 
-      // ── Dépassement (le pilote a gagné UNE place) ──────────
-      if (movedUp && driver.lastPos === driver.pos + 1) {
-        // Chercher le pilote qui était à cette position et qui n'a pas pité
-        const passed = ranked.find(d =>
-          d.pos === driver.lastPos &&
-          !d.pittedThisLap &&
-          String(d.pilot._id) !== String(driver.pilot._id)
-        );
-        if (!passed) continue;
-        // Le pilote passé doit avoir reculé : sa lastPos doit être inférieure à sa pos actuelle
-        // On est plus tolérant ici : on vérifie juste qu'il n'a pas pité et qu'il a reculé
-        if (passed.pos <= passed.lastPos) continue; // il n'a pas reculé → pas un vrai dépassement
+      // Vérifier que le gap PRÉ-tour entre les deux était réaliste
+      // pour un vrai dépassement en piste (max ~4 secondes)
+      const preLapDriver = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
+      const preLapPassed = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
+      const preLapGapMs  = Math.abs(preLapPassed - preLapDriver);
+      if (preLapGapMs > 4000) continue; // trop loin l'un de l'autre — pas un vrai dépassement
 
-        // Gap pré-tour
-        const preLapD = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
-        const preLapP = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
-        if (Math.abs(preLapP - preLapD) > 3000) continue;
+      // Gap APRÈS le tour (écart résultant)
+      const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
+      const gapStr    = postGapMs < 1000
+        ? `${postGapMs}ms sur ${passed.pilot.name}`
+        : `+${(postGapMs / 1000).toFixed(3)}s sur ${passed.pilot.name}`;
 
-        const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
-        const gapStr    = postGapMs < 1000 ? `${postGapMs}ms` : `${(postGapMs/1000).toFixed(3)}s`;
-        const gapLeader = driver.pos > 1 ? ` · ${((driver.totalTime - ranked[0].totalTime)/1000).toFixed(3)}s du leader` : '';
-        const drsTag    = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
-        const areRivals = (
-          (driver.pilot.rivalId && String(driver.pilot.rivalId) === String(passed.pilot._id)) ||
-          (passed.pilot.rivalId && String(passed.pilot.rivalId) === String(driver.pilot._id))
-        );
-        const rivalTag = areRivals ? `\n⚔️ *Rivalité déclarée — ce dépassement a une saveur particulière !*` : '';
+      const gapOnLeader = driver.pos > 1
+        ? ` · ${((driver.totalTime - ranked[0].totalTime) / 1000).toFixed(3)}s du leader`
+        : '';
 
-        // Vérifier si c'est une contre-attaque
-        const bkey = [String(driver.pilot._id), String(passed.pilot._id)].sort().join('_');
-        const battle = battleMap.get(bkey);
-        const isCounterAttack = battle &&
-          battle.lastPasser === String(passed.pilot._id) &&
-          (lap - battle.lastPasserLap) <= 2;
+      const drsTag  = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
+      const howDesc = overtakeDescription(driver, passed, gpStyle);
 
-        // Mettre à jour qui vient de passer
-        const updatedBattle = battle
-          ? { ...battle, lastPasser: String(driver.pilot._id), lastPasserLap: lap }
-          : { lapsClose: 1, lastPasser: String(driver.pilot._id), lastPasserLap: lap };
-        battleMap.set(bkey, updatedBattle);
+      const ovNewPos  = driver.pos;
+      const ovLostPos = passed.pos;
+      const ovForLead = ovNewPos === 1;
+      const ovIsTop3  = ovNewPos <= 3 || ovLostPos <= 3;
+      const ovHeader  = ovForLead
+        ? `***🏆 T${lap} — CHANGEMENT EN TÊTE !!!***${drsTag}`
+        : ovIsTop3
+          ? `***⚔️ T${lap} — DÉPASSEMENT DANS LE TOP 3 !***${drsTag}`
+          : `⚔️ **T${lap} — DÉPASSEMENT !** P${driver.lastPos} → **P${driver.pos}**${drsTag}`;
 
-        const ovNewPos  = driver.pos;
-        const ovLostPos = passed.pos;
-        const ovForLead = ovNewPos === 1;
-        const ovIsTop3  = ovNewPos <= 3 || ovLostPos <= 3;
-        const ovHeader  = ovForLead
-          ? `***🏆 T${lap} — CHANGEMENT EN TÊTE !!!***${drsTag}`
-          : ovIsTop3
-            ? `***⚔️ T${lap} — DÉPASSEMENT DANS LE TOP 3 !***${drsTag}`
-            : isCounterAttack
-              ? `🔄 **T${lap} — CONTRE-ATTAQUE !**${drsTag}`
-              : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
-
-        const howDesc = isCounterAttack
-          ? counterAttackDescription(driver, passed, gpStyle)
-          : overtakeDescription(driver, passed, gpStyle);
-
-        const posBlock = `⬆️ **${driver.pilot.name}** → P${ovNewPos}\n⬇️ **${passed.pilot.name}** → P${ovLostPos}`;
-        const gifCat   = ovForLead ? 'overtake_lead' : ovIsTop3 ? 'overtake_podium' : 'overtake_normal';
-
-        events.push({
-          priority: ovForLead ? 9 : ovIsTop3 ? 8 : isCounterAttack ? 7 : 6,
-          text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}`,
-          gif: pickGif(gifCat),
-        });
-      }
+      events.push({
+        priority: ovForLead ? 9 : ovIsTop3 ? 8 : 6,
+        text: `${ovHeader}\n  › ${howDesc}\n  › Écart : **${gapStr}**${gapOnLeader}`,
+      });
     }
 
-    // ── Défenses sans changement de position ──────────────────
-    // Si deux pilotes sont proches depuis 2+ tours et aucun n'a dépassé → peut-être une belle défense
-    if (!scActive && !justRestarted && lap > 2 && Math.random() < 0.35) {
-      for (let i = 0; i < ranked.length - 1; i++) {
-        const ahead  = ranked[i];
-        const behind = ranked[i + 1];
-        if (ahead.pittedThisLap || behind.pittedThisLap) continue;
-        const gap  = (behind.totalTime - ahead.totalTime) / 1000;
-        const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
-        const battle = battleMap.get(bkey);
-        // 3+ tours proches, personne n'a dépassé ce tour → narrer la défense
-        if (battle && battle.lapsClose >= 3 && gap < 1.2) {
-          const defText = defenseDescription(ahead, behind, gpStyle);
-          events.push({ priority: 4, text: defText });
-          break; // une seule défense par tour max
-        }
-      }
+    // ── Atmosphère play-by-play (tous les 3 tours si pas d'events) ──
+    if (!events.length && lap % 3 === 0) {
+      const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState);
+      if (atmo) events.push({ priority: 1, text: atmo });
     }
-
-    // ── Commentary obligatoire chaque tour ───────────────────
-    // Toujours un message, même si rien ne se passe
-    const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle);
-    if (atmo) events.push({ priority: events.length === 0 ? 3 : 1, text: atmo });
 
     // ── Composition et envoi du message ─────────────────────
     events.sort((a,b) => b.priority - a.priority);
     const eventsText = events.map(e => e.text).join('\n\n');
-    const topGif = events.find(e => e.gif)?.gif ?? null;
 
     const showFullStandings = (lap % 10 === 0) || lap === totalLaps;
     const showTop5          = (lap % 5 === 0 && !showFullStandings) || (scActive && prevScState !== 'NONE');
@@ -2843,14 +1285,12 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         }).join('\n');
     }
 
-    // Toujours envoyer (commentary garanti)
-    const header = `**⏱ Tour ${lap}/${totalLaps}**` +
-      (scState.state === 'SC'  ? ` 🚨 **SAFETY CAR**` : '') +
-      (scState.state === 'VSC' ? ` 🟡 **VSC**`        : '');
-    await send([header, eventsText, standingsText].filter(Boolean).join('\n'));
-    if (topGif && channel) {
-      try { await channel.send(topGif); } catch(e) {}
-      await sleep(2000);
+    const hasEvents = events.length > 0;
+    if (hasEvents || showFullStandings || showTop5) {
+      const header = `**⏱ Tour ${lap}/${totalLaps}**` +
+        (scState.state === 'SC'  ? ` 🚨 **SAFETY CAR**` : '') +
+        (scState.state === 'VSC' ? ` 🟡 **VSC**`         : '');
+      await send([header, eventsText, standingsText].filter(Boolean).join('\n'));
     }
   }
 
@@ -2872,16 +1312,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     const primeV   = (driver.pos === 1 && !driver.dnf) ? (contract?.primeVictoire || 0) : 0;
     const primeP   = (driver.pos <= 3 && !driver.dnf)  ? (contract?.primePodium   || 0) : 0;
     const fl       = fastestLapHolder && String(fastestLapHolder.pilot._id) === String(driver.pilot._id);
-
-    // Bonus de participation : tout le monde gagne quelque chose même sans point
-    // P1-P10 = 0 bonus (pts F1 suffisent), P11 = 12, P15 = 60, P20 = 120
-    // Cela garantit que les bas de grille peuvent améliorer 1 stat toutes les 1-2 courses
-    const participBonus = driver.dnf ? 0 : Math.round(Math.max(0, (driver.pos - 10) * 12));
-
-    const coins = Math.round(
-      (pts * 20 + (driver.dnf ? 0 : 60) + participBonus) * multi
-      + salary + primeV + primeP + (fl ? 30 : 0)
-    );
+    const coins    = Math.round((pts * 20 + (driver.dnf ? 0 : 50)) * multi + salary + primeV + primeP + (fl ? 30 : 0));
 
     results.push({
       pilotId   : driver.pilot._id,
@@ -2910,9 +1341,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     `🏁 **FIN DE COURSE !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** franchit la ligne en vainqueur !`,
   ];
   await send(pick(winFlavors));
-  // GIF victoire
-  const winGif = pickGif('win');
-  if (winGif && channel) { try { await channel.send(winGif); } catch(e) {} await sleep(2000); }
 
   // ── Embed podium ─────────────────────────────────────────
   const dnfDrivers = drivers.filter(d => d.dnf);
@@ -2937,106 +1365,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     );
   await sendEmbed(podiumEmbed);
 
-  // ── Record du circuit ─────────────────────────────────────
-  if (fastestLapHolder && fastestLapMs < Infinity) {
-    const prevRecord = existingCircuitRecord;
-    const isNewRecord = !prevRecord || fastestLapMs < prevRecord.bestTimeMs;
-    if (isNewRecord) {
-      const oldTimeStr = prevRecord ? msToLapStr(prevRecord.bestTimeMs) : null;
-      await CircuitRecord.findOneAndUpdate(
-        { circuit: race.circuit },
-        {
-          circuit      : race.circuit,
-          circuitEmoji : race.emoji || '🏁',
-          gpStyle      : race.gpStyle || 'mixte',
-          bestTimeMs   : fastestLapMs,
-          pilotId      : fastestLapHolder.pilot._id,
-          pilotName    : fastestLapHolder.pilot.name,
-          teamName     : fastestLapHolder.team.name,
-          teamEmoji    : fastestLapHolder.team.emoji,
-          seasonYear   : season.year,
-          raceId       : race._id,
-          setAt        : new Date(),
-        },
-        { upsert: true, new: true }
-      );
-      await sleep(1500);
-      const recordEmbed = new EmbedBuilder()
-        .setTitle(`⏱️ NOUVEAU RECORD DU CIRCUIT ! ${race.emoji} ${race.circuit}`)
-        .setColor('#FF6600')
-        .setDescription(
-          `${fastestLapHolder.team.emoji} **${fastestLapHolder.pilot.name}** pulvérise le record !\n\n` +
-          `⚡ **${msToLapStr(fastestLapMs)}**` +
-          (oldTimeStr ? `\n📉 Ancien record : ~~${oldTimeStr}~~${prevRecord?.pilotName ? ` (${prevRecord.pilotName}, S${prevRecord.seasonYear})` : ''}` : '\n*Premier record établi sur ce circuit !*')
-        );
-      await sendEmbed(recordEmbed);
-    }
-  }
-
-  // ── Statut coéquipier #1 / #2 ────────────────────────────
-  // Pour chaque écurie, comparer les positions des deux pilotes et mettre à jour teammateDuelWins
-  const teamDrivers = new Map();
-  for (const d of finalRanked) {
-    const tid = String(d.team._id);
-    if (!teamDrivers.has(tid)) teamDrivers.set(tid, []);
-    teamDrivers.get(tid).push(d);
-  }
-  for (const [, members] of teamDrivers) {
-    if (members.length < 2) continue;
-    const [a, b] = members; // déjà triés par position finale
-    // a a fini devant b (pos plus petite ou b est DNF)
-    const aWon = !a.dnf && (b.dnf || a.pos < b.pos);
-    if (aWon) {
-      await Pilot.findByIdAndUpdate(a.pilot._id, { $inc: { teammateDuelWins: 1 } });
-    } else if (!b.dnf && (a.dnf || b.pos < a.pos)) {
-      await Pilot.findByIdAndUpdate(b.pilot._id, { $inc: { teammateDuelWins: 1 } });
-    }
-    // Recalculer le statut #1/#2 après mise à jour
-    const [pA, pB] = await Promise.all([
-      Pilot.findById(a.pilot._id),
-      Pilot.findById(b.pilot._id),
-    ]);
-    if (!pA || !pB) continue;
-    const winsA = pA.teammateDuelWins || 0;
-    const winsB = pB.teammateDuelWins || 0;
-    const total = winsA + winsB;
-    // Statut déterminé si écart ≥ 3 duels ou fin de saison
-    if (total >= 3) {
-      const newStatusA = winsA > winsB ? 'numero1' : 'numero2';
-      const newStatusB = winsA > winsB ? 'numero2' : 'numero1';
-      await Pilot.findByIdAndUpdate(pA._id, { teamStatus: newStatusA });
-      await Pilot.findByIdAndUpdate(pB._id, { teamStatus: newStatusB });
-    }
-  }
-
-  // ── Conférence de presse ─────────────────────────────────
-  try {
-    const allPilots      = await Pilot.find();
-    const allTeams2      = await Team.find();
-    const allStandings   = await Standing.find({ seasonId: season._id });
-    const cStandings     = await ConstructorStanding.find({ seasonId: season._id });
-
-    const confBlocks = await generatePressConference(
-      race, results, season, allPilots, allTeams2, allStandings, cStandings
-    );
-
-    if (confBlocks?.length) {
-      await sleep(2500);
-      const confEmbed = new EmbedBuilder()
-        .setTitle(`🎤 Conférence de presse — ${race.emoji} ${race.circuit}`)
-        .setColor('#2B2D31')
-        .setDescription(confBlocks.join('\n\n─────────────────\n\n'));
-      await sendEmbed(confEmbed);
-    }
-  } catch(e) { console.error('Conf de presse erreur:', e); }
-
-  // ── News post-GP ─────────────────────────────────────────
-  try {
-    await sleep(4000);
-    await generatePostRaceNews(race, results, season, channel);
-  } catch(e) { console.error('Post-race news erreur:', e); }
-
-  return { results, collisions: raceCollisions };
+  return results;
 }
 
 // ─── Fixtures de test (pilotes/équipes fictifs réutilisés par admin_test_*) ──
@@ -3069,25 +1398,6 @@ function buildTestFixtures() {
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-// ─── Helpers pilote multi-pilotes ──────────────────────────
-// Retourne le pilote d'un user selon son index (1 ou 2). null si introuvable.
-async function getPilotForUser(discordId, pilotIndex = 1) {
-  if (pilotIndex === 1) {
-    return Pilot.findOne({ discordId, $or: [{ pilotIndex: 1 }, { pilotIndex: null }, { pilotIndex: { $exists: false } }] });
-  }
-  return Pilot.findOne({ discordId, pilotIndex });
-}
-// Retourne tous les pilotes d'un user (1 ou 2)
-async function getAllPilotsForUser(discordId) {
-  return Pilot.find({ discordId }).sort({ pilotIndex: 1 });
-}
-// Retourne le label "Pilote 1 — NomDuPilote" pour l'affichage
-function pilotLabel(pilot) {
-  const num = pilot.racingNumber ? `#${pilot.racingNumber}` : '';
-  const flag = pilot.nationality?.split(' ')[0] || '';
-  return `${flag} ${num} **${pilot.name}** (Pilote ${pilot.pilotIndex})`;
-}
 
 // ============================================================
 // ██╗   ██╗ ██████╗ ██╗████████╗██╗   ██╗██████╗ ███████╗
@@ -3168,15 +1478,8 @@ async function getAllPilotsWithTeams() {
   return { pilots, teams };
 }
 
-async function applyRaceResults(raceResults, raceId, season, collisions = []) {
+async function applyRaceResults(raceResults, raceId, season) {
   const teams = await Team.find();
-
-  // Récupérer les infos de la course pour les GPRecords
-  const raceDoc = await Race.findById(raceId);
-
-  // Récupérer la grille de départ pour les positions de départ
-  const qualiGrid = raceDoc?.qualiGrid || [];
-  const startPosMap = new Map(qualiGrid.map((g, i) => [String(g.pilotId), i + 1]));
 
   for (const r of raceResults) {
     await Pilot.findByIdAndUpdate(r.pilotId, { $inc: { plcoins: r.coins, totalEarned: r.coins } });
@@ -3192,62 +1495,9 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
       { $inc: { points: pts } },
       { upsert: true }
     );
-
-    // ── Enregistrement GPRecord ──────────────────────────────
-    if (raceDoc) {
-      const team = teams.find(t => String(t._id) === String(r.teamId));
-      await PilotGPRecord.create({
-        pilotId      : r.pilotId,
-        seasonId     : season._id,
-        seasonYear   : season.year,
-        raceId       : raceId,
-        circuit      : raceDoc.circuit,
-        circuitEmoji : raceDoc.emoji || '🏁',
-        gpStyle      : raceDoc.gpStyle || 'mixte',
-        teamId       : r.teamId,
-        teamName     : team?.name || '?',
-        teamEmoji    : team?.emoji || '🏎️',
-        startPos     : startPosMap.get(String(r.pilotId)) || null,
-        finishPos    : r.pos,
-        dnf          : r.dnf || false,
-        dnfReason    : r.dnfReason || null,
-        points       : pts,
-        coins        : r.coins,
-        fastestLap   : r.fastestLap || false,
-        raceDate     : raceDoc.scheduledDate || new Date(),
-      });
-    }
   }
 
   await Race.findByIdAndUpdate(raceId, { status: 'done', raceResults });
-
-  // ── Rivalités : traiter les collisions de la course ──────
-  // On consolide les contacts par paire (A-B = B-A)
-  const contactMap = new Map(); // key: "idA_idB" (sorted)
-  for (const { attackerId, victimId } of collisions) {
-    const key = [attackerId, victimId].sort().join('_');
-    contactMap.set(key, (contactMap.get(key) || 0) + 1);
-  }
-  for (const [key, count] of contactMap) {
-    const [idA, idB] = key.split('_');
-    // Mettre à jour les contacts des deux pilotes l'un envers l'autre
-    for (const [myId, theirId] of [[idA, idB], [idB, idA]]) {
-      const me = await Pilot.findById(myId);
-      if (!me) continue;
-      const currentRival = me.rivalId ? String(me.rivalId) : null;
-      if (currentRival === theirId) {
-        // Rivalité existante — incrémenter le compteur
-        await Pilot.findByIdAndUpdate(myId, { $inc: { rivalContacts: count } });
-      } else if (!currentRival) {
-        // Pas encore de rival — si 2+ contacts cette course avec ce pilote, déclarer la rivalité
-        const newTotal = (me.rivalContacts || 0) + count;
-        if (count >= 2 || newTotal >= 2) {
-          await Pilot.findByIdAndUpdate(myId, { rivalId: theirId, rivalContacts: count });
-        }
-      }
-      // Si rivalité différente déjà active, on ne change pas (on garde la plus vieille)
-    }
-  }
 
   // Évolution voitures après la course
   await evolveCarStats(raceResults, teams);
@@ -3262,9 +1512,6 @@ async function createNewSeason() {
 
   if (regSet > 1) await applyRegulationChange(season);
 
-  // Reset duels coéquipiers pour la nouvelle saison
-  await Pilot.updateMany({}, { teammateDuelWins: 0, teamStatus: null });
-
   const startDate = new Date();
   startDate.setHours(0,0,0,0);
   for (let i = 0; i < CIRCUITS.length; i++) {
@@ -3275,9 +1522,6 @@ async function createNewSeason() {
 
   const pilots = await Pilot.find({ teamId: { $ne: null } });
   for (const p of pilots) await Standing.create({ seasonId: season._id, pilotId: p._id });
-
-  // Réinitialiser rivalités et streak upgrade en début de saison
-  await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0, upgradeStreak: 0, lastUpgradeStat: null } });
 
   return season;
 }
@@ -3468,38 +1712,6 @@ async function startTransferPeriod() {
     }
   }
 
-  // ── ENCHÈRES : surenchère automatique sur les top pilotes convoités ──
-  // Après la génération des offres, si plusieurs écuries ont ciblé le même
-  // pilote top (ov ≥ 75), elles surenchérissent automatiquement l'une l'autre.
-  // Le pilote voit TOUTES les offres et choisit la meilleure.
-  const allNewOffers = await TransferOffer.find({ status: 'pending' });
-  // Grouper par pilote
-  const offerGrouped = new Map();
-  for (const o of allNewOffers) {
-    const key = String(o.pilotId);
-    if (!offerGrouped.has(key)) offerGrouped.set(key, []);
-    offerGrouped.get(key).push(o);
-  }
-  for (const [pilotId, offers] of offerGrouped) {
-    if (offers.length < 2) continue; // pas de concurrence
-    const pilot = await Pilot.findById(pilotId);
-    if (!pilot) continue;
-    const ov = overallRating(pilot);
-    if (ov < 72) continue; // enchères seulement pour les pilotes notés 72+
-    // Trier par salaireBase décroissant
-    offers.sort((a, b) => b.salaireBase - a.salaireBase);
-    const topOffer = offers[0];
-    // Chaque offre concurrente tente de surenchérir
-    for (let i = 1; i < offers.length; i++) {
-      const offer = offers[i];
-      // Surenchère : +10% à +20% sur la meilleure offre visible
-      const surenchere = Math.round(topOffer.salaireBase * rand(1.08, 1.20));
-      if (surenchere > offer.salaireBase) {
-        await TransferOffer.findByIdAndUpdate(offer._id, { salaireBase: surenchere });
-      }
-    }
-  }
-
   return expiredContracts.length;
 }
 
@@ -3514,50 +1726,25 @@ async function startTransferPeriod() {
 
 const commands = [
   new SlashCommandBuilder().setName('create_pilot')
-    .setDescription('Crée ton pilote F1 ! (2 pilotes max par joueur)')
-    .addStringOption(o => o.setName('nom').setDescription('Nom de ton pilote').setRequired(true))
-    .addStringOption(o => o.setName('nationalite').setDescription('Nationalité du pilote').setRequired(true)
-      .addChoices(...[
-        // Europe (12)
-        '🇫🇷 Français','🇧🇪 Belge','🇩🇪 Allemand','🇬🇧 Britannique','🇳🇱 Néerlandais',
-        '🇮🇹 Italien','🇪🇸 Espagnol','🇵🇹 Portugais','🇨🇭 Suisse','🇦🇹 Autrichien',
-        '🇫🇮 Finlandais','🇵🇱 Polonais',
-        // Amériques (6)
-        '🇧🇷 Brésilien','🇺🇸 Américain','🇨🇦 Canadien','🇲🇽 Mexicain','🇦🇷 Argentin','🇨🇴 Colombien',
-        // Afrique (6)
-        '🇨🇮 Ivoirien','🇨🇬 Congolais','🇸🇳 Sénégalais','🇨🇲 Camerounais','🇲🇦 Marocain','🇿🇦 Sud-Africain',
-        // Asie / Océanie (1)
-        '🇯🇵 Japonais',
-      ].map(n => ({ name: n, value: n })))
-    )
-    .addIntegerOption(o => o.setName('numero').setDescription('Ton numéro de pilote (1–99)').setRequired(true).setMinValue(1).setMaxValue(99))
-    .addIntegerOption(o => o.setName('depassement').setDescription(`Points en Dépassement (0–${MAX_STAT_BONUS}) — Total pool: ${TOTAL_STAT_POOL}`).setMinValue(0).setMaxValue(MAX_STAT_BONUS))
-    .addIntegerOption(o => o.setName('freinage').setDescription(`Points en Freinage (0–${MAX_STAT_BONUS})`).setMinValue(0).setMaxValue(MAX_STAT_BONUS))
-    .addIntegerOption(o => o.setName('defense').setDescription(`Points en Défense (0–${MAX_STAT_BONUS})`).setMinValue(0).setMaxValue(MAX_STAT_BONUS))
-    .addIntegerOption(o => o.setName('adaptabilite').setDescription(`Points en Adaptabilité (0–${MAX_STAT_BONUS})`).setMinValue(0).setMaxValue(MAX_STAT_BONUS))
-    .addIntegerOption(o => o.setName('reactions').setDescription(`Points en Réactions (0–${MAX_STAT_BONUS})`).setMinValue(0).setMaxValue(MAX_STAT_BONUS))
-    .addIntegerOption(o => o.setName('controle').setDescription(`Points en Contrôle (0–${MAX_STAT_BONUS})`).setMinValue(0).setMaxValue(MAX_STAT_BONUS))
-    .addIntegerOption(o => o.setName('gestionpneus').setDescription(`Points en Gestion Pneus (0–${MAX_STAT_BONUS})`).setMinValue(0).setMaxValue(MAX_STAT_BONUS)),
+    .setDescription('Crée ton pilote F1 !')
+    .addStringOption(o => o.setName('nom').setDescription('Nom de ton pilote').setRequired(true)),
 
   new SlashCommandBuilder().setName('profil')
     .setDescription('Voir le profil d\'un pilote')
-    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible'))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (si le joueur a 2 pilotes)').setMinValue(1).setMaxValue(2)),
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible')),
 
   new SlashCommandBuilder().setName('ameliorer')
-    .setDescription('Améliore une stat de ton pilote (coût variable selon le niveau, cumul possible)')
+    .setDescription('Améliore une stat de ton pilote')
     .addStringOption(o => o.setName('stat').setDescription('Stat à améliorer').setRequired(true)
       .addChoices(
-        { name: 'Dépassement    — à partir de 120 🪙', value: 'depassement'  },
-        { name: 'Freinage       — à partir de 120 🪙', value: 'freinage'     },
-        { name: 'Défense        — à partir de 100 🪙', value: 'defense'      },
-        { name: 'Adaptabilité   — à partir de  90 🪙', value: 'adaptabilite' },
-        { name: 'Réactions      — à partir de  90 🪙', value: 'reactions'    },
-        { name: 'Contrôle       — à partir de 110 🪙', value: 'controle'     },
-        { name: 'Gestion Pneus  — à partir de  90 🪙', value: 'gestionPneus' },
-      ))
-    .addIntegerOption(o => o.setName('quantite').setDescription('Nombre de points à ajouter (défaut: 1). Le coût est cumulatif !').setMinValue(1).setMaxValue(10))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Ton Pilote 1 ou Pilote 2 à améliorer (défaut: 1)').setMinValue(1).setMaxValue(2)),
+        { name: 'Dépassement    — 500 🪙', value: 'depassement'  },
+        { name: 'Freinage       — 500 🪙', value: 'freinage'     },
+        { name: 'Défense        — 450 🪙', value: 'defense'      },
+        { name: 'Adaptabilité   — 400 🪙', value: 'adaptabilite' },
+        { name: 'Réactions      — 400 🪙', value: 'reactions'    },
+        { name: 'Contrôle       — 450 🪙', value: 'controle'     },
+        { name: 'Gestion Pneus  — 400 🪙', value: 'gestionPneus' },
+      )),
 
   new SlashCommandBuilder().setName('ecuries')
     .setDescription('Liste des 10 écuries'),
@@ -3579,22 +1766,18 @@ const commands = [
     .setDescription('Résultats de la dernière course'),
 
   new SlashCommandBuilder().setName('mon_contrat')
-    .setDescription('Voir ton contrat actuel')
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+    .setDescription('Voir ton contrat actuel'),
 
   new SlashCommandBuilder().setName('offres')
-    .setDescription('Voir tes offres de contrat')
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+    .setDescription('Voir tes offres de contrat'),
 
   new SlashCommandBuilder().setName('accepter_offre')
     .setDescription('Accepter une offre de contrat')
-    .addStringOption(o => o.setName('offre_id').setDescription('ID de l\'offre').setRequired(true))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+    .addStringOption(o => o.setName('offre_id').setDescription('ID de l\'offre').setRequired(true)),
 
   new SlashCommandBuilder().setName('refuser_offre')
     .setDescription('Refuser une offre de contrat')
-    .addStringOption(o => o.setName('offre_id').setDescription('ID de l\'offre').setRequired(true))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+    .addStringOption(o => o.setName('offre_id').setDescription('ID de l\'offre').setRequired(true)),
 
   new SlashCommandBuilder().setName('admin_new_season')
     .setDescription('[ADMIN] Lance une nouvelle saison'),
@@ -3616,30 +1799,18 @@ const commands = [
 
   new SlashCommandBuilder().setName('historique')
     .setDescription('Historique de carrière multi-saisons d\'un pilote')
-    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)'))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)')),
 
   new SlashCommandBuilder().setName('pilotes')
     .setDescription('Liste tous les pilotes classés par note générale (style FIFA)'),
 
   new SlashCommandBuilder().setName('admin_set_photo')
     .setDescription('[ADMIN] Définit la photo de profil d\'un pilote')
-    .addStringOption(o => o.setName('url').setDescription('URL directe de l\'image (jpg/png/gif)').setRequired(true))
-    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (laisse vide pour toi-même)'))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible').setRequired(true))
+    .addStringOption(o => o.setName('url').setDescription('URL directe de l\'image (jpg/png/gif)').setRequired(true)),
 
   new SlashCommandBuilder().setName('admin_draft_start')
     .setDescription('[ADMIN] Lance le draft snake — chaque joueur choisit son écurie'),
-
-  new SlashCommandBuilder().setName('palmares')
-    .setDescription('🏛️ Hall of Fame — Champions de chaque saison'),
-
-  new SlashCommandBuilder().setName('rivalite')
-    .setDescription('⚔️ Voir ta rivalité actuelle en saison')
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
-
-  new SlashCommandBuilder().setName('admin_reset_rivalites')
-    .setDescription('[ADMIN] Réinitialise toutes les rivalités en début de saison'),
 
   new SlashCommandBuilder().setName('admin_test_race')
     .setDescription('[ADMIN] Simule une course fictive avec pilotes fictifs — test visuel'),
@@ -3647,13 +1818,8 @@ const commands = [
   new SlashCommandBuilder().setName('admin_test_practice')
     .setDescription('[ADMIN] Simule des essais libres fictifs — test narration'),
 
-  new SlashCommandBuilder().setName('admin_test_qualif')
+  new SlashCommandBuilder().setName('admin_test_quali')
     .setDescription('[ADMIN] Simule des qualifications fictives — test narration'),
-
-  new SlashCommandBuilder().setName('admin_reset_pilot')
-    .setDescription('[ADMIN] Supprime le ou les pilotes d\'un joueur (utile pour les tests)')
-    .addUserOption(o => o.setName('joueur').setDescription('Joueur ciblé').setRequired(true))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1, 2, ou laisser vide pour supprimer les DEUX').setMinValue(1).setMaxValue(2)),
 
   new SlashCommandBuilder().setName('admin_help')
     .setDescription('[ADMIN] Liste toutes les commandes administrateur'),
@@ -3663,29 +1829,6 @@ const commands = [
 
   new SlashCommandBuilder().setName('concept')
     .setDescription('Présentation complète du jeu F1 PL — pour les nouveaux !'),
-
-  new SlashCommandBuilder().setName('performances')
-    .setDescription('📊 Historique détaillé des GPs, équipes et records d\'un pilote')
-    .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)'))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2))
-    .addStringOption(o => o.setName('vue').setDescription('Que veux-tu voir ?')
-      .addChoices(
-        { name: '🕐 Récents — 10 derniers GPs', value: 'recent' },
-        { name: '🏆 Records — Meilleurs résultats', value: 'records' },
-        { name: '🏎️ Écuries — Historique des équipes', value: 'teams' },
-        { name: '📅 Saison — GPs d\'une saison', value: 'season' },
-      )),
-
-  new SlashCommandBuilder().setName('record_circuit')
-    .setDescription('⏱️ Consulte le record du meilleur tour sur un circuit')
-    .addStringOption(o => o.setName('circuit').setDescription('Nom du circuit (partiel accepté)').setRequired(true)),
-
-  new SlashCommandBuilder().setName('news')
-    .setDescription('🗞️ Derniers articles du paddock — rumeurs, drama, inside')
-    .addIntegerOption(o => o.setName('page').setDescription('Page (défaut: 1)').setMinValue(1)),
-
-  new SlashCommandBuilder().setName('admin_news_force')
-    .setDescription('[ADMIN] Force la publication d\'un article de news maintenant'),
 ];
 
 // ============================================================
@@ -3706,14 +1849,6 @@ client.once('ready', async () => {
   await mongoose.connect(MONGO_URI);
   console.log('✅ MongoDB connecté');
 
-  // ── Supprime l'ancien index unique sur discordId (incompatible avec 2 pilotes par user) ──
-  try {
-    await Pilot.collection.dropIndex('discordId_1');
-    console.log('✅ Ancien index unique discordId supprimé');
-  } catch (_) {
-    // L'index n'existe plus (déjà supprimé ou jamais créé) — pas de souci
-  }
-
   const teamCount = await Team.countDocuments();
   if (teamCount === 0) {
     await Team.insertMany(DEFAULT_TEAMS);
@@ -3726,18 +1861,6 @@ client.once('ready', async () => {
   });
   console.log('✅ Slash commands enregistrées');
   startScheduler();
-
-  // ── Job news toutes les 40h (±8h de variation) pour du naturel ──
-  const NEWS_INTERVAL_BASE = 40 * 60 * 60 * 1000;
-  const scheduleNextNews = () => {
-    const jitter = (Math.random() - 0.5) * 8 * 60 * 60 * 1000; // ±8h
-    setTimeout(async () => {
-      try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news error:', e); }
-      scheduleNextNews();
-    }, NEWS_INTERVAL_BASE + jitter);
-  };
-  scheduleNextNews();
-  console.log('✅ Job news planifié (toutes les ~40h)');
 });
 
 // ============================================================
@@ -3749,39 +1872,9 @@ client.once('ready', async () => {
 // ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝
 // ============================================================
 
-// ─── Coûts d'amélioration ────────────────────────────────────
-// Gain : toujours +1 par achat
-// Coût de base par stat, avec malus progressif selon le niveau actuel :
-//   coût_réel = coût_base × (1 + (stat_actuelle - 50) / 50)
-//   → À 50 : coût normal. À 75 : ×1.5. À 99 : ×1.98.
-//
-// Calibrage cible (sans salaire) :
-//   P1 (560 coins)   → 3-4 upgrades par course
-//   P3 (360 coins)   → 2-3 upgrades
-//   P10 (80 coins)   → 1 upgrade toutes les 1-2 courses
-//   P20 (120 coins)  → 1 upgrade toutes les 1-2 courses
-const STAT_COST_BASE = {
-  depassement: 100, freinage: 100, defense: 85,
-  adaptabilite: 75, reactions: 75, controle: 90, gestionPneus: 75,
-};
-
-function calcUpgradeCost(statKey, currentValue) {
-  const base = STAT_COST_BASE[statKey] || 85;
-  const multiplier = 1 + Math.max(0, (currentValue - 50)) / 50;
-  return Math.round(base * multiplier);
-}
-
-// ─── Spécialisations ─────────────────────────────────────────
-// Déblocage après 3 upgrades CONSÉCUTIFS sur la même stat.
-// Chaque spécialisation donne un micro-bonus en simulation de course.
-const SPECIALIZATION_META = {
-  depassement  : { label: '⚔️ Maître du Dépassement',  desc: '+3% eff. dépassement en piste'    },
-  freinage     : { label: '🛑 Roi du Freinage',          desc: '+3% perf. en zones de freinage'   },
-  defense      : { label: '🛡️ Mur de la Défense',        desc: '+3% résistance aux dépassements'  },
-  adaptabilite : { label: '🌦️ Caméléon',                 desc: '+3% sous conditions variables'    },
-  reactions    : { label: '⚡ Réflexes de Serpent',      desc: '+3% au départ & incidents'        },
-  controle     : { label: '🎯 Chirurgien du Volant',     desc: '+3% consistance sur un tour'      },
-  gestionPneus : { label: '🏎️ Sorcier des Gommes',       desc: '+3% durée de vie des pneus'       },
+const STAT_COST = {
+  depassement: 500, freinage: 500, defense: 450,
+  adaptabilite: 400, reactions: 400, controle: 450, gestionPneus: 400,
 };
 
 client.on('interactionCreate', async (interaction) => {
@@ -3808,37 +1901,23 @@ async function handleInteraction(interaction) {
       if (!interaction.member.permissions.has('Administrator'))
         return interaction.reply({ content: '❌ Seul un admin peut valider le pick.', ephemeral: true });
 
-      const draftId = interaction.customId.replace('draft_pick_', '');
-      const pilotId = interaction.values[0];
-
+      const draftId  = interaction.customId.replace('draft_pick_', '');
+      const pilotId  = interaction.values[0];
       let draft;
       try { draft = await DraftSession.findById(draftId); } catch(e) {}
       if (!draft || draft.status !== 'active')
         return interaction.reply({ content: '❌ Draft introuvable ou terminé.', ephemeral: true });
 
+      // Vérifier que ce pilote n'est pas déjà pické
       if (draft.picks.some(pk => String(pk.pilotId) === pilotId))
         return interaction.reply({ content: '❌ Ce pilote a déjà été sélectionné !', ephemeral: true });
 
-      const teamId = String(draftTeamAtIndex(draft.order, draft.currentPickIndex));
-      const team   = await Team.findById(teamId);
-      const pilot  = await Pilot.findById(pilotId);
+      const teamId   = String(draftTeamAtIndex(draft.order, draft.currentPickIndex));
+      const team     = await Team.findById(teamId);
+      const pilot    = await Pilot.findById(pilotId);
       if (!team || !pilot) return interaction.reply({ content: '❌ Données introuvables.', ephemeral: true });
 
-      const globalPick  = draft.currentPickIndex;
-      const totalInRound = draft.order.length;
-      const round        = Math.floor(globalPick / totalInRound) + 1;
-      const pickInRound  = (globalPick % totalInRound) + 1;
-
-      // ① Suspense : on retire le menu, on affiche "en cours..."
-      const suspenseEmbed = new EmbedBuilder()
-        .setColor(team.color || '#FFD700')
-        .setTitle(`⚡  ${team.emoji}  ${team.name.toUpperCase()}  FAIT SON CHOIX...`)
-        .setDescription('> *Le silence s\'est installé dans le war room. La décision est imminente.*')
-        .setFooter({ text: `Round ${round} · Pick ${pickInRound}/${totalInRound}` });
-
-      await interaction.update({ embeds: [suspenseEmbed], components: [] });
-
-      // ② Assigner pilote + créer contrat
+      // Assigner le pilote à l'écurie + créer contrat de base
       await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id });
       const existingContract = await Contract.findOne({ pilotId: pilot._id, active: true });
       if (!existingContract) {
@@ -3850,73 +1929,42 @@ async function handleInteraction(interaction) {
         });
       }
 
+      // Sauvegarder le pick
       draft.picks.push({ teamId: team._id, pilotId: pilot._id });
       draft.currentPickIndex += 1;
 
-      const isLast = draft.currentPickIndex >= draft.totalPicks;
+      const ov   = overallRating(pilot);
+      const tier = ratingTier(ov);
+      let msg = `✅ **${team.emoji} ${team.name}** choisit **${tier.badge} ${ov} ${pilot.name}** !`;
 
-      // ③ Reveal cinématique
-      const revealEmbed = buildPickRevealEmbed(
-        team, pilot, globalPick, draft.totalPicks, round, pickInRound, totalInRound
-      );
-      await interaction.followUp({ embeds: [revealEmbed] });
-
-      if (isLast) {
-        // ── Draft terminé ──────────────────────────────────
+      if (draft.currentPickIndex >= draft.totalPicks) {
+        // Draft terminé
         draft.status = 'done';
         await draft.save();
-
-        // Récap final : toutes les écuries et leurs pilotes
-        const allTeams  = await Team.find();
-        const allPilots = await Pilot.find({ teamId: { $in: allTeams.map(t => t._id) } });
-        const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
-
-        const recapLines = allTeams.map(t => {
-          const roster = allPilots.filter(p => String(p.teamId) === String(t._id));
-          const names  = roster.map(p => {
-            const ov  = overallRating(p);
-            const ti  = ratingTier(ov);
-            const flag = p.nationality?.split(' ')[0] || '';
-            return `  ${ti.badge} **${p.name}** ${flag} #${p.racingNumber || '?'} (${ov})`;
-          }).join('\n') || '  *Aucun pilote*';
-          return `${t.emoji} **${t.name}**\n${names}`;
-        }).join('\n\n');
-
-        const closingEmbed = new EmbedBuilder()
-          .setColor('#FFD700')
-          .setTitle('🏆  DRAFT TERMINÉE — LES ÉCURIES SONT FORMÉES !')
-          .setDescription('> *Le championnat peut commencer. Que le meilleur pilote gagne.*\n\u200B')
-          .addFields({ name: '📋 Composition des écuries', value: recapLines.slice(0, 4096) })
-          .setFooter({ text: `${draft.totalPicks} picks réalisés · Bonne saison 🏎️💨` });
-
-        await interaction.followUp({ embeds: [closingEmbed] });
+        await interaction.update({ content: msg + '\n\n🏁 **Draft terminé !** Toutes les écuries sont composées.', components: [] });
       } else {
         await draft.save();
+        // Prochain pick
+        const nextTeamId = draftTeamAtIndex(draft.order, draft.currentPickIndex);
+        const nextTeam   = await Team.findById(nextTeamId);
+        const pickedIds  = draft.picks.map(pk => String(pk.pilotId));
+        const freePilots = await Pilot.find({ _id: { $nin: pickedIds } }).sort({ freinage: -1 });
 
-        // ④ Prochain "On The Clock"
-        const nextTeamId   = draftTeamAtIndex(draft.order, draft.currentPickIndex);
-        const nextTeam     = await Team.findById(nextTeamId);
-        const pickedIds    = draft.picks.map(pk => String(pk.pilotId));
-        const freePilots   = await Pilot.find({ _id: { $nin: pickedIds } }).sort({ createdAt: 1 });
-        const sortedFree   = [...freePilots].sort((a, b) => overallRating(b) - overallRating(a));
+        const round  = Math.floor(draft.currentPickIndex / draft.order.length) + 1;
+        const pickN  = (draft.currentPickIndex % draft.order.length) + 1;
+        const totalN = draft.order.length;
 
-        const nextGlobal   = draft.currentPickIndex;
-        const nextRound    = Math.floor(nextGlobal / totalInRound) + 1;
-        const nextPickInR  = (nextGlobal % totalInRound) + 1;
-
-        // Annonce de changement de round si nécessaire
-        if (nextPickInR === 1 && nextRound > 1) {
-          const roundEmbed = new EmbedBuilder()
-            .setColor('#C0C0C0')
-            .setTitle(`🔄  ROUND ${nextRound} — L'ORDRE S'INVERSE !`)
-            .setDescription('> *Le snake draft reprend dans l\'ordre inverse. La chasse est relancée.*');
-          await interaction.followUp({ embeds: [roundEmbed] });
+        if (!freePilots.length) {
+          draft.status = 'done';
+          await draft.save();
+          await interaction.update({ content: msg + '\n\n🏁 **Draft terminé !** Plus de pilotes disponibles.', components: [] });
+        } else {
+          const selectRow = buildDraftSelectMenu(freePilots, String(draft._id));
+          await interaction.update({
+            content: msg + `\n\n**Round ${round} — Pick ${pickN}/${totalN}** : au tour de **${nextTeam.emoji} ${nextTeam.name}**`,
+            components: [selectRow],
+          });
         }
-
-        const clockPayload = buildOnTheClockPayload(
-          nextTeam, nextGlobal, draft.totalPicks, nextRound, nextPickInR, totalInRound, sortedFree, String(draft._id)
-        );
-        await interaction.followUp(clockPayload);
       }
       return;
     }
@@ -3926,18 +1974,16 @@ async function handleInteraction(interaction) {
     const [, action, offerId] = interaction.customId.split('_');  // offer_accept_<id> / offer_reject_<id>
     if (action !== 'accept' && action !== 'reject') return;
 
+    const pilot = await Pilot.findOne({ discordId: interaction.user.id });
+    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote trouvé.', ephemeral: true });
+
     let offer;
     try { offer = await TransferOffer.findById(offerId); } catch(e) {}
-    if (!offer || offer.status !== 'pending') {
+    if (!offer || String(offer.pilotId) !== String(pilot._id) || offer.status !== 'pending') {
       return interaction.reply({
         content: '❌ Cette offre est expirée ou invalide. Utilise `/offres` pour rafraîchir, ou `/accepter_offre <ID>` en secours.',
         ephemeral: true,
       });
-    }
-    // Vérifier que l'offre appartient à un pilote de ce joueur
-    const pilot = await Pilot.findById(offer.pilotId);
-    if (!pilot || pilot.discordId !== interaction.user.id) {
-      return interaction.reply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
     }
 
     if (action === 'reject') {
@@ -3991,181 +2037,48 @@ async function handleInteraction(interaction) {
 
   // ── /create_pilot ─────────────────────────────────────────
   if (commandName === 'create_pilot') {
-    // Vérifier combien de pilotes ce joueur a déjà
-    const existingPilots = await getAllPilotsForUser(interaction.user.id);
-    if (existingPilots.length >= 2) {
-      return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle('❌ Limite atteinte')
-          .setColor('#CC4444')
-          .setDescription(
-            `Tu as déjà **2 pilotes** — c'est le maximum par joueur.\n\n` +
-            existingPilots.map(p => `• ${pilotLabel(p)}`).join('\n')
-          )
-        ],
-        ephemeral: true,
-      });
-    }
+    const existing = await Pilot.findOne({ discordId: interaction.user.id });
+    if (existing) return interaction.reply({ content: `❌ Tu as déjà un pilote : **${existing.name}**`, ephemeral: true });
 
-    const nom         = interaction.options.getString('nom');
-    const nationalite = interaction.options.getString('nationalite');
-    const numero      = interaction.options.getInteger('numero');
-
-    if (nom.length < 2 || nom.length > 30)
-      return interaction.reply({ content: '❌ Nom entre 2 et 30 caractères.', ephemeral: true });
-
-    // Vérifier que le numéro n'est pas déjà pris
-    const numTaken = await Pilot.findOne({ racingNumber: numero });
-    if (numTaken)
-      return interaction.reply({ content: `❌ Le numéro **#${numero}** est déjà pris par **${numTaken.name}**. Choisis un autre !`, ephemeral: true });
-
-    // Récupérer les bonus de stats fournis (null = non fourni)
-    const statOptions = {
-      depassement  : interaction.options.getInteger('depassement'),
-      freinage     : interaction.options.getInteger('freinage'),
-      defense      : interaction.options.getInteger('defense'),
-      adaptabilite : interaction.options.getInteger('adaptabilite'),
-      reactions    : interaction.options.getInteger('reactions'),
-      controle     : interaction.options.getInteger('controle'),
-      gestionPneus : interaction.options.getInteger('gestionpneus'),
-    };
-
-    const statKeys    = Object.keys(statOptions);
-    const provided    = statKeys.filter(k => statOptions[k] !== null);
-    const totalGiven  = provided.reduce((s, k) => s + statOptions[k], 0);
-
-    let finalBonuses;
-
-    if (provided.length === 0) {
-      // Aucune stat fournie → répartition aléatoire équilibrée
-      let pool = TOTAL_STAT_POOL;
-      const bonuses = statKeys.map(() => 0);
-      const indices = statKeys.map((_,i) => i);
-      // Distribution aléatoire : ajouter des points un par un à des stats aléatoires
-      for (let i = 0; i < pool; i++) {
-        let idx;
-        do { idx = Math.floor(Math.random() * statKeys.length); }
-        while (bonuses[idx] >= MAX_STAT_BONUS);
-        bonuses[idx]++;
-      }
-      finalBonuses = {};
-      statKeys.forEach((k, i) => finalBonuses[k] = bonuses[i]);
-    } else {
-      // Des stats ont été fournies — vérifier que la somme fait exactement TOTAL_STAT_POOL
-      if (provided.length < statKeys.length) {
-        // Stats partiellement remplies → distribuer le reste également sur les non-remplies
-        const remaining   = TOTAL_STAT_POOL - totalGiven;
-        const unfilled    = statKeys.filter(k => statOptions[k] === null);
-        const perUnfilled = Math.floor(remaining / unfilled.length);
-        const extra       = remaining % unfilled.length;
-        finalBonuses = { ...statOptions };
-        unfilled.forEach((k, i) => finalBonuses[k] = perUnfilled + (i < extra ? 1 : 0));
-      } else {
-        finalBonuses = { ...statOptions };
-      }
-
-      // Validation finale
-      const finalTotal = statKeys.reduce((s, k) => s + finalBonuses[k], 0);
-      if (finalTotal !== TOTAL_STAT_POOL) {
-        const diff = finalTotal - TOTAL_STAT_POOL;
-        return interaction.reply({
-          embeds: [new EmbedBuilder()
-            .setTitle('❌ Répartition de stats invalide')
-            .setColor('#CC4444')
-            .setDescription(
-              `La somme de tes points de stats est **${finalTotal}** — il en faut exactement **${TOTAL_STAT_POOL}**.\n\n` +
-              (diff > 0 ? `Tu as **${diff} points en trop**. Réduis certaines stats.` : `Il te manque **${-diff} points**. Ajoutes-en sur d'autres stats.`) + '\n\n' +
-              `💡 **Répartition suggérée (10 pts par stat) :**\n> /create_pilot nom:${nom} nationalite:${nationalite} numero:${numero} depassement:10 freinage:10 defense:10 adaptabilite:10 reactions:10 controle:10 gestionpneus:10\n\n` +
-              `🎲 Ou laisse toutes les stats vides pour une **répartition aléatoire** !`
-            )
-          ],
-          ephemeral: true,
-        });
-      }
-    }
-
-    // Vérifier les valeurs max
-    for (const k of statKeys) {
-      if (finalBonuses[k] > MAX_STAT_BONUS) {
-        return interaction.reply({ content: `❌ La stat **${k}** dépasse le maximum autorisé de ${MAX_STAT_BONUS} points.`, ephemeral: true });
-      }
-    }
-
-    const pilotIndex = existingPilots.length + 1; // 1 ou 2
+    const nom = interaction.options.getString('nom');
+    if (nom.length < 2 || nom.length > 30) return interaction.reply({ content: '❌ Nom entre 2 et 30 caractères.', ephemeral: true });
 
     const pilot = await Pilot.create({
-      discordId   : interaction.user.id,
-      pilotIndex,
-      name        : nom,
-      nationality : nationalite,
-      racingNumber: numero,
-      depassement : BASE_STAT_VALUE + finalBonuses.depassement,
-      freinage    : BASE_STAT_VALUE + finalBonuses.freinage,
-      defense     : BASE_STAT_VALUE + finalBonuses.defense,
-      adaptabilite: BASE_STAT_VALUE + finalBonuses.adaptabilite,
-      reactions   : BASE_STAT_VALUE + finalBonuses.reactions,
-      controle    : BASE_STAT_VALUE + finalBonuses.controle,
-      gestionPneus: BASE_STAT_VALUE + finalBonuses.gestionPneus,
-      plcoins     : 500,
+      discordId: interaction.user.id, name: nom,
+      depassement:  randInt(44, 62), freinage:     randInt(44, 62),
+      defense:      randInt(44, 62), adaptabilite: randInt(44, 62),
+      reactions:    randInt(44, 62), controle:     randInt(44, 62),
+      gestionPneus: randInt(44, 62), plcoins: 500,
     });
 
     const bar      = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10 - Math.round(v/10));
     const ovCreate = overallRating(pilot);
     const tierCr   = ratingTier(ovCreate);
-
-    const isRandomized = provided.length === 0;
-    const styleDesc = statKeys.map(k => {
-      const bonus = finalBonuses[k];
-      const stars  = bonus >= 25 ? ' ⭐' : bonus >= 20 ? ' ✦' : bonus >= 15 ? ' •' : '';
-      const statLabels2 = { depassement:'Dépassement  ', freinage:'Freinage     ', defense:'Défense      ', adaptabilite:'Adaptabilité ', reactions:'Réactions    ', controle:'Contrôle     ', gestionPneus:'Gestion Pneus' };
-      const v = BASE_STAT_VALUE + bonus;
-      return `\`${statLabels2[k]}\` ${bar(v)}  **${v}** (+${bonus})${stars}`;
-    }).join('\n');
-
     return interaction.reply({
       embeds: [new EmbedBuilder()
-        .setTitle(`🏎️ Pilote ${pilotIndex}/2 créé : #${numero} ${pilot.name}`)
+        .setTitle(`🏎️ Pilote créé : ${pilot.name}`)
         .setColor(tierCr.color)
         .setDescription(
-          `${nationalite}  •  **Pilote ${pilotIndex}**  •  Numéro #${numero}\n` +
           `## ${tierCr.badge} **${ovCreate}** — ${tierCr.label}\n\n` +
-          styleDesc + '\n\n' +
-          `💰 **500 PLcoins** de départ\n` +
-          (isRandomized ? `🎲 *Stats réparties aléatoirement — pool de ${TOTAL_STAT_POOL} pts*` : `🎯 *Stats personnalisées — pool de ${TOTAL_STAT_POOL} pts répartis*`)
+          `\`Dépassement  \` ${bar(pilot.depassement)}  **${pilot.depassement}**\n` +
+          `\`Freinage     \` ${bar(pilot.freinage)}  **${pilot.freinage}**\n` +
+          `\`Défense      \` ${bar(pilot.defense)}  **${pilot.defense}**\n` +
+          `\`Adaptabilité \` ${bar(pilot.adaptabilite)}  **${pilot.adaptabilite}**\n` +
+          `\`Réactions    \` ${bar(pilot.reactions)}  **${pilot.reactions}**\n` +
+          `\`Contrôle     \` ${bar(pilot.controle)}  **${pilot.controle}**\n` +
+          `\`Gestion Pneus\` ${bar(pilot.gestionPneus)}  **${pilot.gestionPneus}**\n\n` +
+          `💰 **500 PLcoins** de départ`
         )
-        .setFooter({ text: pilotIndex < 2 ? 'Tu peux créer un 2ème pilote avec /create_pilot ! Attends le draft pour rejoindre une écurie.' : 'Tes 2 pilotes sont créés ! Attends le draft ou la période de transfert.' })
+        .setFooter({ text: 'Attends le draft ou la période de transfert pour rejoindre une écurie !' })
       ],
     });
   }
 
   // ── /profil ───────────────────────────────────────────────
   if (commandName === 'profil') {
-    const target     = interaction.options.getUser('joueur') || interaction.user;
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
-
-    // Si l'utilisateur a 2 pilotes et n'a pas précisé lequel, montrer les deux
-    const allUserPilots = await getAllPilotsForUser(target.id);
-    if (!allUserPilots.length) return interaction.reply({ content: `❌ Aucun pilote pour <@${target.id}>.`, ephemeral: true });
-
-    // Si l'utilisateur a 2 pilotes et demande son profil sans préciser → afficher le choix
-    if (allUserPilots.length > 1 && !interaction.options.getInteger('pilote') && target.id === interaction.user.id) {
-      const listStr = allUserPilots.map(p => {
-        const ov = overallRating(p); const tier = ratingTier(ov);
-        const flag = p.nationality?.split(' ')[0] || '';
-        return `**Pilote ${p.pilotIndex}** — ${flag} #${p.racingNumber || '?'} **${p.name}** ${tier.badge} ${ov}`;
-      }).join('\n');
-      return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle(`🏎️ Tes pilotes`)
-          .setColor('#FF1801')
-          .setDescription(listStr + '\n\n*Utilise `/profil pilote:1` ou `/profil pilote:2` pour voir le détail.*')
-        ],
-        ephemeral: true,
-      });
-    }
-
-    const pilot = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    const target = interaction.options.getUser('joueur') || interaction.user;
+    const pilot  = await Pilot.findOne({ discordId: target.id });
+    if (!pilot) return interaction.reply({ content: `❌ Aucun pilote pour <@${target.id}>.`, ephemeral: true });
 
     const team     = pilot.teamId ? await Team.findById(pilot.teamId) : null;
     const contract = await Contract.findOne({ pilotId: pilot._id, active: true });
@@ -4175,14 +2088,11 @@ async function handleInteraction(interaction) {
 
     const ov   = overallRating(pilot);
     const tier = ratingTier(ov);
-    const numTag  = pilot.racingNumber ? ` #${pilot.racingNumber}` : '';
-    const flagTag = pilot.nationality  ? ` ${pilot.nationality}`  : '';
     const embed = new EmbedBuilder()
-      .setTitle(`${team?.emoji || '🏎️'}${numTag} ${pilot.name} — Pilote ${pilot.pilotIndex}`)
+      .setTitle(`${team?.emoji || '🏎️'} ${pilot.name}`)
       .setColor(tier.color)
       .setThumbnail(pilot.photoUrl || null)
       .setDescription(
-        `${flagTag}  •  **Pilote ${pilot.pilotIndex}/2**\n` +
         `## ${tier.badge} **${ov}** — ${tier.label}\n` +
         (team ? `**${team.name}**` : '🔴 *Sans écurie*') +
         (contract ? `  |  ×${contract.coinMultiplier} · ${contract.seasonsRemaining} saison(s) restante(s)` : '') + '\n\n' +
@@ -4206,287 +2116,37 @@ async function handleInteraction(interaction) {
         value: `**${standing.points} pts** · ${standing.wins}V · ${standing.podiums}P · ${standing.dnfs} DNF`,
       });
     }
-
-    // Spécialisation
-    if (pilot.specialization) {
-      const specMeta = SPECIALIZATION_META[pilot.specialization];
-      embed.addFields({ name: '🏅 Spécialisation',
-        value: specMeta ? `**${specMeta.label}** — *${specMeta.desc}*` : pilot.specialization,
-      });
-    } else if (pilot.upgradeStreak >= 1 && pilot.lastUpgradeStat) {
-      const statLabels = { depassement:'Dépassement', freinage:'Freinage', defense:'Défense', adaptabilite:'Adaptabilité', reactions:'Réactions', controle:'Contrôle', gestionPneus:'Gestion Pneus' };
-      const bar = '🔥'.repeat(pilot.upgradeStreak) + '⬜'.repeat(Math.max(0, 3 - pilot.upgradeStreak));
-      embed.addFields({ name: '📈 Progression spécialisation',
-        value: `${bar} **${pilot.upgradeStreak}/3** upgrades consécutifs sur **${statLabels[pilot.lastUpgradeStat] || pilot.lastUpgradeStat}**`,
-      });
-    }
-
-    // Rivalité
-    if (pilot.rivalId) {
-      const rival = await Pilot.findById(pilot.rivalId);
-      const rivalTeam = rival?.teamId ? await Team.findById(rival.teamId) : null;
-      embed.addFields({ name: '⚔️ Rivalité',
-        value: `${rivalTeam?.emoji || ''} **${rival?.name || '?'}** — ${pilot.rivalContacts || 0} contact(s) en course cette saison`,
-      });
-    }
-
-    // ── Statut coéquipier ────────────────────────────────────
-    if (team && pilot.teamStatus) {
-      const teammate = await Pilot.findOne({
-        teamId: team._id,
-        _id: { $ne: pilot._id },
-      });
-      const statusLabel = pilot.teamStatus === 'numero1'
-        ? `🔴 **Pilote N°1** — ${pilot.teammateDuelWins || 0} duels gagnés`
-        : `🔵 **Pilote N°2** — ${pilot.teammateDuelWins || 0} duels gagnés`;
-      const teammateStr = teammate
-        ? `vs ${teammate.name} (${teammate.teammateDuelWins || 0} duels)`
-        : '';
-      embed.addFields({ name: '👥 Statut dans l\'équipe', value: `${statusLabel}${teammateStr ? '  ·  ' + teammateStr : ''}` });
-    }
-
-    // ── Aperçu rapide des performances (GPRecord) ────────────
-    const gpRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
-    if (gpRecs.length) {
-      const totalGPs   = gpRecs.length;
-      const finished   = gpRecs.filter(r => !r.dnf);
-      const wins       = finished.filter(r => r.finishPos === 1).length;
-      const podiums    = finished.filter(r => r.finishPos <= 3).length;
-      const dnfsTotal  = gpRecs.filter(r => r.dnf).length;
-      const flaps      = gpRecs.filter(r => r.fastestLap).length;
-      const avgPos     = finished.length ? (finished.reduce((s, r) => s + r.finishPos, 0) / finished.length).toFixed(1) : '—';
-      const best       = finished.sort((a, b) => a.finishPos - b.finishPos)[0];
-
-      // Forme : 5 derniers en icônes
-      const formIcons  = gpRecs.slice(0, 5).map(r => {
-        if (r.dnf) return '❌';
-        if (r.finishPos === 1) return '🥇';
-        if (r.finishPos <= 3) return '🏆';
-        if (r.finishPos <= 10) return '✅';
-        return '▪️';
-      }).join('');
-
-      const perfLine =
-        `🥇 **${wins}V** · 🏆 **${podiums}P** · ❌ **${dnfsTotal}** DNF · ⚡ **${flaps}** FL · moy. **P${avgPos}**` +
-        (best ? `\n⭐ Meilleur : **P${best.finishPos}** ${best.circuitEmoji} ${best.circuit} *(S${best.seasonYear})*` : '');
-
-      embed.addFields({ name: `📊 Carrière — ${totalGPs} GP(s)  ·  Forme : ${formIcons}`, value: perfLine });
-    }
-
     return interaction.reply({ embeds: [embed] });
   }
 
   // ── /ameliorer ────────────────────────────────────────────
   if (commandName === 'ameliorer') {
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
-    if (!pilot) {
-      const allP = await getAllPilotsForUser(interaction.user.id);
-      if (!allP.length) return interaction.reply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
-      return interaction.reply({ content: `❌ Tu n'as pas de Pilote ${pilotIndex}. Tes pilotes : ${allP.map(p => `Pilote ${p.pilotIndex} (${p.name})`).join(', ')}`, ephemeral: true });
-    }
+    const pilot = await Pilot.findOne({ discordId: interaction.user.id });
+    if (!pilot) return interaction.reply({ content: '❌ Crée d\'abord ton pilote.', ephemeral: true });
 
     const statKey  = interaction.options.getString('stat');
-    const quantite = interaction.options.getInteger('quantite') || 1;
+    const cost     = STAT_COST[statKey];
     const current  = pilot[statKey];
     const MAX_STAT = 99;
 
-    if (current >= MAX_STAT) return interaction.reply({ content: '❌ Stat déjà au maximum (99) !', ephemeral: true });
+    if (current >= MAX_STAT) return interaction.reply({ content: '❌ Stat déjà au max (99) !', ephemeral: true });
+    if (pilot.plcoins < cost) return interaction.reply({ content: `❌ Pas assez de PLcoins (${pilot.plcoins}/${cost}).`, ephemeral: true });
 
-    // ── Calcul du coût cumulatif (upgrade 1 par 1, comme si fait séparément) ──
-    const maxPossible = Math.min(quantite, MAX_STAT - current);
-    let totalCost = 0;
-    for (let i = 0; i < maxPossible; i++) {
-      totalCost += calcUpgradeCost(statKey, current + i);
-    }
-
-    if (pilot.plcoins < totalCost) {
-      const missing = totalCost - pilot.plcoins;
-      // Calculer combien on peut s'offrir avec le solde actuel
-      let affordable = 0;
-      let affordCost = 0;
-      for (let i = 0; i < maxPossible; i++) {
-        const stepCost = calcUpgradeCost(statKey, current + i);
-        if (affordCost + stepCost <= pilot.plcoins) { affordable++; affordCost += stepCost; }
-        else break;
-      }
-      const costBreakdown = maxPossible > 1
-        ? `\n*Détail : ${Array.from({length: maxPossible}, (_, i) => `+1 = ${calcUpgradeCost(statKey, current + i)} 🪙`).join(' · ')}*`
-        : '';
-      return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle('❌ PLcoins insuffisants')
-          .setColor('#CC4444')
-          .setDescription(
-            `**${statKey}** est actuellement à **${current}** — coût total pour +${maxPossible} : **${totalCost} 🪙**\n` +
-            `Tu as **${pilot.plcoins} 🪙** — il te manque **${missing} 🪙**.` +
-            costBreakdown +
-            (affordable > 0 ? `\n\n💡 Tu peux te permettre **+${affordable}** pour **${affordCost} 🪙** — essaie \`/ameliorer quantite:${affordable}\` !` : '\n\n💡 Continue à courir pour accumuler des PLcoins !')
-          )
-        ],
-        ephemeral: true,
-      });
-    }
-
-    const gain     = maxPossible;
-    const ovBefore = overallRating(pilot);
+    // On calcule le vrai gain sans jamais dépasser 99
+    const gain     = Math.min(2, MAX_STAT - current);
     const newValue = current + gain;
-    const nextCost = newValue < MAX_STAT ? calcUpgradeCost(statKey, newValue) : null;
-    const remaining = pilot.plcoins - totalCost;
 
-    // ── Tracker de streak de spécialisation ──────────────────
-    const isSameStat  = pilot.lastUpgradeStat === statKey;
-    const newStreak   = isSameStat ? (pilot.upgradeStreak || 0) + gain : gain;
-    // Déblocage : 3 consécutifs cumulés ET pas de spécialisation déjà active
-    const unlockSpec  = newStreak >= 3 && !pilot.specialization;
-
-    const updateFields = {
-      $inc: { plcoins: -totalCost },
-      $set: {
-        [statKey]       : newValue,
-        lastUpgradeStat : statKey,
-        upgradeStreak   : unlockSpec ? 0 : newStreak,
-        ...(unlockSpec ? { specialization: statKey } : {}),
-      },
-    };
-    await Pilot.findByIdAndUpdate(pilot._id, updateFields);
-
-    // ── Calcul du nouvel overall pour détecter un gain ────────
-    const updatedPilot = { ...pilot.toObject(), [statKey]: newValue };
-    const ovAfter = overallRating(updatedPilot);
-    const ovGain  = ovAfter - ovBefore;
-
-    const statLabels = {
-      depassement: 'Dépassement', freinage: 'Freinage', defense: 'Défense',
-      adaptabilite: 'Adaptabilité', reactions: 'Réactions', controle: 'Contrôle', gestionPneus: 'Gestion Pneus',
-    };
-
-    const specMeta = SPECIALIZATION_META[statKey];
-    const streakBar = '🔥'.repeat(Math.min(newStreak, 3)) + '⬜'.repeat(Math.max(0, 3 - Math.min(newStreak, 3)));
-
-    const costBreakdownStr = gain > 1
-      ? `\n> *Coût détaillé : ${Array.from({length: gain}, (_, i) => `${calcUpgradeCost(statKey, current + i)} 🪙`).join(' + ')} = **${totalCost} 🪙***`
-      : '';
-
-    const descLines = [
-      `**${statLabels[statKey] || statKey}** : ${current} → **${newValue}** (+${gain})`,
-      `💸 −${totalCost} 🪙 · Solde : **${remaining} 🪙**${costBreakdownStr}`,
-    ];
-
-    // ── 🌟 Notification gain d'overall ───────────────────────
-    if (ovGain > 0) {
-      const tierBefore = ratingTier(ovBefore);
-      const tierAfter  = ratingTier(ovAfter);
-      const tierChanged = tierBefore.label !== tierAfter.label;
-      descLines.push(
-        `\n⭐ **NOTE GÉNÉRALE : ${ovBefore} → ${ovAfter}** (+${ovGain}) ${ovGain >= 2 ? '🚀' : '📈'}` +
-        (tierChanged ? `\n🎉 **NOUVEAU PALIER : ${tierAfter.badge} ${tierAfter.label} !** *(anciennement ${tierBefore.badge} ${tierBefore.label})*` : '')
-      );
-    }
-
-    if (unlockSpec && specMeta) {
-      descLines.push(`\n🏅 **SPÉCIALISATION DÉBLOQUÉE !**`);
-      descLines.push(`**${specMeta.label}**`);
-      descLines.push(`*${specMeta.desc}*`);
-      descLines.push(`\n3 upgrades consécutifs sur **${statLabels[statKey]}** — tu as forgé une identité !`);
-    } else if (pilot.specialization) {
-      const existingSpec = SPECIALIZATION_META[pilot.specialization];
-      descLines.push(`\n✅ Spécialisation active : **${existingSpec?.label || pilot.specialization}**`);
-    } else {
-      // Progression vers spécialisation
-      const streakDisplay = isSameStat ? `${streakBar} ${Math.min(newStreak,3)}/3` : `${streakBar} 1/3 *(streak réinitialisé)*`;
-      descLines.push(`\n${newStreak >= 2 ? '🔥' : '📌'} **Progression spécialisation :** ${streakDisplay}`);
-      if (newStreak < 3) descLines.push(`*Continue sur **${statLabels[statKey]}** pour débloquer : ${specMeta?.label || ''}*`);
-    }
-
-    if (newValue >= MAX_STAT) descLines.push(`\n🔒 **Maximum (99) atteint.**`);
-    else if (nextCost) descLines.push(`📌 Prochain upgrade : **${nextCost} 🪙**`);
-
-    const titleBase = unlockSpec
-      ? `🏅 Spécialisation débloquée — ${pilot.name} !`
-      : ovGain > 0
-        ? `⭐ Amélioration — ${pilot.name} monte à **${ovAfter}** !`
-        : gain > 1
-          ? `📈 +${gain} ${statLabels[statKey]} — ${pilot.name} (Pilote ${pilot.pilotIndex})`
-          : `📈 Amélioration — ${pilot.name} (Pilote ${pilot.pilotIndex})`;
-
-    return interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(titleBase)
-        .setColor(unlockSpec ? '#FF6600' : ovGain > 0 ? '#00C851' : '#FFD700')
-        .setDescription(descLines.join('\n'))
-      ],
+    // Double sécurité : $min garantit que même en cas de race condition, la stat ne dépasse pas 99
+    await Pilot.findByIdAndUpdate(pilot._id, {
+      $inc: { plcoins: -cost },
+      $min: { [statKey]: MAX_STAT },          // si déjà à 99 suite à un race condition, ne bouge pas
+      $set: { [statKey]: newValue },           // valeur calculée côté serveur, plafonnée
     });
-  }
-
-  // ── /palmares ─────────────────────────────────────────────
-  if (commandName === 'palmares') {
-    const entries = await HallOfFame.find().sort({ seasonYear: -1 });
-    if (!entries.length) {
-      return interaction.reply({ content: '🏛️ Le Hall of Fame est vide — aucune saison terminée pour l\'instant.', ephemeral: true });
-    }
-    const embed = new EmbedBuilder()
-      .setTitle('🏛️ HALL OF FAME — Champions F1 PL')
-      .setColor('#FFD700');
-
-    for (const e of entries) {
-      const specNote = e.topRatedName ? `\n👑 Meilleur pilote en fin de saison : **${e.topRatedName}** *(${e.topRatedOv})*` : '';
-      const mostWinsNote = e.mostWinsName && e.mostWinsCount > 0 ? `\n🏆 Roi des victoires : **${e.mostWinsName}** (${e.mostWinsCount}V)` : '';
-      const mostDnfsNote = e.mostDnfsName && e.mostDnfsCount > 0 ? `\n💀 Malchance : **${e.mostDnfsName}** (${e.mostDnfsCount} DNF)` : '';
-      embed.addFields({
-        name: `Saison ${e.seasonYear}`,
-        value: [
-          `${e.champTeamEmoji || '🏎️'} **${e.champPilotName}** — ${e.champTeamName}`,
-          `🥇 **${e.champPoints} pts** · ${e.champWins}V · ${e.champPodiums}P · ${e.champDnfs} DNF`,
-          `🏗️ Constructeur : **${e.champConstrEmoji || ''} ${e.champConstrName}** (${e.champConstrPoints} pts)`,
-          mostWinsNote, mostDnfsNote, specNote,
-        ].filter(Boolean).join('\n'),
-        inline: false,
-      });
-    }
-    embed.setFooter({ text: 'Un champion se forge par le sang, la sueur et les PLcoins.' });
-    return interaction.reply({ embeds: [embed] });
-  }
-
-  // ── /rivalite ─────────────────────────────────────────────
-  if (commandName === 'rivalite') {
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
-    if (!pilot.rivalId) {
-      return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle('⚔️ Aucune rivalité active')
-          .setColor('#888888')
-          .setDescription(
-            `**${pilot.name}** n'a pas encore de rival déclaré cette saison.\n\n` +
-            `*Les rivalités se déclarent après 2 contacts en course avec le même pilote.*`
-          )
-        ],
-        ephemeral: true,
-      });
-    }
-    const rival = await Pilot.findById(pilot.rivalId);
-    const rivalTeam = rival?.teamId ? await Team.findById(rival.teamId) : null;
-    const myTeam    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
-    const embed = new EmbedBuilder()
-      .setTitle(`⚔️ RIVALITÉ : ${pilot.name} vs ${rival?.name || '?'}`)
-      .setColor('#FF4400')
-      .setDescription(
-        `${myTeam?.emoji || ''} **${pilot.name}** *(${overallRating(pilot)})* ` +
-        `vs ${rivalTeam?.emoji || ''} **${rival?.name || '?'}** *(${rival ? overallRating(rival) : '?'})*\n\n` +
-        `💥 **${pilot.rivalContacts || 0} contact(s)** en course cette saison\n\n` +
-        `*La narration signalera leurs prochaines confrontations en course.*`
-      );
-    return interaction.reply({ embeds: [embed] });
-  }
-
-  // ── /admin_reset_rivalites ────────────────────────────────
-  if (commandName === 'admin_reset_rivalites') {
-    if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
-    await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0 } });
-    return interaction.reply({ content: '✅ Toutes les rivalités ont été réinitialisées.', ephemeral: true });
+    return interaction.reply({
+      embeds: [new EmbedBuilder().setTitle('📈 Amélioration !').setColor('#FFD700')
+        .setDescription(`**${statKey}** : ${current} → **${newValue}** (+${gain})\n💸 −${cost} PLcoins` +
+          (newValue >= MAX_STAT ? '\n🔒 **Maximum atteint (99)** — cette stat ne peut plus progresser.' : ''))],
+    });
   }
 
   // ── /ecuries ──────────────────────────────────────────────
@@ -4514,53 +2174,21 @@ async function handleInteraction(interaction) {
 
     const pilots = await Pilot.find({ teamId: team._id });
     const bar    = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10-Math.round(v/10));
-    const season = await getActiveSeason();
-    const cStand = season ? await ConstructorStanding.findOne({ seasonId: season._id, teamId: team._id }) : null;
-
-    // Bloc pilotes avec statut coéquipier
-    let pilotBlock = '';
-    if (pilots.length === 0) {
-      pilotBlock = '*Aucun pilote*';
-    } else if (pilots.length === 1) {
-      const p = pilots[0];
-      const ov = overallRating(p);
-      const tier = ratingTier(ov);
-      pilotBlock = `${tier.badge} **${p.name}** — ${ov} overall`;
-    } else {
-      // Deux pilotes — afficher le duel
-      const [p1, p2] = pilots;
-      const ov1 = overallRating(p1), ov2 = overallRating(p2);
-      const t1 = ratingTier(ov1),   t2 = ratingTier(ov2);
-      const s1Label = p1.teamStatus === 'numero1' ? '🔴 N°1' : p1.teamStatus === 'numero2' ? '🔵 N°2' : '⬜';
-      const s2Label = p2.teamStatus === 'numero1' ? '🔴 N°1' : p2.teamStatus === 'numero2' ? '🔵 N°2' : '⬜';
-      const w1 = p1.teammateDuelWins || 0, w2 = p2.teammateDuelWins || 0;
-      const duelBar = w1 + w2 > 0
-        ? `\`${'█'.repeat(w1)}${'░'.repeat(w2)}\` **${w1}–${w2}**`
-        : '*(pas encore de duel)*';
-      pilotBlock =
-        `${s1Label} ${t1.badge} **${p1.name}** — ${ov1}\n` +
-        `${s2Label} ${t2.badge} **${p2.name}** — ${ov2}\n` +
-        `⚔️ Duel interne : ${duelBar}`;
-    }
-
-    const embed = new EmbedBuilder()
-      .setTitle(`${team.emoji} ${team.name}`)
-      .setColor(team.color)
-      .setDescription(
-        `\`Vitesse Max       \` ${bar(team.vitesseMax)}  **${team.vitesseMax}**\n` +
-        `\`DRS               \` ${bar(team.drs)}  **${team.drs}**\n` +
-        `\`Refroidissement   \` ${bar(team.refroidissement)}  **${team.refroidissement}**\n` +
-        `\`Dirty Air         \` ${bar(team.dirtyAir)}  **${team.dirtyAir}**\n` +
-        `\`Conservation Pneus\` ${bar(team.conservationPneus)}  **${team.conservationPneus}**\n` +
-        `\`Vitesse Moyenne   \` ${bar(team.vitesseMoyenne)}  **${team.vitesseMoyenne}**`
-      );
-
-    embed.addFields({ name: '👥 Pilotes', value: pilotBlock });
-    if (cStand) {
-      embed.addFields({ name: `🏗️ Saison ${season.year}`, value: `**${cStand.points} pts** au constructeurs` });
-    }
-
-    return interaction.reply({ embeds: [embed] });
+    return interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`${team.emoji} ${team.name}`)
+        .setColor(team.color)
+        .setDescription(
+          `\`Vitesse Max       \` ${bar(team.vitesseMax)}  **${team.vitesseMax}**\n` +
+          `\`DRS               \` ${bar(team.drs)}  **${team.drs}**\n` +
+          `\`Refroidissement   \` ${bar(team.refroidissement)}  **${team.refroidissement}**\n` +
+          `\`Dirty Air         \` ${bar(team.dirtyAir)}  **${team.dirtyAir}**\n` +
+          `\`Conservation Pneus\` ${bar(team.conservationPneus)}  **${team.conservationPneus}**\n` +
+          `\`Vitesse Moyenne   \` ${bar(team.vitesseMoyenne)}  **${team.vitesseMoyenne}**\n\n` +
+          `👥 **Pilotes :** ${pilots.length ? pilots.map(p => p.name).join(', ') : 'Aucun'}`
+        )
+      ],
+    });
   }
 
   // ── /classement ───────────────────────────────────────────
@@ -4665,14 +2293,13 @@ async function handleInteraction(interaction) {
 
   // ── /mon_contrat ──────────────────────────────────────────
   if (commandName === 'mon_contrat') {
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const pilot    = await getPilotForUser(interaction.user.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote trouvé. Utilise `/create_pilot`.', ephemeral: true });
+    const pilot    = await Pilot.findOne({ discordId: interaction.user.id });
+    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote.', ephemeral: true });
     const contract = await Contract.findOne({ pilotId: pilot._id, active: true });
-    if (!contract) return interaction.reply({ content: `📋 **${pilot.name}** (Pilote ${pilotIndex}) n'a pas de contrat actif. Attends la période de transfert !`, ephemeral: true });
+    if (!contract) return interaction.reply({ content: '📋 Aucun contrat actif. Attends la période de transfert !', ephemeral: true });
     const team     = await Team.findById(contract.teamId);
     return interaction.reply({
-      embeds: [new EmbedBuilder().setTitle(`📋 Contrat — ${pilot.name} (Pilote ${pilot.pilotIndex})`).setColor(team.color)
+      embeds: [new EmbedBuilder().setTitle('📋 Mon Contrat').setColor(team.color)
         .addFields(
           { name: 'Écurie',              value: `${team.emoji} ${team.name}`,         inline: true },
           { name: 'Durée restante',      value: `${contract.seasonsRemaining} saison(s)`, inline: true },
@@ -4687,11 +2314,10 @@ async function handleInteraction(interaction) {
 
   // ── /offres ───────────────────────────────────────────────
   if (commandName === 'offres') {
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const pilot  = await getPilotForUser(interaction.user.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote trouvé. Utilise `/create_pilot`.', ephemeral: true });
+    const pilot  = await Pilot.findOne({ discordId: interaction.user.id });
+    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote.', ephemeral: true });
     const offers = await TransferOffer.find({ pilotId: pilot._id, status: 'pending' });
-    if (!offers.length) return interaction.reply({ content: `📭 Aucune offre en attente pour **${pilot.name}** (Pilote ${pilotIndex}).`, ephemeral: true });
+    if (!offers.length) return interaction.reply({ content: '📭 Aucune offre en attente.', ephemeral: true });
 
     // Construire un embed + boutons par offre (max 5 offres affichées)
     const embeds = [];
@@ -4741,22 +2367,21 @@ async function handleInteraction(interaction) {
 
   // ── /accepter_offre ───────────────────────────────────────
   if (commandName === 'accepter_offre') {
-    const offerId    = interaction.options.getString('offre_id');
-    let offer;
-    try { offer = await TransferOffer.findById(offerId); } catch(e) {}
-    if (!offer || offer.status !== 'pending')
-      return interaction.reply({ content: '❌ Offre invalide ou expirée.', ephemeral: true });
-
-    // Vérifier que l'offre appartient à un pilote de ce joueur
-    const pilot = await Pilot.findById(offer.pilotId);
-    if (!pilot || pilot.discordId !== interaction.user.id)
-      return interaction.reply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
+    const pilot = await Pilot.findOne({ discordId: interaction.user.id });
+    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote.', ephemeral: true });
 
     const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
     if (activeContract) return interaction.reply({
-      content: `❌ **${pilot.name}** (Pilote ${pilot.pilotIndex}) a un contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin pour changer d\'écurie.`,
+      content: `❌ Contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin pour changer d\'écurie.`,
       ephemeral: true,
     });
+
+    const offerId = interaction.options.getString('offre_id');
+    let offer;
+    try { offer = await TransferOffer.findById(offerId); } catch(e) {}
+    if (!offer || String(offer.pilotId) !== String(pilot._id) || offer.status !== 'pending') {
+      return interaction.reply({ content: '❌ Offre invalide ou expirée.', ephemeral: true });
+    }
 
     const team    = await Team.findById(offer.teamId);
     const inTeam  = await Pilot.countDocuments({ teamId: team._id });
@@ -4778,7 +2403,7 @@ async function handleInteraction(interaction) {
     return interaction.reply({
       embeds: [new EmbedBuilder().setTitle('✅ Contrat signé !').setColor(team.color)
         .setDescription(
-          `**${pilot.name}** (Pilote ${pilot.pilotIndex}) rejoint **${team.emoji} ${team.name}** !\n\n` +
+          `**${pilot.name}** rejoint **${team.emoji} ${team.name}** !\n\n` +
           `×${offer.coinMultiplier} | ${offer.seasons} saison(s) | Salaire : ${offer.salaireBase} 🪙/course\n` +
           `Prime victoire : ${offer.primeVictoire} 🪙 | Prime podium : ${offer.primePodium} 🪙`
         )
@@ -4788,28 +2413,25 @@ async function handleInteraction(interaction) {
 
   // ── /refuser_offre ────────────────────────────────────────
   if (commandName === 'refuser_offre') {
+    const pilot = await Pilot.findOne({ discordId: interaction.user.id });
+    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote.', ephemeral: true });
     const offerId = interaction.options.getString('offre_id');
     let offer;
     try { offer = await TransferOffer.findById(offerId); } catch(e) {}
-    if (!offer) return interaction.reply({ content: '❌ Offre introuvable.', ephemeral: true });
-    // Vérifier que l'offre appartient à ce joueur
-    const pilotForRefuse = await Pilot.findById(offer.pilotId);
-    if (!pilotForRefuse || pilotForRefuse.discordId !== interaction.user.id)
-      return interaction.reply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
+    if (!offer || String(offer.pilotId) !== String(pilot._id)) return interaction.reply({ content: '❌ Offre introuvable.', ephemeral: true });
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'rejected' });
-    return interaction.reply({ content: `🚫 Offre refusée pour **${pilotForRefuse.name}**.`, ephemeral: true });
+    return interaction.reply({ content: '🚫 Offre refusée.', ephemeral: true });
   }
 
   // ── /historique ───────────────────────────────────────────
   if (commandName === 'historique') {
-    const target     = interaction.options.getUser('joueur') || interaction.user;
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const pilot  = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    const target = interaction.options.getUser('joueur') || interaction.user;
+    const pilot  = await Pilot.findOne({ discordId: target.id });
+    if (!pilot) return interaction.reply({ content: `❌ Aucun pilote pour <@${target.id}>.`, ephemeral: true });
 
     // Récupérer tous les standings toutes saisons confondues
     const allStandings = await Standing.find({ pilotId: pilot._id }).sort({ seasonId: 1 });
-    if (!allStandings.length) return interaction.reply({ content: `📊 Aucune saison jouée pour **${pilot.name}**.`, ephemeral: true });
+    if (!allStandings.length) return interaction.reply({ content: '📊 Aucune saison jouée pour ce pilote.', ephemeral: true });
 
     // Batch-fetch les saisons
     const seasonIds = allStandings.map(s => s.seasonId);
@@ -4843,7 +2465,7 @@ async function handleInteraction(interaction) {
 
     const team    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
     const embed   = new EmbedBuilder()
-      .setTitle(`📊 Carrière — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
+      .setTitle(`📊 Carrière — ${pilot.name}`)
       .setColor(team?.color || '#888888')
       .setDescription(desc)
       .addFields({ name: '💰 Total gagné (carrière)', value: `${pilot.totalEarned} PLcoins`, inline: true });
@@ -4858,9 +2480,8 @@ async function handleInteraction(interaction) {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
-    const target     = interaction.options.getUser('joueur') || interaction.user;
-    const url        = interaction.options.getString('url').trim();
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
+    const target = interaction.options.getUser('joueur');
+    const url    = interaction.options.getString('url').trim();
 
     // Vérification basique que c'est une URL valide
     try { new URL(url); } catch {
@@ -4868,11 +2489,11 @@ async function handleInteraction(interaction) {
     }
 
     const pilot = await Pilot.findOneAndUpdate(
-      { discordId: target.id, pilotIndex },
+      { discordId: target.id },
       { photoUrl: url },
       { new: true }
     );
-    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} trouvé pour <@${target.id}>.`, ephemeral: true });
+    if (!pilot) return interaction.reply({ content: `❌ Aucun pilote trouvé pour <@${target.id}>.`, ephemeral: true });
 
     const embed = new EmbedBuilder()
       .setTitle(`📸 Photo mise à jour — ${pilot.name}`)
@@ -4888,16 +2509,19 @@ async function handleInteraction(interaction) {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
+    // Vérifier qu'il n'y a pas un draft actif
     const existing = await DraftSession.findOne({ status: 'active' });
     if (existing) return interaction.reply({ content: '❌ Un draft est déjà en cours !', ephemeral: true });
 
+    // Ordre des teams : budget ASC (plus petite écurie choisit en premier — fair play)
     const teams = await Team.find().sort({ budget: 1 });
     if (!teams.length) return interaction.reply({ content: '❌ Aucune écurie trouvée.', ephemeral: true });
 
-    const freePilots = await Pilot.find({ teamId: null }).sort({ createdAt: 1 });
-    if (!freePilots.length) return interaction.reply({ content: '❌ Aucun pilote libre pour la draft.', ephemeral: true });
+    // Pilotes libres (sans équipe), triés par note
+    const freePilots = await Pilot.find({ teamId: null });
+    if (!freePilots.length) return interaction.reply({ content: '❌ Aucun pilote libre pour le draft.', ephemeral: true });
 
-    const totalRounds = 2;
+    const totalRounds = 2; // 2 pilotes par écurie
     const totalPicks  = teams.length * totalRounds;
 
     const draft = await DraftSession.create({
@@ -4907,41 +2531,40 @@ async function handleInteraction(interaction) {
       status: 'active',
     });
 
-    // ── Embed d'ouverture cinématique ──────────────────────
-    const sortedPilots = [...freePilots]
-      .map(p => { const ov = overallRating(p); const t = ratingTier(ov); const flag = p.nationality?.split(' ')[0] || ''; return { str: `${t.badge} **${ov}** — ${flag} ${p.name} #${p.racingNumber || '?'}`, ov }; })
-      .sort((a, b) => b.ov - a.ov);
+    // Afficher l'ordre du draft
+    const orderStr = teams.map((t, i) => `${i+1}. ${t.emoji} ${t.name}`).join('\n');
+    const pilotListStr = freePilots
+      .map(p => { const ov = overallRating(p); const t = ratingTier(ov); return `${t.badge} **${ov}** — ${p.name}`; })
+      .sort((a, b) => {
+        const getOv = s => parseInt(s.match(/\*\*(\d+)\*\*/)?.[1] || '0');
+        return getOv(b) - getOv(a);
+      })
+      .join('\n');
 
-    const pilotListStr = sortedPilots.map(x => x.str).join('\n');
-    const orderStr = teams.map((t, i) => `**${i+1}.** ${t.emoji} ${t.name}`).join('\n');
-
-    const openingEmbed = new EmbedBuilder()
+    const infoEmbed = new EmbedBuilder()
+      .setTitle('🎯 DRAFT DES ÉCURIES — Début !')
       .setColor('#FFD700')
-      .setTitle('🏁  DRAFT F1 PL — C\'EST PARTI !')
       .setDescription(
-        '> *Les écuries prennent position. Les pilotes attendent. Le championnat commence ici.*\n\u200B'
+        '**Format : Snake Draft** (round 1 = ordre ASC budget · round 2 = ordre inversé)\n' +
+        `**${totalPicks} picks au total** (${teams.length} écuries × ${totalRounds} rounds)\n\u200B`
       )
       .addFields(
-        { name: '📋 Ordre du Round 1', value: orderStr, inline: true },
-        { name: '\u200B', value: '*Round 2 = ordre inversé (snake)*', inline: true },
-        { name: `🏎️ ${freePilots.length} pilotes disponibles`, value: pilotListStr.slice(0, 1024) },
-      )
-      .setFooter({ text: `Format Snake Draft · ${totalPicks} picks au total · ${teams.length} écuries × ${totalRounds} rounds` });
+        { name: '📋 Ordre Round 1', value: orderStr, inline: true },
+        { name: '🏎️ Pilotes disponibles', value: pilotListStr.slice(0, 1024) || 'Aucun', inline: false },
+      );
 
-    await interaction.reply({ embeds: [openingEmbed] });
-
-    // ── Premier "On The Clock" ─────────────────────────────
     const firstTeamId = draftTeamAtIndex(teams.map(t => t._id), 0);
     const firstTeam   = teams.find(t => String(t._id) === String(firstTeamId));
     const sortedFree  = [...freePilots].sort((a, b) => overallRating(b) - overallRating(a));
+    const selectRow   = buildDraftSelectMenu(sortedFree, String(draft._id));
 
-    const clockPayload = buildOnTheClockPayload(
-      firstTeam, 0, totalPicks, 1, 1, teams.length, sortedFree, String(draft._id)
-    );
-    await interaction.followUp(clockPayload);
+    await interaction.reply({ embeds: [infoEmbed] });
+    await interaction.followUp({
+      content: `**Round 1 — Pick 1/${teams.length}** : au tour de **${firstTeam.emoji} ${firstTeam.name}** de choisir !`,
+      components: [selectRow],
+    });
     return;
   }
-
 
   // -- /pilotes --
   if (commandName === 'pilotes') {
@@ -5043,196 +2666,65 @@ async function handleInteraction(interaction) {
     return;
   }
 
-  // -- /admin_test_qualif --
-  if (commandName === 'admin_test_qualif') {
+  // -- /admin_test_quali --
+  if (commandName === 'admin_test_quali') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
     const { testTeams, testPilots, testRace } = buildTestFixtures();
-    await interaction.reply({ content: `⏱️ **Qualifications TEST Q1/Q2/Q3** — style **${testRace.gpStyle.toUpperCase()}** — résultats en cours dans ce channel...`, ephemeral: true });
+    await interaction.reply({ content: `⏱️ **Qualifications de test** — style **${testRace.gpStyle.toUpperCase()}** · résultats en cours...`, ephemeral: true });
 
     ;(async () => {
-      const channel      = interaction.channel;
-      const styleEmojis  = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
-      const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
+      const channel = interaction.channel;
+      const { grid, weather } = await simulateQualifying(testRace, testPilots, testTeams);
+      const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
 
-      const { grid, weather, q3Size, q2Size } = await simulateQualifying(testRace, testPilots, testTeams);
-
-      const q3Grid  = grid.slice(0, q3Size);
-      const q2Grid  = grid.slice(q3Size, q2Size);
-      const q1Grid  = grid.slice(q2Size);
-      const poleman = q3Grid[0];
-
-      // ─── INTRO ─────────────────────────────────────────────
+      // Intro Q
       await channel.send(
         `⏱️ **QUALIFICATIONS — ${testRace.emoji} ${testRace.circuit}** *(TEST)*\n` +
-        `${styleEmojis[testRace.gpStyle]} **${testRace.gpStyle.toUpperCase()}** · Météo : **${weatherLabels[weather] || weather}**\n` +
-        `Les pilotes prennent la piste pour décrocher la meilleure place sur la grille...`
+        `${styleEmojis[testRace.gpStyle]} **${testRace.gpStyle.toUpperCase()}** · Météo : **${weather}**\n` +
+        `Les pilotes s'élancent pour le tour lancé. Un seul tour, tout donner...`
       );
-      await sleep(3000);
+      await sleep(2000);
 
-      // ─── Q1 ────────────────────────────────────────────────
-      await channel.send(`🟡 **Q1 — DÉBUT** · ${grid.length} pilotes en piste · La zone d'élimination commence à P${q2Size + 1}`);
-      await sleep(2500);
+      // Suspense : annonce les temps progressivement
+      const sorted = [...grid];
+      const mid    = Math.floor(sorted.length / 2);
 
-      const midQ1 = [...grid].sort(() => Math.random() - 0.5).slice(0, 4);
+      // Premier secteur — quelques temps intermédiaires
+      const early3 = sorted.slice(0, 3);
       await channel.send(
-        `📻 *Q1 en cours...* ` +
-        midQ1.map(g => `${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time + randInt(200, 800))}`).join(' · ')
-      );
-      await sleep(3000);
-
-      const q1EliminEmbed = new EmbedBuilder()
-        .setTitle(`🔴 Q1 TERMINÉ — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
-        .setColor('#FF4444')
-        .setDescription(
-          `**Éliminés (P${q2Size + 1}–${grid.length}) :**\n` +
-          q1Grid.map((g, i) => {
-            const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
-            return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
-          }).join('\n') +
-          `\n\n**Passage en Q2 :** Top ${q2Size} pilotes ✅`
-        );
-      await channel.send({ embeds: [q1EliminEmbed] });
-      await sleep(4000);
-
-      // ─── Q2 ────────────────────────────────────────────────
-      const q2BubbleLine = grid.slice(q3Size - 1, q3Size + 3).map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
-      await channel.send(
-        `🟡 **Q2 — DÉBUT** · ${q2Size} pilotes en piste · La zone d'élimination commence à P${q3Size + 1}\n` +
-        `*Sur le fil : ${q2BubbleLine}*`
+        `📻 *Q en cours...* ${early3.map((g,i) => `P${i+1} ${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time)}`).join(' · ')}`
       );
       await sleep(2500);
 
-      const midQ2 = q2Grid.concat(q3Grid).sort(() => Math.random() - 0.5).slice(0, 4);
-      await channel.send(
-        `📻 *Q2 en cours...* ` +
-        midQ2.map(g => `${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time + randInt(100, 500))}`).join(' · ')
-      );
-      await sleep(3000);
-
-      const lastQ3    = q3Grid[q3Size - 1];
-      const firstOut  = q2Grid[0];
-      const q2Thriller = ((firstOut.time - lastQ3.time) / 1000).toFixed(3);
-
-      const q2EliminEmbed = new EmbedBuilder()
-        .setTitle(`🔴 Q2 TERMINÉ — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
-        .setColor('#FF8800')
-        .setDescription(
-          `**Éliminés (P${q3Size + 1}–${q2Size}) :**\n` +
-          q2Grid.map((g, i) => {
-            const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
-            return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
-          }).join('\n') +
-          `\n\n⚠️ **${lastQ3.teamEmoji}${lastQ3.pilotName}** passe de justesse — **${q2Thriller}s** d'avance sur **${firstOut.teamEmoji}${firstOut.pilotName}** !` +
-          `\n\n**Passage en Q3 :** Top ${q3Size} pilotes ✅`
-        );
-      await channel.send({ embeds: [q2EliminEmbed] });
-      await sleep(4000);
-
-      // ─── Q3 ────────────────────────────────────────────────
-      const q3Names = q3Grid.map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
-      await channel.send(
-        `🔥 **Q3 — SHOOT-OUT POUR LA POLE !**\n` +
-        `Les ${q3Size} meilleurs pilotes donnent tout — UN tour, TOUT jouer.\n` +
-        `*En piste : ${q3Names}*`
-      );
-      await sleep(3000);
-
-      // Suspense : annonce les temps en sens inverse (dernier → premier)
-      const q3Reversed = [...q3Grid].reverse();
-      for (let i = 0; i < Math.min(3, q3Reversed.length); i++) {
-        const g   = q3Reversed[i];
-        const pos = q3Grid.length - i;
-        await channel.send(`📻 **${g.teamEmoji}${g.pilotName}** — ${msToLapStr(g.time)} · provisoirement **P${pos}**`);
-        await sleep(1500);
-      }
-      await sleep(1500);
-
-      // Embed final Q3 — grille complète
-      const q3Embed = new EmbedBuilder()
-        .setTitle(`🏆 Q3 — GRILLE DE DÉPART OFFICIELLE — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
+      // Embed final grille quali
+      const embed = new EmbedBuilder()
+        .setTitle(`⏱️ Classement Qualifications — ${testRace.emoji} ${testRace.circuit} *(TEST)*`)
         .setColor('#FFD700')
         .setDescription(
-          `Météo Q : **${weatherLabels[weather] || weather}**\n\n` +
-          q3Grid.map((g, i) => {
-            const gap   = i === 0 ? '🏆 **POLE POSITION**' : `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-            const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`P${i+1}\``;
+          `Météo : **${weather}** · **${testRace.gpStyle.toUpperCase()}** ${styleEmojis[testRace.gpStyle]}\n\n` +
+          grid.map((g, i) => {
+            const gap     = i === 0 ? '🏆 **POLE POSITION**' : `+${((g.time - grid[0].time)/1000).toFixed(3)}s`;
+            const medal   = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`P${String(i+1).padStart(2,' ')}\``;
             return `${medal} ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
           }).join('\n') +
-          `\n\n— — —\n` +
-          q2Grid.map((g, i) => {
-            const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-            return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
-          }).join('\n') +
-          `\n` +
-          q1Grid.map((g, i) => {
-            const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-            return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
-          }).join('\n') +
-          `\n\n*⚠️ Session fictive — aucune donnée sauvegardée*`
+          '\n\n*⚠️ Session fictive — aucune donnée sauvegardée*'
         );
-      await channel.send({ embeds: [q3Embed] });
-      await sleep(1500);
+      await channel.send({ embeds: [embed] });
 
-      // Message pole
-      const gap2nd  = q3Grid[1] ? ((q3Grid[1].time - poleman.time) / 1000).toFixed(3) : null;
-      const poleMsg = gap2nd && parseFloat(gap2nd) < 0.1
-        ? `***🏆 POLE POSITION !!! ${poleman.teamEmoji}${poleman.pilotName.toUpperCase()} EN ${msToLapStr(poleman.time)} !!! +${gap2nd}s — ULTRA SERRÉ !!!***`
-        : `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** en **${msToLapStr(poleman.time)}** !` +
-          (gap2nd ? ` **+${gap2nd}s** d'avance sur ${q3Grid[1].teamEmoji}**${q3Grid[1].pilotName}**.` : '');
-      await channel.send(poleMsg);
-
-    })().catch(e => console.error('admin_test_qualif error:', e.message));
+      // Commentaire pole
+      const poleman = grid[0];
+      const gap2nd  = ((grid[1]?.time - grid[0].time) / 1000).toFixed(3);
+      await channel.send(
+        `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** en **${msToLapStr(poleman.time)}** !` +
+        (grid[1] ? ` **+${gap2nd}s** d'avance sur ${grid[1].teamEmoji}**${grid[1].pilotName}**. Belle performance !` : '')
+      );
+    })().catch(e => console.error('admin_test_quali error:', e.message));
     return;
   }
 
   // -- /admin_help --
-  // ── /admin_reset_pilot ────────────────────────────────────
-  if (commandName === 'admin_reset_pilot') {
-    if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
-
-    const target     = interaction.options.getUser('joueur');
-    const pilotIndex = interaction.options.getInteger('pilote'); // null = tout supprimer
-
-    const query = pilotIndex
-      ? { discordId: target.id, pilotIndex }
-      : { discordId: target.id };
-
-    // Récupérer les pilotes avant suppression pour l'affichage
-    const pilotsToDelete = await Pilot.find(query);
-    if (!pilotsToDelete.length) {
-      return interaction.reply({
-        content: `❌ Aucun pilote trouvé pour <@${target.id}>${pilotIndex ? ` (Pilote ${pilotIndex})` : ''}.`,
-        ephemeral: true,
-      });
-    }
-
-    // Supprimer les contrats liés
-    const pilotIds = pilotsToDelete.map(p => p._id);
-    await Contract.deleteMany({ pilotId: { $in: pilotIds } });
-    await TransferOffer.deleteMany({ pilotId: { $in: pilotIds } });
-    await Standing.deleteMany({ pilotId: { $in: pilotIds } });
-    await Pilot.deleteMany({ _id: { $in: pilotIds } });
-
-    const names = pilotsToDelete.map(p => `**${p.name}** (Pilote ${p.pilotIndex}, #${p.racingNumber || '?'})`).join(', ');
-
-    return interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle('🗑️ Pilote(s) supprimé(s)')
-        .setColor('#FF4444')
-        .setDescription(
-          `Pilote(s) de <@${target.id}> supprimé(s) :\n${names}\n\n` +
-          `✅ Contrats, offres et standings liés également supprimés.\n` +
-          `Le joueur peut maintenant recréer son pilote avec \`/create_pilot\`.`
-        )
-      ],
-      ephemeral: true,
-    });
-  }
-
-  // ── /admin_help ───────────────────────────────────────────
   if (commandName === 'admin_help') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
@@ -5240,418 +2732,193 @@ async function handleInteraction(interaction) {
       .setDescription('Toutes les commandes nécessitent la permission **Administrateur**.')
       .addFields(
         { name: '🏁 Saison & Course', value: [
-          '`/admin_new_season` — Crée une nouvelle saison (24 GP au calendrier)',
-          '`/admin_force_practice` — Déclenche les essais libres immédiatement',
-          '`/admin_force_quali` — Déclenche les qualifications Q1/Q2/Q3 immédiatement',
-          '`/admin_force_race` — Déclenche la course immédiatement',
-          '`/admin_evolve_cars` — Affiche l\'état actuel des stats voitures',
-          '`/admin_reset_rivalites` — Réinitialise toutes les rivalités en début de saison',
+          '`/admin_new_season` — Crée une nouvelle saison (24 GP)',
+          '`/admin_force_practice` — Déclenche les essais libres',
+          '`/admin_force_quali` — Déclenche les qualifications',
+          '`/admin_force_race` — Déclenche la course',
+          '`/admin_evolve_cars` — État des stats voitures',
         ].join('\n') },
         { name: '🔄 Transferts & Draft', value: [
-          '`/admin_transfer` — Ouvre la période de transfert (IA génère les offres automatiquement)',
-          '`/admin_draft_start` — Lance le draft snake (attribution manuelle des écuries)',
-        ].join('\n') },
-        { name: '🖼️ Gestion Pilotes', value: [
-          '`/admin_set_photo joueur:@user url:... [pilote:1|2]` — Définit la photo d\'un pilote',
-          '`/admin_reset_pilot joueur:@user [pilote:1|2]` — Supprime le(s) pilote(s) d\'un joueur *(test/reset)*',
+          '`/admin_transfer` — Ouvre la période de transfert (offres IA auto)',
+          '`/admin_draft_start` — Lance le draft snake',
         ].join('\n') },
         { name: '🧪 Test & Debug', value: [
-          '`/admin_test_race` — Simule une course fictive avec pilotes fictifs (aucune sauvegarde)',
-          '`/admin_test_practice` — Simule des essais libres fictifs',
-          '`/admin_test_qualif` — Simule des qualifs Q1/Q2/Q3 fictives',
+          '`/admin_test_race` — Simule une course fictive (aucune sauvegarde)',
+          '`/admin_help` — Affiche ce panneau',
         ].join('\n') },
-        { name: '📋 Procédure de démarrage', value: [
-          '1️⃣ Les joueurs créent leurs pilotes : `/create_pilot` (2 pilotes max par joueur)',
-          '2️⃣ Attribution des écuries via `/admin_draft_start` (snake draft) ou `/admin_transfer`',
-          '3️⃣ `/admin_new_season` — crée la saison et les 24 GP',
-          '4️⃣ Courses auto planifiées : **11h** Essais · **15h** Qualifs · **18h** Course',
-          '5️⃣ Fin de saison : `/admin_transfer` — IA génère les offres de transfert',
+        { name: '📋 Ordre de démarrage', value: [
+          '1️⃣ Tous les joueurs font `/create_pilot`',
+          '2️⃣ `/admin_draft_start` — chaque joueur choisit son écurie',
+          '3️⃣ `/admin_new_season` — crée la saison',
+          '4️⃣ Courses auto à 11h · 15h · 18h',
+          '5️⃣ Fin de saison : `/admin_transfer`',
         ].join('\n') },
-        { name: '⚙️ Infos système', value: [
-          '🏎️ **2 pilotes max** par joueur Discord — nationalité, numéro et stats personnalisables',
-          `📊 **${TOTAL_STAT_POOL} points** à répartir à la création (base ${BASE_STAT_VALUE} par stat)`,
-          '🔔 Keep-alive actif · Ping toutes les 8 min · Courses auto 11h/15h/18h (Europe/Paris)',
-        ].join('\n') },
-      ).setFooter({ text: 'F1 PL Bot — Panneau Admin v2.1' });
+      ).setFooter({ text: 'F1 PL Bot — Panneau Admin' });
     return interaction.reply({ embeds: [adminHelpEmbed], ephemeral: true });
   }
 
   // -- /f1 --
   if (commandName === 'f1') {
-    const allMyPilots = await getAllPilotsForUser(interaction.user.id);
-    let welcomeDesc;
-    if (!allMyPilots.length) {
-      welcomeDesc = "❗ Tu n'as pas encore de pilote — commence par `/create_pilot` !";
-    } else if (allMyPilots.length === 1) {
-      const p = allMyPilots[0]; const ov = overallRating(p); const tier = ratingTier(ov);
-      const flag = p.nationality?.split(' ')[0] || '🏳️';
-      welcomeDesc = `Bienvenue ${flag} **#${p.racingNumber || '?'} ${p.name}** ${tier.badge} ${ov} — *1 pilote créé, tu peux en créer un 2ème !*`;
-    } else {
-      welcomeDesc = `Bienvenue ! Tes pilotes :\n` + allMyPilots.map(p => {
-        const ov = overallRating(p); const tier = ratingTier(ov);
-        const flag = p.nationality?.split(' ')[0] || '🏳️';
-        return `  ${flag} **#${p.racingNumber || '?'} ${p.name}** (Pilote ${p.pilotIndex}) ${tier.badge} ${ov}`;
-      }).join('\n');
-    }
-    const f1Embed = new EmbedBuilder().setTitle('🏎️ F1 PL — Tes commandes joueur').setColor('#FF1801')
-      .setDescription(welcomeDesc)
+    const f1Pilot  = await Pilot.findOne({ discordId: interaction.user.id });
+    const f1Embed  = new EmbedBuilder().setTitle('🏎️ F1 PL — Tes commandes joueur').setColor('#FF1801')
+      .setDescription(f1Pilot ? 'Bienvenue **'+f1Pilot.name+'** !' : "❗ Tu n'as pas encore de pilote — commence par `/create_pilot` !")
       .addFields(
-        { name: '👤 Tes pilotes', value: [
-          '`/create_pilot` — Crée un pilote (nationalité, numéro, stats — **2 max par joueur**)',
-          '`/profil [pilote:1|2]` — Stats, note générale, contrat et classement',
-          '`/ameliorer [pilote:1|2]` — Améliore une stat (+1, coût croissant selon le niveau)',
-          '`/performances [pilote:1|2] [vue:récents|records|écuries|saison]` — Historique complet des GPs',
-          '`/historique [pilote:1|2]` — Carrière complète multi-saisons',
-          '`/rivalite [pilote:1|2]` — Ta rivalité actuelle en saison',
+        { name: '👤 Ton pilote', value: [
+          '`/create_pilot` — Crée ton pilote (1 seul par compte)',
+          '`/profil` — Stats, note générale, contrat et classement',
+          '`/ameliorer` — Améliore une stat (+2 garanti)',
+          '`/historique` — Ta carrière complète',
         ].join('\n') },
         { name: '🏎️ Écuries & Pilotes', value: [
-          '`/pilotes` — Classement général par note (style FIFA)',
-          '`/ecuries` — Liste des 10 écuries avec leurs pilotes',
-          '`/ecurie nom:...` — Stats voiture détaillées d\'une écurie',
-          '`/record_circuit circuit:...` — Record du meilleur tour sur un circuit',
+          '`/pilotes` — Classement par note (style FIFA)',
+          '`/ecuries` — Liste des 10 écuries',
+          '`/ecurie` — Stats détaillées',
         ].join('\n') },
-        { name: '🗞️ Actualités paddock', value: '`/news [page]` — Rumeurs, drama, rivalités, title fight… mis à jour après chaque GP et toutes les ~40h' },
         { name: '📋 Contrats & Transferts', value: [
-          '`/mon_contrat [pilote:1|2]` — Ton contrat actuel',
-          '`/offres [pilote:1|2]` — Offres en attente (boutons interactifs)',
-          '`/accepter_offre offre_id:... [pilote:1|2]` — Accepter une offre',
-          '`/refuser_offre offre_id:... [pilote:1|2]` — Refuser une offre',
+          '`/mon_contrat` — Ton contrat actuel',
+          '`/offres` — Offres en attente (boutons interactifs)',
+          '`/accepter_offre` / `/refuser_offre` — Backup boutons',
         ].join('\n') },
         { name: '🏆 Classements & Calendrier', value: [
-          '`/classement` — Championnat pilotes saison en cours',
+          '`/classement` — Championnat pilotes',
           '`/classement_constructeurs` — Championnat constructeurs',
-          '`/calendrier` — Tous les GP de la saison',
-          '`/resultats` — Résultats de la dernière course',
-          '`/palmares` — 🏛️ Hall of Fame de toutes les saisons',
+          '`/calendrier` — Tous les GP',
+          '`/resultats` — Dernière course',
         ].join('\n') },
         { name: '📖 Infos', value: [
-          '`/concept` — Présentation complète du jeu (pour les nouveaux !)',
+          '`/concept` — Présentation du jeu pour les nouveaux',
           '`/f1` — Affiche ce panneau',
         ].join('\n') },
-      ).setFooter({ text: 'Courses auto : 11h Essais · 15h Qualif · 18h Course (Europe/Paris) · 2 pilotes max par joueur' });
+      ).setFooter({ text: 'Courses auto : 11h Essais · 15h Qualif · 18h Course (Europe/Paris)' });
     return interaction.reply({ embeds: [f1Embed], ephemeral: true });
   }
 
 
-  // ── /performances ─────────────────────────────────────────
-  if (commandName === 'performances') {
-    const target     = interaction.options.getUser('joueur') || interaction.user;
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const vue        = interaction.options.getString('vue') || 'recent';
-
-    const pilot = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
-
-    const team    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
-    const allRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
-
-    if (!allRecs.length) {
-      return interaction.reply({
-        embeds: [new EmbedBuilder()
-          .setTitle(`📊 Performances — ${pilot.name}`)
-          .setColor('#888888')
-          .setDescription('*Aucune course disputée pour l\'instant. Les données s\'accumuleront après chaque GP !*')
-        ],
-        ephemeral: true,
-      });
-    }
-
-    const ov   = overallRating(pilot);
-    const tier = ratingTier(ov);
-    const medals = { 1:'🥇', 2:'🥈', 3:'🥉' };
-    const dnfIcon = { CRASH:'💥', MECHANICAL:'🔩', PUNCTURE:'🫧' };
-    const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
-
-    function posStr(r) {
-      if (r.dnf) return `❌ DNF ${dnfIcon[r.dnfReason] || ''}`;
-      return `${medals[r.finishPos] || `P${r.finishPos}`}`;
-    }
-    function gainLoss(r) {
-      if (r.dnf || r.startPos == null) return '';
-      const diff = r.startPos - r.finishPos;
-      if (diff > 0) return ` ⬆️+${diff}`;
-      if (diff < 0) return ` ⬇️${diff}`;
-      return ' ➡️';
-    }
-
-    const embed = new EmbedBuilder()
-      .setColor(team?.color || tier.color)
-      .setThumbnail(pilot.photoUrl || null);
-
-    // ── VUE RÉCENTS ──────────────────────────────────────────
-    if (vue === 'recent') {
-      const recents = allRecs.slice(0, 10);
-      const lines = recents.map(r => {
-        const fl = r.fastestLap ? ' ⚡' : '';
-        const gl = gainLoss(r);
-        const pts = r.points > 0 ? ` · **${r.points}pts**` : '';
-        const grid = r.startPos ? ` *(grille P${r.startPos})*` : '';
-        return `${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})*\n` +
-               `  ${posStr(r)}${gl}${pts}${fl} — ${r.teamEmoji} ${r.teamName}${grid}`;
-      }).join('\n\n');
-
-      // Forme récente : 5 derniers
-      const last5 = allRecs.slice(0, 5);
-      const formStr = last5.map(r => {
-        if (r.dnf) return '❌';
-        if (r.finishPos === 1) return '🥇';
-        if (r.finishPos <= 3) return '🏆';
-        if (r.finishPos <= 10) return '✅';
-        return '▪️';
-      }).join(' ');
-
-      embed
-        .setTitle(`🕐 Performances récentes — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
-        .setDescription(
-          `${tier.badge} **${ov}** — ${team ? `${team.emoji} ${team.name}` : '*Sans écurie*'}\n` +
-          `Forme : ${formStr} *(5 derniers GPs)*\n\n` +
-          lines
-        )
-        .setFooter({ text: `${allRecs.length} GP(s) au total · Vue Récents` });
-
-    // ── VUE RECORDS ──────────────────────────────────────────
-    } else if (vue === 'records') {
-      const finished = allRecs.filter(r => !r.dnf);
-      const best     = [...finished].sort((a, b) => a.finishPos - b.finishPos);
-      const bestPts  = [...allRecs].sort((a, b) => b.points - a.points);
-      const top5     = best.slice(0, 5);
-      const wins     = finished.filter(r => r.finishPos === 1);
-      const podiums  = finished.filter(r => r.finishPos <= 3);
-      const flaps    = allRecs.filter(r => r.fastestLap);
-      const dnfs     = allRecs.filter(r => r.dnf);
-      const bestGain = [...finished.filter(r => r.startPos)].sort((a, b) => (a.startPos - a.finishPos) < (b.startPos - b.finishPos) ? 1 : -1)[0];
-      const totalPts = allRecs.reduce((s, r) => s + r.points, 0);
-      const totalCoins = allRecs.reduce((s, r) => s + r.coins, 0);
-
-      const top5lines = top5.map(r =>
-        `${medals[r.finishPos] || `P${r.finishPos}`} ${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})* — ${r.teamEmoji} ${r.teamName}` +
-        (r.startPos ? ` *(grille P${r.startPos})*` : '') +
-        (r.fastestLap ? ' ⚡' : '')
-      ).join('\n');
-
-      const statsBlock =
-        `🥇 **${wins.length}** victoire(s) · 🏆 **${podiums.length}** podium(s) · ❌ **${dnfs.length}** DNF\n` +
-        `⚡ **${flaps.length}** meilleur(s) tour(s) · 📊 **${totalPts}** pts totaux · 💰 **${totalCoins}** 🪙 gagnés\n` +
-        (bestGain ? `🚀 Meilleure remontée : **+${bestGain.startPos - bestGain.finishPos}** places (${bestGain.circuitEmoji} ${bestGain.circuit} S${bestGain.seasonYear})\n` : '');
-
-      embed
-        .setTitle(`🏆 Records — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
-        .setDescription(
-          `${tier.badge} **${ov}** — **${allRecs.length}** GP(s) disputé(s)\n\n` +
-          `**📈 Statistiques carrière :**\n${statsBlock}\n` +
-          (top5.length ? `**🎖️ Top ${top5.length} meilleurs résultats :**\n${top5lines}` : '*Aucun résultat sans DNF.*')
-        )
-        .setFooter({ text: 'Vue Records — tous GP confondus' });
-
-    // ── VUE ÉQUIPES ──────────────────────────────────────────
-    } else if (vue === 'teams') {
-      // Regrouper par équipe (nom + emoji pour clé)
-      const teamGroups = new Map();
-      for (const r of allRecs) {
-        const key = r.teamName;
-        if (!teamGroups.has(key)) teamGroups.set(key, { emoji: r.teamEmoji, name: r.teamName, records: [] });
-        teamGroups.get(key).records.push(r);
-      }
-
-      const teamLines = [...teamGroups.values()].map(g => {
-        const recs     = g.records;
-        const finished = recs.filter(r => !r.dnf);
-        const wins     = finished.filter(r => r.finishPos === 1).length;
-        const podiums  = finished.filter(r => r.finishPos <= 3).length;
-        const dnfs2    = recs.filter(r => r.dnf).length;
-        const pts      = recs.reduce((s, r) => s + r.points, 0);
-        const avgPos   = finished.length ? (finished.reduce((s, r) => s + r.finishPos, 0) / finished.length).toFixed(1) : '—';
-        const seasons  = [...new Set(recs.map(r => r.seasonYear))].sort().join(', ');
-        const bestR    = finished.sort((a, b) => a.finishPos - b.finishPos)[0];
-        return (
-          `**${g.emoji} ${g.name}** — S${seasons} · ${recs.length} GP(s)\n` +
-          `  🥇${wins}V · 🏆${podiums}P · ❌${dnfs2} DNF · ${pts}pts · moy. P${avgPos}` +
-          (bestR ? `\n  ⭐ Meilleur : ${medals[bestR.finishPos] || `P${bestR.finishPos}`} ${bestR.circuitEmoji} ${bestR.circuit} S${bestR.seasonYear}` : '')
-        );
-      }).join('\n\n');
-
-      embed
-        .setTitle(`🏎️ Historique des écuries — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
-        .setDescription(
-          `${tier.badge} **${ov}** — **${teamGroups.size}** écurie(s) au total\n\n` +
-          teamLines
-        )
-        .setFooter({ text: 'Vue Écuries — toutes saisons confondues' });
-
-    // ── VUE SAISON ───────────────────────────────────────────
-    } else if (vue === 'season') {
-      // Trouver la saison active ou la plus récente
-      const activeSeason = await getActiveSeason();
-      const targetYear   = activeSeason?.year || (allRecs[0]?.seasonYear);
-      const seasonRecs   = allRecs.filter(r => r.seasonYear === targetYear).sort((a, b) => new Date(a.raceDate) - new Date(b.raceDate));
-
-      if (!seasonRecs.length) {
-        return interaction.reply({ content: `❌ Aucune course jouée en saison ${targetYear}.`, ephemeral: true });
-      }
-
-      const finished  = seasonRecs.filter(r => !r.dnf);
-      const totalPts  = seasonRecs.reduce((s, r) => s + r.points, 0);
-      const wins      = finished.filter(r => r.finishPos === 1).length;
-      const podiums   = finished.filter(r => r.finishPos <= 3).length;
-      const dnfsS     = seasonRecs.filter(r => r.dnf).length;
-      const avgPos    = finished.length ? (finished.reduce((s, r) => s + r.finishPos, 0) / finished.length).toFixed(1) : '—';
-
-      const lines = seasonRecs.map(r => {
-        const fl  = r.fastestLap ? '⚡' : '  ';
-        const gl  = gainLoss(r);
-        const pts = r.points > 0 ? `+${r.points}pts` : '     ';
-        const grid = r.startPos ? `P${String(r.startPos).padStart(2)}→` : '    ';
-        return `${r.circuitEmoji} ${styleEmojis[r.gpStyle] || ''} \`${grid}${posStr(r).padEnd(5)}\` ${fl} ${pts} — ${r.teamEmoji}${r.teamName}${gl}`;
-      }).join('\n');
-
-      embed
-        .setTitle(`📅 Saison ${targetYear} — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
-        .setDescription(
-          `${tier.badge} **${ov}** · **${totalPts} pts** · 🥇${wins}V · 🏆${podiums}P · ❌${dnfsS} DNF · moy. P${avgPos}\n\n` +
-          `\`\`\`\n${lines}\n\`\`\``
-        )
-        .setFooter({ text: `${seasonRecs.length}/${(await Race.countDocuments({ seasonId: activeSeason?._id }))} GPs joués — Saison ${targetYear}` });
-    }
-
-    return interaction.reply({ embeds: [embed] });
-  }
-
-  // ── /record_circuit ───────────────────────────────────────
-  if (commandName === 'record_circuit') {
-    const query = interaction.options.getString('circuit').toLowerCase();
-
-    // Chercher les records dont le nom contient la query
-    const allRecords = await CircuitRecord.find();
-    const matches = allRecords.filter(r => r.circuit.toLowerCase().includes(query));
-
-    if (!matches.length) {
-      return interaction.reply({ content: `❌ Aucun record trouvé pour "${query}". Les records s'établissent après chaque GP.`, ephemeral: true });
-    }
-
-    if (matches.length === 1) {
-      const rec = matches[0];
-      const embed = new EmbedBuilder()
-        .setTitle(`⏱️ Record du circuit — ${rec.circuitEmoji} ${rec.circuit}`)
-        .setColor('#FF6600')
-        .setDescription(
-          `**⚡ ${msToLapStr(rec.bestTimeMs)}**\n\n` +
-          `${rec.teamEmoji} **${rec.pilotName}** — ${rec.teamName}\n` +
-          `📅 Établi en **Saison ${rec.seasonYear}**\n\n` +
-          `*Style : ${rec.gpStyle || 'mixte'} · Ce record peut être battu à chaque nouveau GP sur ce circuit.*`
-        );
-      return interaction.reply({ embeds: [embed] });
-    }
-
-    // Plusieurs résultats
-    const lines = matches.slice(0, 10).map(rec =>
-      `${rec.circuitEmoji} **${rec.circuit}** — ⚡ ${msToLapStr(rec.bestTimeMs)} par **${rec.pilotName}** *(S${rec.seasonYear})*`
-    ).join('\n');
-    return interaction.reply({
-      embeds: [new EmbedBuilder()
-        .setTitle(`⏱️ Records de circuit — ${matches.length} résultats`)
-        .setColor('#FF6600')
-        .setDescription(lines + (matches.length > 10 ? '\n*... et plus. Précise ta recherche.*' : ''))
-      ],
-      ephemeral: true,
-    });
-  }
-
-  // ── /news ─────────────────────────────────────────────────
-  if (commandName === 'news') {
-    const page    = interaction.options.getInteger('page') || 1;
-    const perPage = 5;
-    const skip    = (page - 1) * perPage;
-    const total   = await NewsArticle.countDocuments();
-    const articles = await NewsArticle.find().sort({ publishedAt: -1 }).skip(skip).limit(perPage);
-
-    if (!articles.length) {
-      return interaction.reply({ content: '📰 Aucun article pour l\'instant — les news arrivent après les GPs et toutes les 40h environ.', ephemeral: true });
-    }
-
-    const typeEmojis = {
-      rivalry       : '⚔️',
-      transfer_rumor: '🔄',
-      drama         : '💥',
-      hype          : '🚀',
-      form_crisis   : '📉',
-      teammate_duel : '👥',
-      dev_vague     : '⚙️',
-      scandal       : '💣',
-      title_fight   : '🏆',
-    };
-
-    const lines = articles.map(a => {
-      const src   = NEWS_SOURCES[a.source];
-      const emoji = typeEmojis[a.type] || '📰';
-      const date  = new Date(a.publishedAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
-      return `${emoji} **${a.headline}**\n${src?.name || a.source} · *${date}*\n${a.body.split('\n\n')[0].slice(0, 120)}${a.body.length > 120 ? '...' : ''}`;
-    }).join('\n\n─────────────────\n\n');
-
-    const embed = new EmbedBuilder()
-      .setTitle(`🗞️ Paddock Press — Page ${page}/${Math.ceil(total / perPage)}`)
-      .setColor('#2C3E50')
-      .setDescription(lines)
-      .setFooter({ text: `${total} articles au total · /news page:${page + 1} pour la suite` });
-
-    return interaction.reply({ embeds: [embed] });
-  }
-
-  // ── /admin_news_force ─────────────────────────────────────
-  if (commandName === 'admin_news_force') {
-    if (!interaction.member.permissions.has('Administrator')) {
-      return interaction.reply({ content: '❌ Admin uniquement.', ephemeral: true });
-    }
-    await interaction.deferReply({ ephemeral: true });
-    const channel = client.channels.cache.get(RACE_CHANNEL);
-    if (!channel) return interaction.editReply('❌ Channel non configuré (RACE_CHANNEL_ID manquant).');
-    try {
-      await runScheduledNews(client);
-      return interaction.editReply('✅ Article de news généré et publié.');
-    } catch(e) {
-      return interaction.editReply(`❌ Erreur : ${e.message}`);
-    }
-  }
-
   // ── /concept ──────────────────────────────────────────────
   if (commandName === 'concept') {
     const embed1 = new EmbedBuilder()
-      .setTitle('🏎️ F1 PL — Le championnat entre potes')
+      .setTitle('\u{1F3CE}\uFE0F  Bienvenue dans F1 PL \u2014 Le championnat entre potes !')
       .setColor('#FF1801')
       .setDescription(
-        'Tu incarnes **1 ou 2 pilotes de F1** dans un championnat simulé automatiquement.\n' +
-        'Les courses tournent toutes seules — tu gères ta carrière entre les épreuves.\n\u200B'
+        'Chaque joueur incarne un **pilote de F1** dans un championnat simul\u00e9 automatiquement.\n' +
+        'Les courses tournent toutes seules, mais **tes choix de d\u00e9veloppement et de contrat font toute la diff\u00e9rence**.\n\n' +
+        '**Pas besoin d\u2019\u00eatre l\u00e0 \u00e0 chaque course** \u2014 le bot s\u2019en charge. Tu suis les r\u00e9sultats ici et tu g\u00e8res ta carri\u00e8re entre les courses.\n\u200B'
       )
       .addFields(
-        { name: '📅 Calendrier & Courses', value:
-          '**24 GP** par saison (vrais circuits F1) · **1 weekend par jour** · Chaque circuit a un style : 🏙️ Urbain · 💨 Rapide · ⚙️ Technique · 🔀 Mixte · 🔋 Endurance\n' +
-          '> `11h` 🔧 Essais · `15h` ⏱️ Qualifs Q1/Q2/Q3 · `18h` 🏁 Course *(heure Europe/Paris, auto)*' },
-        { name: '🧬 Créer un pilote — `/create_pilot`', value:
-          '• **Nationalité** + **numéro de course** (1–99, unique)\n' +
-          `• **${TOTAL_STAT_POOL} points** à répartir sur 7 stats (base fixe ${BASE_STAT_VALUE} par stat · max +${MAX_STAT_BONUS}/stat)\n` +
-          '• Stats vides → répartition **aléatoire équilibrée**\n' +
-          '• **2 pilotes max** par compte — chacun a ses propres stats, contrat et coins\n' +
-          '> 💡 Toutes les commandes acceptent l\'option `[pilote:1|2]`' },
-        { name: '🎯 Les 7 stats pilote', value:
-          '`Dépassement` `Freinage` `Défense` `Adaptabilité` `Réactions` `Contrôle` `Gestion Pneus`\n' +
-          '→ Chaque style de circuit valorise des stats différentes. Spécialise-toi pour briller sur certains tracés !\n' +
-          '→ 3 upgrades consécutifs sur la même stat = **Spécialisation débloquée** 🏅 (bonus en course)' },
-        { name: '💰 PLcoins', value:
-          'Gagnés à chaque course (points + salaire + primes). Dépensés avec `/ameliorer [pilote:1|2]` pour booster tes stats (+1 par achat, coût croissant).' },
-        { name: '🚗 Écuries & Contrats — La Draft', value:
-          '**Au début de saison**, pas d\'offres directes : c\'est une **draft** organisée par les admins.\n' +
-          'Les écuries choisissent leurs pilotes dans l\'ordre — ton classement stats influence ton attractivité.\n' +
-          '**En cours de saison** : le mercato s\'ouvre en fin de saison via `/admin_transfer`, les écuries font alors des offres auto. Utilise `/offres [pilote:1|2]` pour accepter.\n' +
-          '> **10 écuries** · stats voiture évolutives · chaque contrat a : multiplicateur coins · salaire · primes V/P · durée' },
-        { name: '🚀 Pour démarrer', value:
-          '1️⃣ `/create_pilot` — crée ton pilote (nationalité, numéro, stats)\n' +
-          '2️⃣ Attends la **draft** organisée par les admins pour rejoindre une écurie\n' +
-          '3️⃣ Suis les résultats ici · `/profil` · `/classement` · `/calendrier`\n' +
-          '4️⃣ Dépense tes gains → `/ameliorer`\n\n' +
-          '> `/f1` pour voir toutes tes commandes · `/profil` pour tes stats complètes' },
-      )
-      .setFooter({ text: 'Bonne saison 🏎️💨' });
+        {
+          name: '\u{1F5D3}\uFE0F  Un week-end de course = 3 \u00e9v\u00e9nements automatiques',
+          value:
+            '`11h00` \u{1F527} **Essais Libres** \u2014 classement indicatif, d\u00e9couverte du circuit\n' +
+            '`15h00` \u23F1\uFE0F **Qualifications** \u2014 d\u00e9termine ta place sur la grille de d\u00e9part\n' +
+            '`18h00` \u{1F3C1} **Course** \u2014 simulation tour par tour avec incidents, SC, pneus...',
+          inline: false,
+        },
+        {
+          name: '\u{1F4C5}  Calendrier',
+          value:
+            '**24 GP** dans la saison \u2014 Bahr\u00e9\u00efn, Monaco, Monza, Silverstone... Les vrais circuits F1.\n' +
+            'Chaque circuit a un **style** qui valorise certaines stats :\n' +
+            '\u{1F3D9}\uFE0F Urbain \u00b7 \u{1F4A8} Rapide \u00b7 \u2699\uFE0F Technique \u00b7 \u{1F500} Mixte \u00b7 \u{1F50B} Endurance',
+          inline: false,
+        },
+      );
 
-    return interaction.reply({ embeds: [embed1] });
+    const embed2 = new EmbedBuilder()
+      .setTitle('\u{1F9EC}  Ton pilote \u2014 Stats & Progression')
+      .setColor('#FFD700')
+      .setDescription('Tu personnalises ton pilote avec **7 stats** (0\u201399), am\u00e9liorables avec les PLcoins gagn\u00e9s en course.')
+      .addFields(
+        {
+          name: '\u{1F3AF}  Les 7 stats pilote',
+          value:
+            '`D\u00e9passement`  \u2192 Attaque en piste, DRS, undercut agressif\n' +
+            '`Freinage`     \u2192 Performance en Q et en zones de freinage\n' +
+            '`D\u00e9fense`      \u2192 R\u00e9sistance aux tentatives de d\u00e9passement\n' +
+            '`Adaptabilit\u00e9` \u2192 M\u00e9t\u00e9o changeante, Safety Car, conditions\n' +
+            '`R\u00e9actions`    \u2192 D\u00e9part, opportunisme, gestion des incidents\n' +
+            '`Contr\u00f4le`     \u2192 Consistance, gestion des limites de piste\n' +
+            '`Gestion Pneus`\u2192 Pr\u00e9servation, fen\u00eatre de fonctionnement',
+          inline: false,
+        },
+        {
+          name: '\u{1F4B0}  PLcoins \u2014 La monnaie du jeu',
+          value:
+            'Tu gagnes des **PLcoins** \u00e0 chaque course (points + salaire contrat + primes).\n' +
+            'Tu les d\u00e9penses pour **am\u00e9liorer tes stats** (+2 garanti \u00e0 chaque fois).\n' +
+            'Objectif\u00a0: construire le pilote parfait pour ton style de jeu.',
+          inline: false,
+        },
+      );
+
+    const embed3 = new EmbedBuilder()
+      .setTitle('\u{1F697}  Les \u00c9curies \u2014 Contrats & Transferts')
+      .setColor('#0099FF')
+      .setDescription('**10 \u00e9curies** du bas de grille au top, chacune avec des **stats voiture** qui \u00e9voluent en cours de saison.')
+      .addFields(
+        {
+          name: '\u{1F527}  Stats voiture (\u00e9voluent chaque course)',
+          value:
+            '`Vitesse Max` \u00b7 `DRS` \u00b7 `Refroidissement`\n`Dirty Air` \u00b7 `Conservation Pneus` \u00b7 `Vitesse Moyenne`\n' +
+            '\u2192 Les \u00e9curies qui marquent des points **d\u00e9veloppent plus vite**. La hi\u00e9rarchie bouge\u00a0!',
+          inline: false,
+        },
+        {
+          name: '\u{1F4CB}  Contrats',
+          value:
+            'Chaque contrat a\u00a0: **multiplicateur PLcoins \u00d7 \u00b7 salaire de base \u00b7 prime victoire \u00b7 prime podium \u00b7 dur\u00e9e**.\n' +
+            'Un contrat est **irr\u00e9vocable** jusqu\u2019\u00e0 son terme \u2014 choisis bien\u00a0!\n' +
+            '\u00c0 la fin de saison \u2192 **p\u00e9riode de transfert** \u2192 nouvelles offres des \u00e9curies.',
+          inline: false,
+        },
+        {
+          name: '\u{1F504}  P\u00e9riode de transfert',
+          value:
+            'Entre deux saisons, les \u00e9curies font des offres automatiques aux pilotes libres.\n' +
+            'Utilise `/offres` pour les voir et les accepter **directement avec les boutons**.',
+          inline: false,
+        },
+      );
+
+    const embed4 = new EmbedBuilder()
+      .setTitle('\u{1F680}  Comment d\u00e9marrer\u00a0?')
+      .setColor('#00FF88')
+      .addFields(
+        {
+          name: '1\uFE0F\u20E3  Cr\u00e9e ton pilote',
+          value: '`/create_pilot nom:TonNom`\nTes stats de d\u00e9part sont al\u00e9atoires entre 44 et 62.',
+          inline: false,
+        },
+        {
+          name: '2\uFE0F\u20E3  Attends la p\u00e9riode de transfert',
+          value: 'Les \u00e9curies t\u2019enverront des offres. Utilise `/offres` pour les accepter avec les boutons.',
+          inline: false,
+        },
+        {
+          name: '3\uFE0F\u20E3  Suis tes courses',
+          value: 'Les r\u00e9sultats tombent ici automatiquement. `/profil` \u00b7 `/classement` \u00b7 `/calendrier`',
+          inline: false,
+        },
+        {
+          name: '4\uFE0F\u20E3  Investis tes PLcoins',
+          value: '`/ameliorer` pour booster une stat (+2 garanti \u00e0 chaque fois).',
+          inline: false,
+        },
+        {
+          name: '\u{1F4D6}  Commandes utiles',
+          value:
+            '`/profil` \u2014 Tes stats & classement saison\n' +
+            '`/historique` \u2014 Ta carri\u00e8re compl\u00e8te\n' +
+            '`/ecurie` \u2014 Stats d\u2019une \u00e9curie\n' +
+            '`/classement` \u2014 Championnat pilotes\n' +
+            '`/classement_constructeurs` \u2014 Championnat \u00e9curies\n' +
+            '`/calendrier` \u2014 Prochains GP\n' +
+            '`/resultats` \u2014 Derni\u00e8re course',
+          inline: false,
+        },
+      )
+      .setFooter({ text: 'Bonne saison \u00e0 tous \u{1F3CE}\uFE0F\u{1F4A8}' });
+
+    return interaction.reply({ embeds: [embed1, embed2, embed3, embed4] });
   }
 
   // ── /admin_new_season ─────────────────────────────────────
@@ -5766,7 +3033,7 @@ async function runQualifying(override) {
   const { pilots, teams } = await getAllPilotsWithTeams();
   if (!pilots.length) return;
 
-  const { grid, weather, q3Size, q2Size } = await simulateQualifying(race, pilots, teams);
+  const { grid, weather } = await simulateQualifying(race, pilots, teams);
   const channel = await getRaceChannel(override);
 
   await Race.findByIdAndUpdate(race._id, {
@@ -5774,140 +3041,18 @@ async function runQualifying(override) {
     status: 'quali_done',
   });
 
-  if (!channel) return;
-
-  const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
-  const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
-  const sleepMs = ms => new Promise(r => setTimeout(r, ms));
-
-  const q3Grid = grid.slice(0, q3Size);
-  const q2Grid = grid.slice(q3Size, q2Size);
-  const q1Grid = grid.slice(q2Size);
-  const poleman = q3Grid[0];
-
-  // ─── INTRO ───────────────────────────────────────────────
-  await channel.send(
-    `⏱️ **QUALIFICATIONS — ${race.emoji} ${race.circuit}**\n` +
-    `${styleEmojis[race.gpStyle] || ''} **${race.gpStyle.toUpperCase()}** · Météo : **${weatherLabels[weather] || weather}**\n` +
-    `Les pilotes prennent la piste pour décrocher la meilleure place sur la grille...`
-  );
-  await sleepMs(3000);
-
-  // ─── Q1 ───────────────────────────────────────────────────
-  await channel.send(`🟡 **Q1 — DÉBUT** · ${grid.length} pilotes en piste · La zone d'élimination commence à P${q2Size + 1}`);
-  await sleepMs(2500);
-
-  // Quelques temps intermédiaires fictifs pendant la session
-  const midQ1 = [...grid].sort(() => Math.random() - 0.5).slice(0, 4);
-  await channel.send(
-    `📻 *Q1 en cours...* ` +
-    midQ1.map(g => `${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time + randInt(200, 800))}`).join(' · ')
-  );
-  await sleepMs(3000);
-
-  // Résultat Q1 — montrer le bas du tableau (les éliminés)
-  const q1EliminEmbed = new EmbedBuilder()
-    .setTitle(`🔴 Q1 TERMINÉ — ${race.emoji} ${race.circuit}`)
-    .setColor('#FF4444')
-    .setDescription(
-      `**Éliminés (P${q2Size + 1}–${grid.length}) :**\n` +
-      q1Grid.map((g, i) => {
-        const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
-        return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
-      }).join('\n') +
-      `\n\n**Passage en Q2 :** Top ${q2Size} pilotes ✅`
-    );
-  await channel.send({ embeds: [q1EliminEmbed] });
-  await sleepMs(4000);
-
-  // ─── Q2 ───────────────────────────────────────────────────
-  const q2BubbleLine = grid.slice(q3Size - 1, q3Size + 3).map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
-  await channel.send(
-    `🟡 **Q2 — DÉBUT** · ${q2Size} pilotes en piste · La zone d'élimination commence à P${q3Size + 1}\n` +
-    `*Sur le fil : ${q2BubbleLine}*`
-  );
-  await sleepMs(2500);
-
-  const midQ2 = q2Grid.concat(q3Grid).sort(() => Math.random() - 0.5).slice(0, 4);
-  await channel.send(
-    `📻 *Q2 en cours...* ` +
-    midQ2.map(g => `${g.teamEmoji}**${g.pilotName}** ${msToLapStr(g.time + randInt(100, 500))}`).join(' · ')
-  );
-  await sleepMs(3000);
-
-  // Drama Q2 : mentionner le pilote qui a failli ne pas passer
-  const lastQ3 = q3Grid[q3Size - 1]; // dernier qualifié en Q3
-  const firstOut = q2Grid[0]; // premier éliminé en Q2
-  const q2Thriller = ((firstOut.time - lastQ3.time) / 1000).toFixed(3);
-
-  const q2EliminEmbed = new EmbedBuilder()
-    .setTitle(`🔴 Q2 TERMINÉ — ${race.emoji} ${race.circuit}`)
-    .setColor('#FF8800')
-    .setDescription(
-      `**Éliminés (P${q3Size + 1}–${q2Size}) :**\n` +
-      q2Grid.map((g, i) => {
-        const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
-        return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
-      }).join('\n') +
-      `\n\n⚠️ **${lastQ3.teamEmoji}${lastQ3.pilotName}** passe de justesse — **${q2Thriller}s** d'avance sur **${firstOut.teamEmoji}${firstOut.pilotName}** !` +
-      `\n\n**Passage en Q3 :** Top ${q3Size} pilotes ✅`
-    );
-  await channel.send({ embeds: [q2EliminEmbed] });
-  await sleepMs(4000);
-
-  // ─── Q3 ───────────────────────────────────────────────────
-  const q3Names = q3Grid.map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
-  await channel.send(
-    `🔥 **Q3 — SHOOT-OUT POUR LA POLE !**\n` +
-    `Les ${q3Size} meilleurs pilotes donnent tout — UN tour, TOUT jouer.\n` +
-    `*En piste : ${q3Names}*`
-  );
-  await sleepMs(3000);
-
-  // Suspense : annoncer les temps progressivement en inverse (dernier → premier)
-  const q3Reversed = [...q3Grid].reverse();
-  for (let i = 0; i < Math.min(3, q3Reversed.length); i++) {
-    const g   = q3Reversed[i];
-    const pos = q3Grid.length - i;
-    await channel.send(`📻 **${g.teamEmoji}${g.pilotName}** — ${msToLapStr(g.time)} · provisoirement **P${pos}**`);
-    await sleepMs(1500);
-  }
-  await sleepMs(1500);
-
-  // Embed final Q3 — grille de départ
-  const q3Embed = new EmbedBuilder()
-    .setTitle(`🏆 Q3 — GRILLE DE DÉPART OFFICIELLE — ${race.emoji} ${race.circuit}`)
+  const embed = new EmbedBuilder()
+    .setTitle(`⏱️ Qualifications — ${race.emoji} ${race.circuit}`)
     .setColor('#FFD700')
     .setDescription(
-      `Météo Q : **${weatherLabels[weather] || weather}**\n\n` +
-      q3Grid.map((g, i) => {
-        const gap    = i === 0 ? '🏆 **POLE POSITION**' : `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-        const medal  = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`P${i+1}\``;
-        return `${medal} ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
-      }).join('\n') +
-      `\n\n— — —\n` +
-      q2Grid.map((g, i) => {
-        const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-        return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
-      }).join('\n') +
-      `\n` +
-      q1Grid.map((g, i) => {
-        const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-        return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
+      `Météo : **${weather}**\n\n` +
+      grid.slice(0,20).map((g,i) => {
+        const gap = i === 0 ? '' : ` (+${((g.time - grid[0].time)/1000).toFixed(3)}s)`;
+        return `**P${i+1}** ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)}${gap}`;
       }).join('\n')
     );
-  await channel.send({ embeds: [q3Embed] });
-  await sleepMs(1500);
 
-  // ─── Message pole position ────────────────────────────────
-  const gap2nd = q3Grid[1] ? ((q3Grid[1].time - poleman.time) / 1000).toFixed(3) : null;
-  const poleMsg = gap2nd && parseFloat(gap2nd) < 0.1
-    ? `***⚡ POLE POSITION INCROYABLE !!! ${poleman.teamEmoji}${poleman.pilotName} EN ${msToLapStr(poleman.time)} !!!***\n*Seulement +${gap2nd}s de marge — la grille est ultra-serrée demain !*`
-    : gap2nd && parseFloat(gap2nd) > 0.5
-      ? `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** — ${msToLapStr(poleman.time)}\n**+${gap2nd}s** d'avance sur ${q3Grid[1]?.teamEmoji}**${q3Grid[1]?.pilotName}**. *Grosse marge — il part favori !*`
-      : `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** — ${msToLapStr(poleman.time)}` +
-        (gap2nd ? ` · **+${gap2nd}s** sur ${q3Grid[1]?.teamEmoji}**${q3Grid[1]?.pilotName}**` : '');
-  await channel.send(poleMsg);
+  if (channel) await channel.send({ embeds: [embed] });
 }
 
 // ── Cérémonie de fin de saison ────────────────────────────
@@ -6019,40 +3164,6 @@ async function sendSeasonCeremony(season, channel) {
     );
 
   await channel.send({ embeds: [recapEmbed] });
-
-  // ── Sauvegarder dans le Hall of Fame ─────────────────────
-  try {
-    const allPilotsAll = await Pilot.find();
-    const topRated = allPilotsAll.reduce((best, p) => {
-      const ov = overallRating(p);
-      return (!best || ov > overallRating(best)) ? p : best;
-    }, null);
-
-    await HallOfFame.findOneAndUpdate(
-      { seasonYear: season.year },
-      {
-        seasonYear      : season.year,
-        champPilotId    : champ?._id || null,
-        champPilotName  : champ?.name || '?',
-        champTeamName   : champTeam?.name || '?',
-        champTeamEmoji  : champTeam?.emoji || '🏎️',
-        champPoints     : champStanding?.points || 0,
-        champWins       : champStanding?.wins || 0,
-        champPodiums    : champStanding?.podiums || 0,
-        champDnfs       : champStanding?.dnfs || 0,
-        champConstrName  : champConstr?.name || '?',
-        champConstrEmoji : champConstr?.emoji || '🏗️',
-        champConstrPoints: constrStandings[0]?.points || 0,
-        mostWinsName    : mostWins ? pilotMap.get(String(mostWins.pilotId))?.name : null,
-        mostWinsCount   : mostWins?.wins || 0,
-        mostDnfsName    : mostDnfs ? pilotMap.get(String(mostDnfs.pilotId))?.name : null,
-        mostDnfsCount   : mostDnfs?.dnfs || 0,
-        topRatedName    : topRated?.name || null,
-        topRatedOv      : topRated ? overallRating(topRated) : null,
-      },
-      { upsert: true }
-    );
-  } catch(e) { console.error('HallOfFame save error:', e.message); }
 }
 
 async function runRace(override) {
@@ -6076,38 +3187,8 @@ async function runRace(override) {
   }
 
   const channel = await getRaceChannel(override);
-  const { results, collisions } = await simulateRace(race, grid, pilots, teams, contracts, channel);
-  await applyRaceResults(results, race._id, season, collisions);
-
-  // ── Annonce rivalités nouvellement déclarées ─────────────
-  if (channel && collisions.length) {
-    // Recharger les pilotes pour voir les rivalités mises à jour
-    const updatedPilots = await Pilot.find({ _id: { $in: pilots.map(p => p._id) } });
-    const rivalAnnounces = [];
-    for (const p of updatedPilots) {
-      if (!p.rivalId) continue;
-      const rival = updatedPilots.find(r => String(r._id) === String(p.rivalId));
-      if (!rival) continue;
-      // Annoncer seulement si la rivalité a été confirmée (2+ contacts) et pas encore annoncée
-      if ((p.rivalContacts || 0) === 2) {
-        const pTeam = pilots.find(pi => String(pi._id) === String(p._id));
-        const rTeam = pilots.find(pi => String(pi._id) === String(rival._id));
-        // Éviter les doublons (A-B et B-A)
-        const pairKey = [String(p._id), String(rival._id)].sort().join('_');
-        if (!rivalAnnounces.includes(pairKey)) {
-          rivalAnnounces.push(pairKey);
-          const ptTeam = teams.find(t => String(t._id) === String(p.teamId));
-          const rvTeam = teams.find(t => String(t._id) === String(rival.teamId));
-          await channel.send(
-            `⚔️ **RIVALITÉ DÉCLARÉE !**\n` +
-            `${ptTeam?.emoji || ''}**${p.name}** vs ${rvTeam?.emoji || ''}**${rival.name}** — ` +
-            `2 contacts en course cette saison. *Ces deux-là ne s'aiment pas...*\n` +
-            `*La narration prendra note de leurs prochaines confrontations !*`
-          );
-        }
-      }
-    }
-  }
+  const results = await simulateRace(race, grid, pilots, teams, contracts, channel);
+  await applyRaceResults(results, race._id, season);
 
   // Tableau final
   const embed = new EmbedBuilder().setTitle(`🏁 Résultats Officiels — ${race.emoji} ${race.circuit}`).setColor('#FF1801');
