@@ -2136,8 +2136,8 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     }
   }
 
-  // Limiter à 2 articles max par GP pour ne pas noyer le channel
-  const toPost = articlesToPost.slice(0, 2);
+  // Limiter à 3 articles max par GP pour ne pas noyer le channel
+  const toPost = articlesToPost.slice(0, 3);
 
   for (const articleData of toPost) {
     const article = await NewsArticle.create({ ...articleData, raceId: race._id, triggered: 'post_race', publishedAt: new Date() });
@@ -3727,17 +3727,17 @@ client.once('ready', async () => {
   console.log('✅ Slash commands enregistrées');
   startScheduler();
 
-  // ── Job news 1-2 fois par jour (base 18h ±6h de variation) ──
-  const NEWS_INTERVAL_BASE = 18 * 60 * 60 * 1000;
+  // ── Job news toutes les 40h (±8h de variation) pour du naturel ──
+  const NEWS_INTERVAL_BASE = 40 * 60 * 60 * 1000;
   const scheduleNextNews = () => {
-    const jitter = (Math.random() - 0.5) * 12 * 60 * 60 * 1000; // ±6h → entre 12h et 24h
+    const jitter = (Math.random() - 0.5) * 8 * 60 * 60 * 1000; // ±8h
     setTimeout(async () => {
       try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news error:', e); }
       scheduleNextNews();
     }, NEWS_INTERVAL_BASE + jitter);
   };
   scheduleNextNews();
-  console.log('✅ Job news planifié (1-2 fois par jour, entre 12h et 24h)');
+  console.log('✅ Job news planifié (toutes les ~40h)');
 });
 
 // ============================================================
@@ -3989,12 +3989,23 @@ async function handleInteraction(interaction) {
   if (!interaction.isChatInputCommand()) return;
   const { commandName } = interaction;
 
+  // ── Defer immédiat pour éviter le timeout Discord (3s) ───
+  // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
+  const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
+    'admin_news_force', 'admin_new_season', 'admin_transfer'];
+  const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
+    'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
+    'f1','admin_news_force','concept'].includes(commandName);
+  if (!NO_DEFER.includes(commandName)) {
+    await interaction.deferReply({ ephemeral: isEphemeral });
+  }
+
   // ── /create_pilot ─────────────────────────────────────────
   if (commandName === 'create_pilot') {
     // Vérifier combien de pilotes ce joueur a déjà
     const existingPilots = await getAllPilotsForUser(interaction.user.id);
     if (existingPilots.length >= 2) {
-      return interaction.reply({
+      return interaction.editReply({
         embeds: [new EmbedBuilder()
           .setTitle('❌ Limite atteinte')
           .setColor('#CC4444')
@@ -4012,12 +4023,12 @@ async function handleInteraction(interaction) {
     const numero      = interaction.options.getInteger('numero');
 
     if (nom.length < 2 || nom.length > 30)
-      return interaction.reply({ content: '❌ Nom entre 2 et 30 caractères.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Nom entre 2 et 30 caractères.', ephemeral: true });
 
     // Vérifier que le numéro n'est pas déjà pris
     const numTaken = await Pilot.findOne({ racingNumber: numero });
     if (numTaken)
-      return interaction.reply({ content: `❌ Le numéro **#${numero}** est déjà pris par **${numTaken.name}**. Choisis un autre !`, ephemeral: true });
+      return interaction.editReply({ content: `❌ Le numéro **#${numero}** est déjà pris par **${numTaken.name}**. Choisis un autre !`, ephemeral: true });
 
     // Récupérer les bonus de stats fournis (null = non fourni)
     const statOptions = {
@@ -4068,7 +4079,7 @@ async function handleInteraction(interaction) {
       const finalTotal = statKeys.reduce((s, k) => s + finalBonuses[k], 0);
       if (finalTotal !== TOTAL_STAT_POOL) {
         const diff = finalTotal - TOTAL_STAT_POOL;
-        return interaction.reply({
+        return interaction.editReply({
           embeds: [new EmbedBuilder()
             .setTitle('❌ Répartition de stats invalide')
             .setColor('#CC4444')
@@ -4087,7 +4098,7 @@ async function handleInteraction(interaction) {
     // Vérifier les valeurs max
     for (const k of statKeys) {
       if (finalBonuses[k] > MAX_STAT_BONUS) {
-        return interaction.reply({ content: `❌ La stat **${k}** dépasse le maximum autorisé de ${MAX_STAT_BONUS} points.`, ephemeral: true });
+        return interaction.editReply({ content: `❌ La stat **${k}** dépasse le maximum autorisé de ${MAX_STAT_BONUS} points.`, ephemeral: true });
       }
     }
 
@@ -4122,7 +4133,7 @@ async function handleInteraction(interaction) {
       return `\`${statLabels2[k]}\` ${bar(v)}  **${v}** (+${bonus})${stars}`;
     }).join('\n');
 
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder()
         .setTitle(`🏎️ Pilote ${pilotIndex}/2 créé : #${numero} ${pilot.name}`)
         .setColor(tierCr.color)
@@ -4145,7 +4156,7 @@ async function handleInteraction(interaction) {
 
     // Si l'utilisateur a 2 pilotes et n'a pas précisé lequel, montrer les deux
     const allUserPilots = await getAllPilotsForUser(target.id);
-    if (!allUserPilots.length) return interaction.reply({ content: `❌ Aucun pilote pour <@${target.id}>.`, ephemeral: true });
+    if (!allUserPilots.length) return interaction.editReply({ content: `❌ Aucun pilote pour <@${target.id}>.`, ephemeral: true });
 
     // Si l'utilisateur a 2 pilotes et demande son profil sans préciser → afficher le choix
     if (allUserPilots.length > 1 && !interaction.options.getInteger('pilote') && target.id === interaction.user.id) {
@@ -4154,7 +4165,7 @@ async function handleInteraction(interaction) {
         const flag = p.nationality?.split(' ')[0] || '';
         return `**Pilote ${p.pilotIndex}** — ${flag} #${p.racingNumber || '?'} **${p.name}** ${tier.badge} ${ov}`;
       }).join('\n');
-      return interaction.reply({
+      return interaction.editReply({
         embeds: [new EmbedBuilder()
           .setTitle(`🏎️ Tes pilotes`)
           .setColor('#FF1801')
@@ -4165,7 +4176,7 @@ async function handleInteraction(interaction) {
     }
 
     const pilot = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
 
     const team     = pilot.teamId ? await Team.findById(pilot.teamId) : null;
     const contract = await Contract.findOne({ pilotId: pilot._id, active: true });
@@ -4273,7 +4284,7 @@ async function handleInteraction(interaction) {
       embed.addFields({ name: `📊 Carrière — ${totalGPs} GP(s)  ·  Forme : ${formIcons}`, value: perfLine });
     }
 
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /ameliorer ────────────────────────────────────────────
@@ -4282,8 +4293,8 @@ async function handleInteraction(interaction) {
     const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
     if (!pilot) {
       const allP = await getAllPilotsForUser(interaction.user.id);
-      if (!allP.length) return interaction.reply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
-      return interaction.reply({ content: `❌ Tu n'as pas de Pilote ${pilotIndex}. Tes pilotes : ${allP.map(p => `Pilote ${p.pilotIndex} (${p.name})`).join(', ')}`, ephemeral: true });
+      if (!allP.length) return interaction.editReply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
+      return interaction.editReply({ content: `❌ Tu n'as pas de Pilote ${pilotIndex}. Tes pilotes : ${allP.map(p => `Pilote ${p.pilotIndex} (${p.name})`).join(', ')}`, ephemeral: true });
     }
 
     const statKey  = interaction.options.getString('stat');
@@ -4291,7 +4302,7 @@ async function handleInteraction(interaction) {
     const current  = pilot[statKey];
     const MAX_STAT = 99;
 
-    if (current >= MAX_STAT) return interaction.reply({ content: '❌ Stat déjà au maximum (99) !', ephemeral: true });
+    if (current >= MAX_STAT) return interaction.editReply({ content: '❌ Stat déjà au maximum (99) !', ephemeral: true });
 
     // ── Calcul du coût cumulatif (upgrade 1 par 1, comme si fait séparément) ──
     const maxPossible = Math.min(quantite, MAX_STAT - current);
@@ -4313,7 +4324,7 @@ async function handleInteraction(interaction) {
       const costBreakdown = maxPossible > 1
         ? `\n*Détail : ${Array.from({length: maxPossible}, (_, i) => `+1 = ${calcUpgradeCost(statKey, current + i)} 🪙`).join(' · ')}*`
         : '';
-      return interaction.reply({
+      return interaction.editReply({
         embeds: [new EmbedBuilder()
           .setTitle('❌ PLcoins insuffisants')
           .setColor('#CC4444')
@@ -4410,7 +4421,7 @@ async function handleInteraction(interaction) {
           ? `📈 +${gain} ${statLabels[statKey]} — ${pilot.name} (Pilote ${pilot.pilotIndex})`
           : `📈 Amélioration — ${pilot.name} (Pilote ${pilot.pilotIndex})`;
 
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder()
         .setTitle(titleBase)
         .setColor(unlockSpec ? '#FF6600' : ovGain > 0 ? '#00C851' : '#FFD700')
@@ -4423,7 +4434,7 @@ async function handleInteraction(interaction) {
   if (commandName === 'palmares') {
     const entries = await HallOfFame.find().sort({ seasonYear: -1 });
     if (!entries.length) {
-      return interaction.reply({ content: '🏛️ Le Hall of Fame est vide — aucune saison terminée pour l\'instant.', ephemeral: true });
+      return interaction.editReply({ content: '🏛️ Le Hall of Fame est vide — aucune saison terminée pour l\'instant.', ephemeral: true });
     }
     const embed = new EmbedBuilder()
       .setTitle('🏛️ HALL OF FAME — Champions F1 PL')
@@ -4445,16 +4456,16 @@ async function handleInteraction(interaction) {
       });
     }
     embed.setFooter({ text: 'Un champion se forge par le sang, la sueur et les PLcoins.' });
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /rivalite ─────────────────────────────────────────────
   if (commandName === 'rivalite') {
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
+    if (!pilot) return interaction.editReply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
     if (!pilot.rivalId) {
-      return interaction.reply({
+      return interaction.editReply({
         embeds: [new EmbedBuilder()
           .setTitle('⚔️ Aucune rivalité active')
           .setColor('#888888')
@@ -4478,15 +4489,15 @@ async function handleInteraction(interaction) {
         `💥 **${pilot.rivalContacts || 0} contact(s)** en course cette saison\n\n` +
         `*La narration signalera leurs prochaines confrontations en course.*`
       );
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /admin_reset_rivalites ────────────────────────────────
   if (commandName === 'admin_reset_rivalites') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Accès refusé.', ephemeral: true });
     await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0 } });
-    return interaction.reply({ content: '✅ Toutes les rivalités ont été réinitialisées.', ephemeral: true });
+    return interaction.editReply({ content: '✅ Toutes les rivalités ont été réinitialisées.', ephemeral: true });
   }
 
   // ── /ecuries ──────────────────────────────────────────────
@@ -4503,14 +4514,14 @@ async function handleInteraction(interaction) {
         inline: false,
       });
     }
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /ecurie ───────────────────────────────────────────────
   if (commandName === 'ecurie') {
     const nom  = interaction.options.getString('nom');
     const team = await Team.findOne({ name: { $regex: nom, $options: 'i' } });
-    if (!team) return interaction.reply({ content: '❌ Écurie introuvable.', ephemeral: true });
+    if (!team) return interaction.editReply({ content: '❌ Écurie introuvable.', ephemeral: true });
 
     const pilots = await Pilot.find({ teamId: team._id });
     const bar    = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10-Math.round(v/10));
@@ -4560,13 +4571,13 @@ async function handleInteraction(interaction) {
       embed.addFields({ name: `🏗️ Saison ${season.year}`, value: `**${cStand.points} pts** au constructeurs` });
     }
 
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /classement ───────────────────────────────────────────
   if (commandName === 'classement') {
     const season = await getActiveSeason();
-    if (!season) return interaction.reply({ content: '❌ Aucune saison active.', ephemeral: true });
+    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
 
     const standings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).limit(20);
     const medals    = ['🥇','🥈','🥉'];
@@ -4585,7 +4596,7 @@ async function handleInteraction(interaction) {
       const team  = pilot?.teamId ? teamMap.get(String(pilot.teamId)) : null;
       desc += `${medals[i] || `**${i+1}.**`} ${team?.emoji||''} **${pilot?.name||'?'}** — ${s.points} pts (${s.wins}V ${s.podiums}P ${s.dnfs}DNF)\n`;
     }
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder().setTitle(`🏆 Classement Pilotes — Saison ${season.year}`).setColor('#FF1801').setDescription(desc||'Aucune donnée')],
     });
   }
@@ -4593,7 +4604,7 @@ async function handleInteraction(interaction) {
   // ── /classement_constructeurs ─────────────────────────────
   if (commandName === 'classement_constructeurs') {
     const season = await getActiveSeason();
-    if (!season) return interaction.reply({ content: '❌ Aucune saison active.', ephemeral: true });
+    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
 
     const standings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
 
@@ -4607,7 +4618,7 @@ async function handleInteraction(interaction) {
       const team = teamMap2.get(String(standings[i].teamId));
       desc += `**${i+1}.** ${team?.emoji||''} **${team?.name||'?'}** — ${standings[i].points} pts\n`;
     }
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder().setTitle(`🏗️ Classement Constructeurs — Saison ${season.year}`).setColor('#0099FF').setDescription(desc||'Aucune donnée')],
     });
   }
@@ -4615,7 +4626,7 @@ async function handleInteraction(interaction) {
   // ── /calendrier ───────────────────────────────────────────
   if (commandName === 'calendrier') {
     const season = await getActiveSeason();
-    if (!season) return interaction.reply({ content: '❌ Aucune saison active.', ephemeral: true });
+    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
 
     const races = await Race.find({ seasonId: season._id }).sort({ index: 1 });
     const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
@@ -4630,16 +4641,16 @@ async function handleInteraction(interaction) {
     for (let i = 0; i < lines.length; i += 12) chunks.push(lines.slice(i, i+12).join('\n'));
     const embed = new EmbedBuilder().setTitle(`📅 Calendrier — Saison ${season.year}`).setColor('#0099FF').setDescription(chunks[0]);
     if (chunks[1]) embed.addFields({ name: '\u200B', value: chunks[1] });
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /resultats ────────────────────────────────────────────
   if (commandName === 'resultats') {
     const season = await getActiveSeason();
-    if (!season) return interaction.reply({ content: '❌ Aucune saison active.', ephemeral: true });
+    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
 
     const lastRace = await Race.findOne({ seasonId: season._id, status: 'done' }).sort({ index: -1 });
-    if (!lastRace) return interaction.reply({ content: '❌ Aucune course terminée.', ephemeral: true });
+    if (!lastRace) return interaction.editReply({ content: '❌ Aucune course terminée.', ephemeral: true });
 
     const medals = ['🥇','🥈','🥉'];
     let desc = '';
@@ -4653,7 +4664,7 @@ async function handleInteraction(interaction) {
       if (r.fastestLap) desc += ' ⚡';
       desc += '\n';
     }
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder()
         .setTitle(`${lastRace.emoji} Résultats — ${lastRace.circuit}`)
         .setColor('#FF1801')
@@ -4667,11 +4678,11 @@ async function handleInteraction(interaction) {
   if (commandName === 'mon_contrat') {
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const pilot    = await getPilotForUser(interaction.user.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote trouvé. Utilise `/create_pilot`.', ephemeral: true });
+    if (!pilot) return interaction.editReply({ content: '❌ Aucun pilote trouvé. Utilise `/create_pilot`.', ephemeral: true });
     const contract = await Contract.findOne({ pilotId: pilot._id, active: true });
-    if (!contract) return interaction.reply({ content: `📋 **${pilot.name}** (Pilote ${pilotIndex}) n'a pas de contrat actif. Attends la période de transfert !`, ephemeral: true });
+    if (!contract) return interaction.editReply({ content: `📋 **${pilot.name}** (Pilote ${pilotIndex}) n'a pas de contrat actif. Attends la période de transfert !`, ephemeral: true });
     const team     = await Team.findById(contract.teamId);
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder().setTitle(`📋 Contrat — ${pilot.name} (Pilote ${pilot.pilotIndex})`).setColor(team.color)
         .addFields(
           { name: 'Écurie',              value: `${team.emoji} ${team.name}`,         inline: true },
@@ -4689,9 +4700,9 @@ async function handleInteraction(interaction) {
   if (commandName === 'offres') {
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const pilot  = await getPilotForUser(interaction.user.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: '❌ Aucun pilote trouvé. Utilise `/create_pilot`.', ephemeral: true });
+    if (!pilot) return interaction.editReply({ content: '❌ Aucun pilote trouvé. Utilise `/create_pilot`.', ephemeral: true });
     const offers = await TransferOffer.find({ pilotId: pilot._id, status: 'pending' });
-    if (!offers.length) return interaction.reply({ content: `📭 Aucune offre en attente pour **${pilot.name}** (Pilote ${pilotIndex}).`, ephemeral: true });
+    if (!offers.length) return interaction.editReply({ content: `📭 Aucune offre en attente pour **${pilot.name}** (Pilote ${pilotIndex}).`, ephemeral: true });
 
     // Construire un embed + boutons par offre (max 5 offres affichées)
     const embeds = [];
@@ -4725,7 +4736,7 @@ async function handleInteraction(interaction) {
 
     // Discord limite à 1 embed + 5 rows par message — on envoie en éphémère
     // On envoie chaque offre séparément si > 1
-    await interaction.reply({
+    await interaction.editReply({
       content: `📬 **${offers.length} offre(s) en attente.** Les boutons expirent après 10 min — utilise \`/accepter_offre <ID>\` en secours.`,
       embeds:  [embeds[0]],
       components: [components[0]],
@@ -4745,22 +4756,22 @@ async function handleInteraction(interaction) {
     let offer;
     try { offer = await TransferOffer.findById(offerId); } catch(e) {}
     if (!offer || offer.status !== 'pending')
-      return interaction.reply({ content: '❌ Offre invalide ou expirée.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Offre invalide ou expirée.', ephemeral: true });
 
     // Vérifier que l'offre appartient à un pilote de ce joueur
     const pilot = await Pilot.findById(offer.pilotId);
     if (!pilot || pilot.discordId !== interaction.user.id)
-      return interaction.reply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
 
     const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
-    if (activeContract) return interaction.reply({
+    if (activeContract) return interaction.editReply({
       content: `❌ **${pilot.name}** (Pilote ${pilot.pilotIndex}) a un contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin pour changer d\'écurie.`,
       ephemeral: true,
     });
 
     const team    = await Team.findById(offer.teamId);
     const inTeam  = await Pilot.countDocuments({ teamId: team._id });
-    if (inTeam >= 2) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
+    if (inTeam >= 2) return interaction.editReply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
 
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
     await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
@@ -4775,7 +4786,7 @@ async function handleInteraction(interaction) {
       active: true,
     });
 
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder().setTitle('✅ Contrat signé !').setColor(team.color)
         .setDescription(
           `**${pilot.name}** (Pilote ${pilot.pilotIndex}) rejoint **${team.emoji} ${team.name}** !\n\n` +
@@ -4791,13 +4802,13 @@ async function handleInteraction(interaction) {
     const offerId = interaction.options.getString('offre_id');
     let offer;
     try { offer = await TransferOffer.findById(offerId); } catch(e) {}
-    if (!offer) return interaction.reply({ content: '❌ Offre introuvable.', ephemeral: true });
+    if (!offer) return interaction.editReply({ content: '❌ Offre introuvable.', ephemeral: true });
     // Vérifier que l'offre appartient à ce joueur
     const pilotForRefuse = await Pilot.findById(offer.pilotId);
     if (!pilotForRefuse || pilotForRefuse.discordId !== interaction.user.id)
-      return interaction.reply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'rejected' });
-    return interaction.reply({ content: `🚫 Offre refusée pour **${pilotForRefuse.name}**.`, ephemeral: true });
+    return interaction.editReply({ content: `🚫 Offre refusée pour **${pilotForRefuse.name}**.`, ephemeral: true });
   }
 
   // ── /historique ───────────────────────────────────────────
@@ -4805,11 +4816,11 @@ async function handleInteraction(interaction) {
     const target     = interaction.options.getUser('joueur') || interaction.user;
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const pilot  = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
 
     // Récupérer tous les standings toutes saisons confondues
     const allStandings = await Standing.find({ pilotId: pilot._id }).sort({ seasonId: 1 });
-    if (!allStandings.length) return interaction.reply({ content: `📊 Aucune saison jouée pour **${pilot.name}**.`, ephemeral: true });
+    if (!allStandings.length) return interaction.editReply({ content: `📊 Aucune saison jouée pour **${pilot.name}**.`, ephemeral: true });
 
     // Batch-fetch les saisons
     const seasonIds = allStandings.map(s => s.seasonId);
@@ -4848,7 +4859,7 @@ async function handleInteraction(interaction) {
       .setDescription(desc)
       .addFields({ name: '💰 Total gagné (carrière)', value: `${pilot.totalEarned} PLcoins`, inline: true });
 
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /pilotes ──────────────────────────────────────────────
@@ -4856,7 +4867,7 @@ async function handleInteraction(interaction) {
   // ── /admin_set_photo ─────────────────────────────────────
   if (commandName === 'admin_set_photo') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
     const target     = interaction.options.getUser('joueur') || interaction.user;
     const url        = interaction.options.getString('url').trim();
@@ -4864,7 +4875,7 @@ async function handleInteraction(interaction) {
 
     // Vérification basique que c'est une URL valide
     try { new URL(url); } catch {
-      return interaction.reply({ content: '❌ URL invalide.', ephemeral: true });
+      return interaction.editReply({ content: '❌ URL invalide.', ephemeral: true });
     }
 
     const pilot = await Pilot.findOneAndUpdate(
@@ -4872,7 +4883,7 @@ async function handleInteraction(interaction) {
       { photoUrl: url },
       { new: true }
     );
-    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} trouvé pour <@${target.id}>.`, ephemeral: true });
+    if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} trouvé pour <@${target.id}>.`, ephemeral: true });
 
     const embed = new EmbedBuilder()
       .setTitle(`📸 Photo mise à jour — ${pilot.name}`)
@@ -4880,22 +4891,22 @@ async function handleInteraction(interaction) {
       .setThumbnail(url)
       .setDescription(`La photo de profil de **${pilot.name}** a été définie.\nElle apparaîtra dans \`/profil\`, \`/historique\` et \`/pilotes\`.`);
 
-    return interaction.reply({ embeds: [embed], ephemeral: true });
+    return interaction.editReply({ embeds: [embed], ephemeral: true });
   }
 
   // ── /admin_draft_start ────────────────────────────────────
   if (commandName === 'admin_draft_start') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
     const existing = await DraftSession.findOne({ status: 'active' });
-    if (existing) return interaction.reply({ content: '❌ Un draft est déjà en cours !', ephemeral: true });
+    if (existing) return interaction.editReply({ content: '❌ Un draft est déjà en cours !', ephemeral: true });
 
     const teams = await Team.find().sort({ budget: 1 });
-    if (!teams.length) return interaction.reply({ content: '❌ Aucune écurie trouvée.', ephemeral: true });
+    if (!teams.length) return interaction.editReply({ content: '❌ Aucune écurie trouvée.', ephemeral: true });
 
     const freePilots = await Pilot.find({ teamId: null }).sort({ createdAt: 1 });
-    if (!freePilots.length) return interaction.reply({ content: '❌ Aucun pilote libre pour la draft.', ephemeral: true });
+    if (!freePilots.length) return interaction.editReply({ content: '❌ Aucun pilote libre pour la draft.', ephemeral: true });
 
     const totalRounds = 2;
     const totalPicks  = teams.length * totalRounds;
@@ -4928,7 +4939,7 @@ async function handleInteraction(interaction) {
       )
       .setFooter({ text: `Format Snake Draft · ${totalPicks} picks au total · ${teams.length} écuries × ${totalRounds} rounds` });
 
-    await interaction.reply({ embeds: [openingEmbed] });
+    await interaction.editReply({ embeds: [openingEmbed] });
 
     // ── Premier "On The Clock" ─────────────────────────────
     const firstTeamId = draftTeamAtIndex(teams.map(t => t._id), 0);
@@ -4946,7 +4957,7 @@ async function handleInteraction(interaction) {
   // -- /pilotes --
   if (commandName === 'pilotes') {
     const allPilots = await Pilot.find().sort({ createdAt: 1 });
-    if (!allPilots.length) return interaction.reply({ content: 'Aucun pilote.', ephemeral: true });
+    if (!allPilots.length) return interaction.editReply({ content: 'Aucun pilote.', ephemeral: true });
     const allTeams = await Team.find();
     const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
     const sorted   = allPilots.map(p => ({ pilot: p, ov: overallRating(p) })).sort((a,b) => b.ov-a.ov);
@@ -4959,14 +4970,14 @@ async function handleInteraction(interaction) {
       const rank = medals[i] || ('**'+(i+1)+'.**');
       desc += rank+' '+tier.badge+' **'+ov+'** '+tier.label.padEnd(9)+' — **'+pilot.name+'** '+(team ? team.emoji+' '+team.name : '🔴 *Libre*')+'\n';
     }
-    return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🏎️ Classement Pilotes — Note Générale').setColor('#FF1801').setDescription(desc.slice(0,4000)||'Aucun').setFooter({ text: sorted.length+' pilote(s) · Poids: Freinage 17% · Contrôle 17% · Dépassement 15%...' })] });
+    return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🏎️ Classement Pilotes — Note Générale').setColor('#FF1801').setDescription(desc.slice(0,4000)||'Aucun').setFooter({ text: sorted.length+' pilote(s) · Poids: Freinage 17% · Contrôle 17% · Dépassement 15%...' })] });
   }
 
 
   // -- /admin_test_race --
   if (commandName === 'admin_test_race') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: 'Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: 'Commande réservée aux admins.', ephemeral: true });
 
     const { testTeams, testPilots, testRace } = buildTestFixtures();
     const testQt = testPilots.map(p => {
@@ -4974,7 +4985,7 @@ async function handleInteraction(interaction) {
       return { pilotId: p._id, time: calcQualiTime(p, t, 'DRY', testRace.gpStyle) };
     }).sort((a,b) => a.time - b.time);
 
-    await interaction.reply({ content: `🧪 **Course de test** — style **${testRace.gpStyle.toUpperCase()}** · ${testRace.laps} tours — résultats en cours dans ce channel !`, ephemeral: true });
+    await interaction.editReply({ content: `🧪 **Course de test** — style **${testRace.gpStyle.toUpperCase()}** · ${testRace.laps} tours — résultats en cours dans ce channel !`, ephemeral: true });
 
     ;(async () => {
       const testResults = await simulateRace(testRace, testQt, testPilots, testTeams, [], interaction.channel);
@@ -4998,10 +5009,10 @@ async function handleInteraction(interaction) {
   // -- /admin_test_practice --
   if (commandName === 'admin_test_practice') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
     const { testTeams, testPilots, testRace } = buildTestFixtures();
-    await interaction.reply({ content: `🔧 **Essais libres de test** — style **${testRace.gpStyle.toUpperCase()}** · résultats en cours...`, ephemeral: true });
+    await interaction.editReply({ content: `🔧 **Essais libres de test** — style **${testRace.gpStyle.toUpperCase()}** · résultats en cours...`, ephemeral: true });
 
     ;(async () => {
       const channel = interaction.channel;
@@ -5046,10 +5057,10 @@ async function handleInteraction(interaction) {
   // -- /admin_test_qualif --
   if (commandName === 'admin_test_qualif') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
     const { testTeams, testPilots, testRace } = buildTestFixtures();
-    await interaction.reply({ content: `⏱️ **Qualifications TEST Q1/Q2/Q3** — style **${testRace.gpStyle.toUpperCase()}** — résultats en cours dans ce channel...`, ephemeral: true });
+    await interaction.editReply({ content: `⏱️ **Qualifications TEST Q1/Q2/Q3** — style **${testRace.gpStyle.toUpperCase()}** — résultats en cours dans ce channel...`, ephemeral: true });
 
     ;(async () => {
       const channel      = interaction.channel;
@@ -5191,7 +5202,7 @@ async function handleInteraction(interaction) {
   // ── /admin_reset_pilot ────────────────────────────────────
   if (commandName === 'admin_reset_pilot') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Accès refusé.', ephemeral: true });
 
     const target     = interaction.options.getUser('joueur');
     const pilotIndex = interaction.options.getInteger('pilote'); // null = tout supprimer
@@ -5203,7 +5214,7 @@ async function handleInteraction(interaction) {
     // Récupérer les pilotes avant suppression pour l'affichage
     const pilotsToDelete = await Pilot.find(query);
     if (!pilotsToDelete.length) {
-      return interaction.reply({
+      return interaction.editReply({
         content: `❌ Aucun pilote trouvé pour <@${target.id}>${pilotIndex ? ` (Pilote ${pilotIndex})` : ''}.`,
         ephemeral: true,
       });
@@ -5218,7 +5229,7 @@ async function handleInteraction(interaction) {
 
     const names = pilotsToDelete.map(p => `**${p.name}** (Pilote ${p.pilotIndex}, #${p.racingNumber || '?'})`).join(', ');
 
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder()
         .setTitle('🗑️ Pilote(s) supprimé(s)')
         .setColor('#FF4444')
@@ -5235,7 +5246,7 @@ async function handleInteraction(interaction) {
   // ── /admin_help ───────────────────────────────────────────
   if (commandName === 'admin_help') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Accès refusé.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Accès refusé.', ephemeral: true });
     const adminHelpEmbed = new EmbedBuilder().setTitle('🛠️ Commandes Administrateur — F1 PL').setColor('#FF6600')
       .setDescription('Toutes les commandes nécessitent la permission **Administrateur**.')
       .addFields(
@@ -5273,7 +5284,7 @@ async function handleInteraction(interaction) {
           '🔔 Keep-alive actif · Ping toutes les 8 min · Courses auto 11h/15h/18h (Europe/Paris)',
         ].join('\n') },
       ).setFooter({ text: 'F1 PL Bot — Panneau Admin v2.1' });
-    return interaction.reply({ embeds: [adminHelpEmbed], ephemeral: true });
+    return interaction.editReply({ embeds: [adminHelpEmbed], ephemeral: true });
   }
 
   // -- /f1 --
@@ -5329,7 +5340,7 @@ async function handleInteraction(interaction) {
           '`/f1` — Affiche ce panneau',
         ].join('\n') },
       ).setFooter({ text: 'Courses auto : 11h Essais · 15h Qualif · 18h Course (Europe/Paris) · 2 pilotes max par joueur' });
-    return interaction.reply({ embeds: [f1Embed], ephemeral: true });
+    return interaction.editReply({ embeds: [f1Embed], ephemeral: true });
   }
 
 
@@ -5340,13 +5351,13 @@ async function handleInteraction(interaction) {
     const vue        = interaction.options.getString('vue') || 'recent';
 
     const pilot = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.reply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
 
     const team    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
     const allRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
 
     if (!allRecs.length) {
-      return interaction.reply({
+      return interaction.editReply({
         embeds: [new EmbedBuilder()
           .setTitle(`📊 Performances — ${pilot.name}`)
           .setColor('#888888')
@@ -5486,7 +5497,7 @@ async function handleInteraction(interaction) {
       const seasonRecs   = allRecs.filter(r => r.seasonYear === targetYear).sort((a, b) => new Date(a.raceDate) - new Date(b.raceDate));
 
       if (!seasonRecs.length) {
-        return interaction.reply({ content: `❌ Aucune course jouée en saison ${targetYear}.`, ephemeral: true });
+        return interaction.editReply({ content: `❌ Aucune course jouée en saison ${targetYear}.`, ephemeral: true });
       }
 
       const finished  = seasonRecs.filter(r => !r.dnf);
@@ -5513,7 +5524,7 @@ async function handleInteraction(interaction) {
         .setFooter({ text: `${seasonRecs.length}/${(await Race.countDocuments({ seasonId: activeSeason?._id }))} GPs joués — Saison ${targetYear}` });
     }
 
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /record_circuit ───────────────────────────────────────
@@ -5525,7 +5536,7 @@ async function handleInteraction(interaction) {
     const matches = allRecords.filter(r => r.circuit.toLowerCase().includes(query));
 
     if (!matches.length) {
-      return interaction.reply({ content: `❌ Aucun record trouvé pour "${query}". Les records s'établissent après chaque GP.`, ephemeral: true });
+      return interaction.editReply({ content: `❌ Aucun record trouvé pour "${query}". Les records s'établissent après chaque GP.`, ephemeral: true });
     }
 
     if (matches.length === 1) {
@@ -5539,14 +5550,14 @@ async function handleInteraction(interaction) {
           `📅 Établi en **Saison ${rec.seasonYear}**\n\n` +
           `*Style : ${rec.gpStyle || 'mixte'} · Ce record peut être battu à chaque nouveau GP sur ce circuit.*`
         );
-      return interaction.reply({ embeds: [embed] });
+      return interaction.editReply({ embeds: [embed] });
     }
 
     // Plusieurs résultats
     const lines = matches.slice(0, 10).map(rec =>
       `${rec.circuitEmoji} **${rec.circuit}** — ⚡ ${msToLapStr(rec.bestTimeMs)} par **${rec.pilotName}** *(S${rec.seasonYear})*`
     ).join('\n');
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [new EmbedBuilder()
         .setTitle(`⏱️ Records de circuit — ${matches.length} résultats`)
         .setColor('#FF6600')
@@ -5565,7 +5576,7 @@ async function handleInteraction(interaction) {
     const articles = await NewsArticle.find().sort({ publishedAt: -1 }).skip(skip).limit(perPage);
 
     if (!articles.length) {
-      return interaction.reply({ content: '📰 Aucun article pour l\'instant — les news arrivent après les GPs et toutes les 40h environ.', ephemeral: true });
+      return interaction.editReply({ content: '📰 Aucun article pour l\'instant — les news arrivent après les GPs et toutes les 40h environ.', ephemeral: true });
     }
 
     const typeEmojis = {
@@ -5593,13 +5604,13 @@ async function handleInteraction(interaction) {
       .setDescription(lines)
       .setFooter({ text: `${total} articles au total · /news page:${page + 1} pour la suite` });
 
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /admin_news_force ─────────────────────────────────────
   if (commandName === 'admin_news_force') {
     if (!interaction.member.permissions.has('Administrator')) {
-      return interaction.reply({ content: '❌ Admin uniquement.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Admin uniquement.', ephemeral: true });
     }
     await interaction.deferReply({ ephemeral: true });
     const channel = client.channels.cache.get(RACE_CHANNEL);
@@ -5651,7 +5662,7 @@ async function handleInteraction(interaction) {
       )
       .setFooter({ text: 'Bonne saison 🏎️💨' });
 
-    return interaction.reply({ embeds: [embed1] });
+    return interaction.editReply({ embeds: [embed1] });
   }
 
   // ── /admin_new_season ─────────────────────────────────────
@@ -5687,7 +5698,7 @@ async function handleInteraction(interaction) {
 
   if (commandName === 'admin_transfer') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     await interaction.deferReply();
     const expired = await startTransferPeriod();
     await interaction.editReply(`✅ Période de transfert ouverte ! ${expired} contrat(s) expiré(s).`);
@@ -5708,7 +5719,7 @@ async function handleInteraction(interaction) {
         inline: false,
       });
     }
-    return interaction.reply({ embeds: [embed] });
+    return interaction.editReply({ embeds: [embed] });
   }
 
 } // fin handleInteraction
