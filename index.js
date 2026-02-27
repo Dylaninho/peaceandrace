@@ -5272,30 +5272,33 @@ async function handleInteraction(interaction) {
         ].join('\n') },
         { name: '🔄 Transferts & Draft', value: [
           '`/admin_transfer` — Ouvre la période de transfert (IA génère les offres automatiquement)',
-          '`/admin_draft_start` — Lance le draft snake (attribution manuelle des écuries)',
+          '`/admin_draft_start` — Lance le draft snake (S1 uniquement — les saisons suivantes = transferts auto)',
+        ].join('\n') },
+        { name: '🗞️ News', value: [
+          '`/admin_news_force` — Force la publication d\'un article de news immédiatement',
         ].join('\n') },
         { name: '🖼️ Gestion Pilotes', value: [
           '`/admin_set_photo joueur:@user url:... [pilote:1|2]` — Définit la photo d\'un pilote',
-          '`/admin_reset_pilot joueur:@user [pilote:1|2]` — Supprime le(s) pilote(s) d\'un joueur *(test/reset)*',
+          '`/admin_reset_pilot joueur:@user [pilote:1|2]` — Supprime le(s) pilote(s) d\'un joueur',
         ].join('\n') },
         { name: '🧪 Test & Debug', value: [
-          '`/admin_test_race` — Simule une course fictive avec pilotes fictifs (aucune sauvegarde)',
+          '`/admin_test_race` — Simule une course fictive fictifs (aucune sauvegarde)',
           '`/admin_test_practice` — Simule des essais libres fictifs',
           '`/admin_test_qualif` — Simule des qualifs Q1/Q2/Q3 fictives',
         ].join('\n') },
         { name: '📋 Procédure de démarrage', value: [
           '1️⃣ Les joueurs créent leurs pilotes : `/create_pilot` (2 pilotes max par joueur)',
-          '2️⃣ Attribution des écuries via `/admin_draft_start` (snake draft) ou `/admin_transfer`',
+          '2️⃣ `/admin_draft_start` — draft snake S1 pour attribuer les écuries',
           '3️⃣ `/admin_new_season` — crée la saison et les 24 GP',
-          '4️⃣ Courses auto planifiées : **11h** Essais · **15h** Qualifs · **18h** Course',
-          '5️⃣ Fin de saison : `/admin_transfer` — IA génère les offres de transfert',
+          '4️⃣ Courses auto : **11h** Essais · **15h** Qualifs · **18h** Course (Europe/Paris)',
+          '5️⃣ Fin de saison → mercato auto déclenché 24h après la cérémonie',
         ].join('\n') },
         { name: '⚙️ Infos système', value: [
-          '🏎️ **2 pilotes max** par joueur Discord — nationalité, numéro et stats personnalisables',
-          `📊 **${TOTAL_STAT_POOL} points** à répartir à la création (base ${BASE_STAT_VALUE} par stat)`,
-          '🔔 Keep-alive actif · Ping toutes les 8 min · Courses auto 11h/15h/18h (Europe/Paris)',
+          '🏎️ **2 pilotes max** par joueur · nationalité, numéro et stats personnalisables',
+          `📊 **${TOTAL_STAT_POOL} points** à répartir à la création (base ${BASE_STAT_VALUE}/stat)`,
+          '🔔 Keep-alive · ping toutes les 8 min · news auto 1-2×/jour',
         ].join('\n') },
-      ).setFooter({ text: 'F1 PL Bot — Panneau Admin v2.1' });
+      ).setFooter({ text: 'F1 PL Bot — Panneau Admin v2.2' });
     return interaction.editReply({ embeds: [adminHelpEmbed], ephemeral: true });
   }
 
@@ -5333,7 +5336,7 @@ async function handleInteraction(interaction) {
           '`/ecurie nom:...` — Stats voiture détaillées d\'une écurie',
           '`/record_circuit circuit:...` — Record du meilleur tour sur un circuit',
         ].join('\n') },
-        { name: '🗞️ Actualités paddock', value: '`/news [page]` — Rumeurs, drama, rivalités, title fight… mis à jour après chaque GP et toutes les ~40h' },
+        { name: '🗞️ Actualités paddock', value: '`/news [page]` — Rumeurs, drama, rivalités, title fight… 1-2 articles/jour + 2 max après chaque GP' },
         { name: '📋 Contrats & Transferts', value: [
           '`/mon_contrat [pilote:1|2]` — Ton contrat actuel',
           '`/offres [pilote:1|2]` — Offres en attente (boutons interactifs)',
