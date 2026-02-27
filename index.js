@@ -3698,7 +3698,7 @@ const commands = [
 // ============================================================
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+  intents: [GatewayIntentBits.Guilds],
 });
 
 client.once('ready', async () => {
@@ -6259,13 +6259,27 @@ if (missingEnv) {
 
 // ── Sécurité globale — empêche le crash sur erreurs non catchées ──
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('⚠️  unhandledRejection (bot stable) :', reason?.message || reason);
+  console.error('⚠️  unhandledRejection :', reason?.message || reason);
 });
 process.on('uncaughtException', (err) => {
-  console.error('⚠️  uncaughtException (bot stable) :', err.message);
+  console.error('⚠️  uncaughtException :', err.message);
 });
 client.on('error', (err) => {
   console.error('⚠️  Discord client error :', err.message);
+});
+
+// ── Debug WebSocket / Gateway ─────────────────────────────────
+client.on('shardReady',        (id)     => console.log('🟢 Shard ' + id + ' ready'));
+client.on('shardError',        (err)    => console.error('🔴 Shard error :', err.message));
+client.on('shardDisconnect',   (ev, id) => console.warn('🟡 Shard ' + id + ' disconnect — code ' + ev.code));
+client.on('shardReconnecting', (id)     => console.log('🔄 Shard ' + id + ' reconnecting...'));
+client.on('invalidated',       ()       => { console.error('❌ Session Discord invalidée — token révoqué ?'); process.exit(1); });
+client.on('warn',              (msg)    => console.warn('⚠️  Discord warn :', msg));
+client.on('debug',             (msg)    => {
+  if (msg.includes('Identified') || msg.includes('READY') || msg.includes('Error') ||
+      msg.includes('rate limit') || msg.includes('gateway') || msg.includes('401') || msg.includes('4004')) {
+    console.log('🔍 Discord debug :', msg);
+  }
 });
 
 console.log('🔄 Connexion Discord en cours...');
