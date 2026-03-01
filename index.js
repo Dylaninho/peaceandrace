@@ -3681,6 +3681,12 @@ const commands = [
     .setDescription('[ADMIN] Saute le GP en cours sans le simuler (rattraper un retard)')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP à sauter — défaut: GP en cours').setMinValue(0)),
 
+  new SlashCommandBuilder().setName('admin_set_race_results')
+    .setDescription('[ADMIN] Saisit manuellement le classement d'un GP (si la simulation a planté)')
+    .addStringOption(o => o.setName('classement').setDescription('Noms des pilotes dans l'ordre, séparés par des virgules. Ex: Alice,Bob,Charlie').setRequired(true))
+    .addStringOption(o => o.setName('dnf').setDescription('Noms des pilotes DNF, séparés par des virgules (optionnel)').setRequired(false))
+    .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP (défaut: GP en cours)').setMinValue(0)),
+
   new SlashCommandBuilder().setName('admin_transfer')
     .setDescription('[ADMIN] Lance la période de transfert'),
 
@@ -4077,7 +4083,7 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race'].includes(commandName);
@@ -5883,6 +5889,95 @@ async function handleInteraction(interaction) {
         );
       } catch(e) {
         console.error('[admin_apply_last_race] Erreur :', e.message);
+        try { await interaction.editReply(`❌ Erreur : ${e.message}`); } catch(_) {}
+      }
+    })();
+    return;
+  }
+
+
+  // ── /admin_set_race_results ───────────────────────────────
+  // Permet de saisir manuellement le classement d'une course dont la simulation a planté
+  if (commandName === 'admin_set_race_results') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    await interaction.reply({ content: '⏳ Traitement du classement en cours...', ephemeral: true });
+
+    (async () => {
+      try {
+        const season = await getActiveSeason();
+        if (!season) return await interaction.editReply('❌ Aucune saison active.');
+
+        const gpIndex = interaction.options.getInteger('gp_index');
+        const race = gpIndex !== null
+          ? await Race.findOne({ seasonId: season._id, index: gpIndex })
+          : await getCurrentRace(season);
+        if (!race) return await interaction.editReply('❌ Aucun GP trouvé. Précise `gp_index` si besoin.');
+
+        const classementRaw = interaction.options.getString('classement');
+        const dnfRaw        = interaction.options.getString('dnf') || '';
+
+        const finishNames = classementRaw.split(',').map(s => s.trim()).filter(Boolean);
+        const dnfNames    = dnfRaw.split(',').map(s => s.trim()).filter(Boolean);
+
+        // Charger tous les pilotes
+        const allPilots = await Pilot.find();
+
+        const findPilot = (name) => {
+          const n = name.toLowerCase();
+          return allPilots.find(p => p.name.toLowerCase() === n || p.name.toLowerCase().includes(n));
+        };
+
+        const raceResults = [];
+        const notFound = [];
+
+        for (let i = 0; i < finishNames.length; i++) {
+          const pilot = findPilot(finishNames[i]);
+          if (!pilot) { notFound.push(finishNames[i]); continue; }
+          const isDnf = dnfNames.some(d => {
+            const dn = d.toLowerCase();
+            return pilot.name.toLowerCase() === dn || pilot.name.toLowerCase().includes(dn);
+          });
+          const pts = F1_POINTS[i] || 0;
+          raceResults.push({
+            pilotId   : pilot._id,
+            teamId    : pilot.teamId,
+            pos       : i + 1,
+            dnf       : isDnf,
+            dnfReason : isDnf ? 'MECHANICAL' : null,
+            coins     : pts * 20 + (isDnf ? 0 : 60),
+            fastestLap: false,
+          });
+        }
+
+        if (notFound.length) {
+          return await interaction.editReply(
+            `❌ Pilotes introuvables : **${notFound.join(', ')}**\n` +
+            `Vérifie les noms avec \`/pilotes\`. Les noms doivent correspondre (partiel accepté).`
+          );
+        }
+
+        if (raceResults.length === 0)
+          return await interaction.editReply('❌ Aucun pilote reconnu dans le classement.');
+
+        // Sauvegarder et appliquer
+        await Race.findByIdAndUpdate(race._id, { raceResults, status: 'race_computed' });
+        await applyRaceResults(raceResults, race._id, season, []);
+
+        const summary = raceResults.slice(0, 10).map(r => {
+          const p = allPilots.find(p => String(p._id) === String(r.pilotId));
+          const pts = F1_POINTS[r.pos - 1] || 0;
+          return `P${r.pos} ${p?.name || r.pilotId} → +${pts}pts${r.dnf ? ' DNF' : ''}`;
+        }).join('\n');
+
+        await interaction.editReply(
+          `✅ Classement appliqué pour **${race.emoji || '🏁'} ${race.circuit}** (index ${race.index})\n` +
+          `\`\`\`\n${summary}\n\`\`\`\n` +
+          `Race status → \`done\` ✅${notFound.length ? `\n⚠️ Introuvables (ignorés) : ${notFound.join(', ')}` : ''}`
+        );
+      } catch(e) {
+        console.error('[admin_set_race_results] Erreur :', e.message);
         try { await interaction.editReply(`❌ Erreur : ${e.message}`); } catch(_) {}
       }
     })();
