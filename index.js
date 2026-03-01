@@ -4077,10 +4077,10 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
-    'f1','admin_news_force','concept'].includes(commandName);
+    'f1','admin_news_force','concept','admin_apply_last_race'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
