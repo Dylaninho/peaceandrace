@@ -589,7 +589,7 @@ function pilotScore(pilot, gpStyle) {
 }
 
 // ─── Calcul du lap time ───────────────────────────────────
-function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0) {
+function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0, tireAge = 99) {
   const BASE = 90_000;
   const w = GP_STYLE_WEIGHTS[gpStyle];
 
@@ -622,7 +622,9 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const pilotTireBonus = (pilot.gestionPneus - 50) / 50 * 0.2;
   const effectiveDeg = tireData.deg * (1 - carTireBonus - pilotTireBonus * 0.01);
   const wearPenalty = tireWear * effectiveDeg;
-  const tireF = (1 + wearPenalty) / tireData.grip;
+  // Warm-up : 2 tours pour atteindre le grip optimal (pneus froids = +1.5%/+0.8% sur temps)
+  const warmupPenalty = tireAge === 0 ? 0.015 : tireAge === 1 ? 0.008 : 0;
+  const tireF = (1 + wearPenalty + warmupPenalty) / tireData.grip;
 
   // Dirty air — voiture derrière une autre souffre plus ou moins selon dirtyAir
   let dirtyAirF = 1.0;
@@ -755,11 +757,11 @@ function resolveSafetyCar(scState, lapIncidents) {
 // Les réactions et le controle réduisent le risque d'accident
 function checkIncident(pilot, team) {
   const roll = Math.random();
-  const reliabF  = (100 - team.refroidissement) / 100 * 0.012;
-  const crashF   = ((100 - pilot.controle) / 100 * 0.005) + ((100 - pilot.reactions) / 100 * 0.003);
+  const reliabF  = (100 - team.refroidissement) / 100 * 0.007;  // réduit : max ~0.7%/tour
+  const crashF   = ((100 - pilot.controle) / 100 * 0.003) + ((100 - pilot.reactions) / 100 * 0.002);  // réduit : max ~0.5%/tour
   if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
   if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
-  if (roll < 0.003)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
+  if (roll < 0.002)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
   return null;
 }
 
@@ -2381,10 +2383,18 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         // (DRY→WET, WET→DRY, HOT→INTER) : on augmente leur usure artificiellement pour déclencher shouldPit
         const forceWear = ['DRY→WET','WET→DRY','HOT→INTER','INTER→WET'].includes(key);
         if (forceWear) {
+          // Forcer l'usure sur 3 tours successifs pour que tout le monde finisse par piter
+          // (pas juste ceux qui n'ont pas encore pité ce tour)
           for (const d of alive) {
             const needWet  = (weather === 'WET' || weather === 'INTER') && (d.tireCompound === 'SOFT' || d.tireCompound === 'MEDIUM' || d.tireCompound === 'HARD');
             const needDry  = (weather === 'DRY' || weather === 'HOT')   && (d.tireCompound === 'WET'  || d.tireCompound === 'INTER');
-            if (needWet || needDry) d.tireWear = Math.max(d.tireWear, 38); // forcer shouldPit
+            if (needWet || needDry) {
+              // Étaler les pits sur 3 tours avec usure progressive (38, 42, 48)
+              const urgency = Math.random();
+              d.tireWear = urgency < 0.4 ? Math.max(d.tireWear, 48)   // 40% pitent ce tour
+                         : urgency < 0.75 ? Math.max(d.tireWear, 38)  // 35% pitent tour suivant
+                         : Math.max(d.tireWear, 30);                   // 25% pitent dans 2 tours
+            }
           }
         }
       }
@@ -2642,7 +2652,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           driver.pilot, driver.team,
           driver.tireCompound, driver.tireWear,
           weather, trackEvo, gpStyle, driver.pos,
-          scCooldown
+          scCooldown, driver.tireAge
         );
         driver.totalTime += lt;
         driver.tireWear  += 1;
@@ -6456,6 +6466,27 @@ async function runRace(override, gpIndex = null) {
       .setColor('#0099FF')
       .setDescription(constrDesc || 'Aucune donnée');
     await channel.send({ embeds: [constrEmbed] });
+
+    // Classement pilotes
+    const pilotStandings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).limit(20);
+    const pilotIds2      = pilotStandings.map(s => s.pilotId);
+    const allPilots2     = await Pilot.find({ _id: { $in: pilotIds2 } });
+    const allTeams2b     = await Team.find();
+    const pilotMap2      = new Map(allPilots2.map(p => [String(p._id), p]));
+    const teamMap2b      = new Map(allTeams2b.map(t => [String(t._id), t]));
+    const medals2        = ['🥇','🥈','🥉'];
+    let pilotDesc = '';
+    for (let i = 0; i < pilotStandings.length; i++) {
+      const s = pilotStandings[i];
+      const p = pilotMap2.get(String(s.pilotId));
+      const t = p?.teamId ? teamMap2b.get(String(p.teamId)) : null;
+      pilotDesc += `${medals2[i] || `**${i+1}.**`} ${t?.emoji||''} **${p?.name||'?'}** — ${s.points} pts (${s.wins}V ${s.podiums}P)\n`;
+    }
+    const pilotEmbed = new EmbedBuilder()
+      .setTitle(`🏆 Classement Pilotes — Saison ${season.year}`)
+      .setColor('#FF1801')
+      .setDescription(pilotDesc || 'Aucune donnée');
+    await channel.send({ embeds: [pilotEmbed] });
   }
 
   // Fin de saison ?
