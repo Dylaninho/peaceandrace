@@ -2924,10 +2924,10 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     // Bonus de participation : tout le monde gagne quelque chose même sans point
     // P1-P10 = 0 bonus (pts F1 suffisent), P11 = 12, P15 = 60, P20 = 120
     // Cela garantit que les bas de grille peuvent améliorer 1 stat toutes les 1-2 courses
-    const participBonus = driver.dnf ? 0 : Math.round(Math.max(0, (driver.pos - 10) * 12));
+    const participBonus = driver.dnf ? 0 : (driver.pos > 10 ? 20 : 0);
 
     const coins = Math.round(
-      (pts * 20 + (driver.dnf ? 0 : 60) + participBonus) * multi
+      (pts * 12 + (driver.dnf ? 0 : 40) + participBonus) * multi
       + salary + primeV + primeP + (fl ? 30 : 0)
     );
 
@@ -6371,7 +6371,7 @@ async function runRace(override, gpIndex = null) {
   const race   = gpIndex !== null
     ? await Race.findOne({ seasonId: season._id, index: gpIndex })
     : await getCurrentRace(season);
-  if (!race || race.status === 'done') return;
+  if (!race || race.status === 'done' || race.status === 'race_computed') return;
   if (!await isRaceDay(race, override)) return;
 
   const { pilots, teams } = await getAllPilotsWithTeams();
