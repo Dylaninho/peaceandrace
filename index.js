@@ -639,7 +639,9 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   // Variabilité (controle réduit les erreurs de pilotage)
   // Après un SC/VSC, la variance est réduite pour maintenir le peloton groupé (~5 tours)
   const cooldownFactor = scCooldown > 0 ? 0.25 : 1.0; // 75% de réduction pendant le cooldown
-  const errorRange = (100 - pilot.controle) / 100 * 0.6 / 100 * cooldownFactor;
+  // Variance réduite : max ±60ms/tour pour éviter les téléportations de classement
+  // (Un pilote à ±60ms/tour sur 50 tours = ±3s de dérive max — réaliste F1)
+  const errorRange = (100 - pilot.controle) / 100 * 0.08 / 100 * cooldownFactor;
   const randF = 1 + (Math.random() - 0.5) * errorRange;
 
   // Météo — adaptabilite réduit la perte par temps variable
@@ -2215,7 +2217,7 @@ async function runScheduledNews(discordClient) {
 
 
 // ─── SIMULATION COURSE COMPLÈTE ───────────────────────────
-async function simulateRace(race, grid, pilots, teams, contracts, channel) {
+async function simulateRace(race, grid, pilots, teams, contracts, channel, season) {
   const totalLaps = race.laps;
   const gpStyle   = race.gpStyle;
 
@@ -2259,7 +2261,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
       pos          : idx + 1,
       startPos     : idx + 1,
       lastPos      : idx + 1,
-      totalTime    : idx * 200,
+      // Écart initial réaliste : ~1.2s par position (P20 est à ~22s du leader)
+      // Correspond à la réalité F1 où le peloton s'étire progressivement après le départ
+      totalTime    : idx * 1200,
       tireCompound : startCompound,
       tireWear     : 0,
       tireAge      : 0,
@@ -2400,10 +2404,15 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     // ── Tour 1 : bagarre au départ ──────────────────────────
     if (lap === 1) {
       const startSwaps = [];
+      // Tracker les gains de chaque pilote pour éviter les remontées irréalistes
+      const gainMap = new Map(drivers.map(d => [String(d.pilot._id), 0]));
+
       for (let i = drivers.length - 1; i > 0; i--) {
         const d     = drivers[i];
         const ahead = drivers[i - 1];
         if (!d || !ahead) continue;
+        // Un pilote ne peut pas gagner plus de 2 positions au départ (réaliste F1)
+        if ((gainMap.get(String(d.pilot._id)) || 0) >= 2) continue;
         const reactDiff = d.pilot.reactions - ahead.pilot.reactions;
         if (reactDiff > 12 && Math.random() > 0.52) {
           // Swap positions ET totalTime pour que le tri par temps reste cohérent
@@ -2413,7 +2422,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
           [drivers[i], drivers[i - 1]] = [drivers[i - 1], drivers[i]];
           drivers[i - 1].pos = i;
           drivers[i].pos     = i + 1;
-          startSwaps.push(`${d.team.emoji}**${d.pilot.name}** P${i+1}→**P${i}** dépasse ${ahead.team.emoji}**${ahead.pilot.name}**`);
+          gainMap.set(String(drivers[i - 1].pilot._id), (gainMap.get(String(drivers[i - 1].pilot._id)) || 0) + 1);
+          startSwaps.push(`${drivers[i-1].team.emoji}**${drivers[i-1].pilot.name}** P${i+1}→**P${i}** dépasse ${drivers[i].team.emoji}**${drivers[i].pilot.name}**`);
         }
       }
       // Recalcul propre des positions selon totalTime final
@@ -2730,10 +2740,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     // Règles :
     // 1. Jamais sous SC/VSC
     // 2. Pas tour de restart
-    // 3. Positions adjacentes AVANT le tour (driver.lastPos = driver.pos + 1)
-    // 4. Gap pré-tour < 3s
+    // 3. Positions adjacentes AVANT le tour (max 2 positions gagnées hors incidents)
+    // 4. Gap pré-tour < 3s pour les vrais dépassements en piste
     // 5. Ni attaquant ni défenseur n'ont pité
     // 6. Contre-attaque possible si le pilote vient d'être passé au tour précédent
+    // NOTE: Si le pilote a gagné 2+ places (à cause d'un pit, SC ou incident), on le mentionne brièvement
     const justRestarted = prevScState !== 'NONE' && scState.state === 'NONE';
 
     for (const driver of ranked) {
@@ -2744,6 +2755,20 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
       const movedUp   = driver.pos < driver.lastPos;
       const movedDown = driver.pos > driver.lastPos;
+      const posGained = driver.lastPos - driver.pos; // positif si remonté
+
+      // ── Gain de 2+ positions (indirect : DNF d'autres, pit stops) ──
+      // On le mentionne brièvement sans l'habiller en dépassement en piste
+      if (movedUp && posGained >= 2) {
+        const isTop8Move = driver.pos <= 8 || driver.lastPos <= 8;
+        if (isTop8Move) {
+          events.push({
+            priority: 5,
+            text: `📊 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** remonte de **P${driver.lastPos}→P${driver.pos}** (+${posGained}) suite aux incidents / arrêts devant.`,
+          });
+        }
+        continue; // ne pas entrer dans le bloc dépassement normal
+      }
 
       // ── Dépassement (le pilote a gagné UNE place) ──────────
       if (movedUp && driver.lastPos === driver.pos + 1) {
@@ -3638,6 +3663,10 @@ const commands = [
   new SlashCommandBuilder().setName('admin_force_race')
     .setDescription('[ADMIN] Force la course du GP en cours (ou d\'un GP précis)')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP — défaut: GP en cours').setMinValue(0)),
+
+  new SlashCommandBuilder().setName('admin_apply_last_race')
+    .setDescription('[ADMIN] Applique manuellement les résultats du dernier GP simulé (si points non crédités)')
+    .addStringOption(o => o.setName('race_id').setDescription('ID MongoDB de la course (optionnel — défaut: dernier GP simulé)').setRequired(false)),
 
   new SlashCommandBuilder().setName('admin_skip_gp')
     .setDescription('[ADMIN] Saute le GP en cours sans le simuler (rattraper un retard)')
@@ -5302,6 +5331,8 @@ async function handleInteraction(interaction) {
           '`/admin_force_practice` — Déclenche les essais libres immédiatement',
           '`/admin_force_quali` — Déclenche les qualifications Q1/Q2/Q3 immédiatement',
           '`/admin_force_race` — Déclenche la course immédiatement',
+          '`/admin_apply_last_race` — 🔧 Applique manuellement les résultats (si points non crédités)',
+          '`/admin_skip_gp` — Saute un GP sans le simuler',
           '`/admin_evolve_cars` — Affiche l\'état actuel des stats voitures',
           '`/admin_reset_rivalites` — Réinitialise toutes les rivalités en début de saison',
         ].join('\n') },
@@ -5787,6 +5818,55 @@ async function handleInteraction(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
+  // ── /admin_apply_last_race ────────────────────────────────
+  // Applique manuellement les résultats d'un GP si applyRaceResults a planté
+  if (commandName === 'admin_apply_last_race') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+
+    const season = await getActiveSeason();
+    if (!season) return interaction.editReply('❌ Aucune saison active.');
+
+    const rawId = interaction.options.getString('race_id');
+    let race;
+    try {
+      // Chercher la course spécifiée, ou la dernière course avec des résultats mais status pas 'done'
+      if (rawId) {
+        race = await Race.findById(rawId);
+      } else {
+        // Chercher la course la plus récente avec raceResults mais status != done
+        const allRaces = await Race.find({ seasonId: season._id }).sort({ index: -1 });
+        race = allRaces.find(r => r.raceResults?.length && r.status !== 'done');
+        // Si toutes sont done, prendre la dernière done pour vérifier
+        if (!race) race = allRaces.find(r => r.raceResults?.length);
+      }
+    } catch(e) {
+      return interaction.editReply(`❌ ID invalide : ${e.message}`);
+    }
+
+    if (!race) return interaction.editReply('❌ Aucune course avec des résultats trouvée.');
+    if (!race.raceResults?.length) return interaction.editReply(`❌ La course **${race.circuit}** n'a pas de résultats enregistrés.`);
+
+    const alreadyApplied = race.status === 'done';
+
+    try {
+      await applyRaceResults(race.raceResults, race._id, season, []);
+      const F1_POINTS_LOCAL = [25,18,15,12,10,8,6,4,2,1];
+      const summary = race.raceResults.slice(0, 10).map((r, i) => {
+        const pts = F1_POINTS_LOCAL[r.pos - 1] || 0;
+        return `P${r.pos} pilotId=${r.pilotId} → +${pts}pts${r.dnf?' DNF':''}`;
+      }).join('\n');
+      return interaction.editReply(
+        `${alreadyApplied ? '⚠️ Course déjà marquée done — résultats RE-appliqués (doublons possibles !)' : '✅ Résultats appliqués !'}\n` +
+        `**${race.emoji || '🏁'} ${race.circuit}** (index ${race.index})\n\`\`\`\n${summary}\n\`\`\`\n` +
+        `Race status → \`done\` ✅`
+      );
+    } catch(e) {
+      return interaction.editReply(`❌ Erreur lors de l'application : ${e.message}`);
+    }
+  }
+
 } // fin handleInteraction
 
 // ============================================================
@@ -6186,7 +6266,7 @@ async function runRace(override, gpIndex = null) {
   }
 
   const channel = await getRaceChannel(override);
-  const { results, collisions } = await simulateRace(race, grid, pilots, teams, contracts, channel);
+  const { results, collisions } = await simulateRace(race, grid, pilots, teams, contracts, channel, season);
   await applyRaceResults(results, race._id, season, collisions);
 
   // ── Annonce rivalités nouvellement déclarées ─────────────
