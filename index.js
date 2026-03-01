@@ -3682,8 +3682,8 @@ const commands = [
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP à sauter — défaut: GP en cours').setMinValue(0)),
 
   new SlashCommandBuilder().setName('admin_set_race_results')
-    .setDescription('[ADMIN] Saisit manuellement le classement d'un GP (si la simulation a planté)')
-    .addStringOption(o => o.setName('classement').setDescription('Noms des pilotes dans l'ordre, séparés par des virgules. Ex: Alice,Bob,Charlie').setRequired(true))
+    .setDescription(`[ADMIN] Saisit manuellement le classement d'un GP (si la simulation a planté)`)
+    .addStringOption(o => o.setName('classement').setDescription(`Noms des pilotes dans l'ordre, séparés par des virgules. Ex: Alice,Bob,Charlie`).setRequired(true))
     .addStringOption(o => o.setName('dnf').setDescription('Noms des pilotes DNF, séparés par des virgules (optionnel)').setRequired(false))
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP (défaut: GP en cours)').setMinValue(0)),
 
@@ -5794,17 +5794,24 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_skip_gp') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-    await interaction.deferReply({ ephemeral: true });
-    const season = await getActiveSeason();
-    if (!season) return interaction.editReply('❌ Aucune saison active.');
-    const gpIndex = interaction.options.getInteger('gp_index');
-    const race = gpIndex !== null
-      ? await Race.findOne({ seasonId: season._id, index: gpIndex })
-      : await getCurrentRace(season);
-    if (!race) return interaction.editReply('❌ Aucun GP trouvé.');
-    if (race.status === 'done') return interaction.editReply(`❌ Le GP **${race.circuit}** (index ${race.index}) est déjà terminé.`);
-    await Race.findByIdAndUpdate(race._id, { status: 'done' });
-    return interaction.editReply(`✅ GP **${race.emoji} ${race.circuit}** (index ${race.index}) passé en \`done\` — sans simulation.\nLe prochain \`/admin_force_*\` ciblera le GP suivant.`);
+    await interaction.reply({ content: '⏳ Traitement...', ephemeral: true });
+    (async () => {
+      try {
+        const season = await getActiveSeason();
+        if (!season) return await interaction.editReply('❌ Aucune saison active.');
+        const gpIndex = interaction.options.getInteger('gp_index');
+        const race = gpIndex !== null
+          ? await Race.findOne({ seasonId: season._id, index: gpIndex })
+          : await getCurrentRace(season);
+        if (!race) return await interaction.editReply('❌ Aucun GP trouvé.');
+        if (race.status === 'done') return await interaction.editReply(`❌ Le GP **${race.circuit}** (index ${race.index}) est déjà terminé.`);
+        await Race.findByIdAndUpdate(race._id, { status: 'done' });
+        await interaction.editReply(`✅ GP **${race.emoji} ${race.circuit}** (index ${race.index}) passé en \`done\` — sans simulation.`);
+      } catch(e) {
+        try { await interaction.editReply(`❌ Erreur : ${e.message}`); } catch(_) {}
+      }
+    })();
+    return;
   }
 
   if (commandName === 'admin_transfer') {
