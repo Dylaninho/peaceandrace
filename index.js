@@ -2051,90 +2051,98 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   const doneRaces  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
   const gpLeft     = totalRaces - doneRaces;
 
+  // ── Phase de saison ────────────────────────────────────────
+  const progress = totalRaces > 0 ? doneRaces / totalRaces : 0;
+  const isEarly  = progress < 0.25;
+  const isMid    = progress >= 0.25 && progress < 0.6;
+  const isLate   = progress >= 0.6  && progress < 0.85;
+  const isFinale = progress >= 0.85;
+
   const pilotMap = new Map(allPilots.map(p => [String(p._id), p]));
   const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
-
   const articlesToPost = [];
 
-  // 1. RIVALITÉ — si contacts cette course
-  const rivalPairs = new Map();
-  for (const p of allPilots) {
-    if (!p.rivalId) continue;
-    const key = [String(p._id), String(p.rivalId)].sort().join('_');
-    if (!rivalPairs.has(key)) {
-      const pA = p, pB = pilotMap.get(String(p.rivalId));
-      if (pB && p.rivalContacts >= 2) {
-        rivalPairs.set(key, { pA, pB });
+  // 1. RIVALITÉ — impossible début, rare milieu, fréquent fin
+  const rivalChance = isEarly ? 0 : isMid ? 0.4 : isLate ? 0.75 : 0.9;
+  if (Math.random() < rivalChance) {
+    const rivalPairs = new Map();
+    for (const p of allPilots) {
+      if (!p.rivalId) continue;
+      const key = [String(p._id), String(p.rivalId)].sort().join('_');
+      if (!rivalPairs.has(key)) {
+        const pB = pilotMap.get(String(p.rivalId));
+        const minContacts = isEarly ? 3 : isMid ? 2 : 1;
+        if (pB && p.rivalContacts >= minContacts) rivalPairs.set(key, { pA: p, pB });
       }
     }
-  }
-  for (const { pA, pB } of rivalPairs.values()) {
-    const tA = teamMap.get(String(pA.teamId));
-    const tB = teamMap.get(String(pB.teamId));
-    if (tA && tB) {
-      articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year));
+    for (const { pA, pB } of rivalPairs.values()) {
+      const tA = teamMap.get(String(pA.teamId));
+      const tB = teamMap.get(String(pB.teamId));
+      if (tA && tB) articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year));
     }
   }
 
-  // 2. TITLE FIGHT — si écart < 30pts et > 2 GPs restants
-  if (standings.length >= 2 && gpLeft > 2) {
+  // 2. TITLE FIGHT — seulement mi-saison+
+  const titleChance = isEarly ? 0 : isMid ? 0.3 : isLate ? 0.7 : 1.0;
+  if (standings.length >= 2 && gpLeft > 1 && Math.random() < titleChance) {
     const s1 = standings[0], s2 = standings[1];
     const gap = s1.points - s2.points;
-    if (gap <= 30 && gap >= 0) {
+    const maxGap = isFinale ? 50 : isLate ? 35 : 25;
+    if (gap <= maxGap && gap >= 0) {
       const p1 = pilotMap.get(String(s1.pilotId));
       const p2 = pilotMap.get(String(s2.pilotId));
       const t1 = p1 ? teamMap.get(String(p1.teamId)) : null;
       const t2 = p2 ? teamMap.get(String(p2.teamId)) : null;
-      if (p1 && p2 && t1 && t2) {
-        articlesToPost.push(genTitleFightArticle(p1, p2, t1, t2, gap, gpLeft, season.year));
-      }
+      if (p1 && p2 && t1 && t2) articlesToPost.push(genTitleFightArticle(p1, p2, t1, t2, gap, gpLeft, season.year));
     }
   }
 
-  // 3. HYPE — pilote avec 2+ victoires ou 4+ podiums, P1-5 au champ
+  // 3. HYPE — surtout début/milieu
+  const hypeChance = isEarly ? 0.6 : isMid ? 0.45 : isLate ? 0.25 : 0.15;
   for (let i = 0; i < Math.min(standings.length, 5); i++) {
     const s = standings[i];
     const pilot = pilotMap.get(String(s.pilotId));
     const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
-    if (pilot && team && (s.wins >= 2 || s.podiums >= 4)) {
-      if (Math.random() < 0.4) { // 40% de chance par GP pour ne pas spammer
-        articlesToPost.push(genHypeArticle(pilot, team, s.wins, s.podiums, season.year, i + 1));
-        break;
-      }
+    if (pilot && team && (s.wins >= (isEarly ? 1 : 2) || s.podiums >= (isEarly ? 2 : 4)) && Math.random() < hypeChance) {
+      articlesToPost.push(genHypeArticle(pilot, team, s.wins, s.podiums, season.year, i + 1));
+      break;
     }
   }
 
-  // 4. CRISE DE FORME — pilote avec 2+ DNFs et mauvaise position
-  for (const s of standings.slice(5)) {
+  // 4. CRISE DE FORME
+  const crisisChance = isEarly ? 0.2 : isMid ? 0.35 : isLate ? 0.45 : 0.5;
+  for (const s of standings.slice(Math.floor(standings.length / 2))) {
     const pilot = pilotMap.get(String(s.pilotId));
     const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
-    if (pilot && team && s.dnfs >= 2 && Math.random() < 0.35) {
+    if (pilot && team && s.dnfs >= (isEarly ? 1 : 2) && Math.random() < crisisChance) {
       articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year));
       break;
     }
   }
 
-  // 5. DUEL COÉQUIPIER — si écart ≥ 4 duels
-  const processed = new Set();
-  for (const p of allPilots) {
-    const tid = String(p.teamId);
-    if (processed.has(tid)) continue;
-    const teammates = allPilots.filter(x => String(x.teamId) === tid);
-    if (teammates.length < 2) continue;
-    processed.add(tid);
-    const [a, b] = teammates;
-    const wA = a.teammateDuelWins || 0, wB = b.teammateDuelWins || 0;
-    if (Math.abs(wA - wB) >= 4 && Math.random() < 0.3) {
-      const team = teamMap.get(tid);
-      if (!team) continue;
-      const winner = wA > wB ? a : b, loser = wA > wB ? b : a;
-      articlesToPost.push(genTeammateDuelArticle(winner, loser, team, Math.max(wA, wB), Math.min(wA, wB), season.year));
+  // 5. DUEL COÉQUIPIER — seulement mi-saison+
+  if (!isEarly) {
+    const duelChance = isMid ? 0.25 : isLate ? 0.4 : 0.5;
+    const duelGapMin = isMid ? 4 : 3;
+    const processed = new Set();
+    for (const p of allPilots) {
+      const tid = String(p.teamId);
+      if (processed.has(tid)) continue;
+      const teammates = allPilots.filter(x => String(x.teamId) === tid);
+      if (teammates.length < 2) continue;
+      processed.add(tid);
+      const [a, b] = teammates;
+      const wA = a.teammateDuelWins || 0, wB = b.teammateDuelWins || 0;
+      if (Math.abs(wA - wB) >= duelGapMin && Math.random() < duelChance) {
+        const team = teamMap.get(tid);
+        if (!team) continue;
+        const winner = wA > wB ? a : b, loser = wA > wB ? b : a;
+        articlesToPost.push(genTeammateDuelArticle(winner, loser, team, Math.max(wA, wB), Math.min(wA, wB), season.year));
+      }
     }
   }
 
-  // Limiter à 3 articles max par GP pour ne pas noyer le channel
   const toPost = articlesToPost.slice(0, 3);
-
   for (const articleData of toPost) {
     const article = await NewsArticle.create({ ...articleData, raceId: race._id, triggered: 'post_race', publishedAt: new Date() });
     await sleep(3000);
@@ -2142,7 +2150,6 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   }
 }
 
-// ── Job planifié — gossip toutes les 36-48h ───────────────
 async function runScheduledNews(discordClient) {
   const channel = RACE_CHANNEL ? discordClient.channels.cache.get(RACE_CHANNEL) : null;
   if (!channel) return;
@@ -2156,33 +2163,47 @@ async function runScheduledNews(discordClient) {
 
   const teamMap = new Map(allTeams.map(t => [String(t._id), t]));
 
-  // Choisir un type au hasard parmi : drama, transfer_rumor, dev_vague, scandal
-  const roll = Math.random();
-  let articleData = null;
+  const totalRaces = await Race.countDocuments({ seasonId: season._id });
+  const doneRaces  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
+  const progress   = totalRaces > 0 ? doneRaces / totalRaces : 0;
+  const isEarly    = progress < 0.25;
+  const isMid      = progress >= 0.25 && progress < 0.6;
+  const isLate     = progress >= 0.6  && progress < 0.85;
+  const isFinale   = progress >= 0.85;
 
-  if (roll < 0.3) {
-    // DRAMA — deux pilotes random de teams différentes
+  // Début : dev_vague(40%) drama(40%) scandal(15%) rumeur(5%)
+  // Milieu : drama(30%) dev_vague(25%) rumeur(25%) scandal(20%)
+  // Fin    : rumeur(40%) drama(25%) scandal(20%) dev_vague(15%)
+  // Finale : rumeur(55%) scandal(25%) drama(15%) dev_vague(5%)
+  let weights;
+  if (isEarly)     weights = { drama: 40, dev_vague: 40, scandal: 15, transfer_rumor: 5  };
+  else if (isMid)  weights = { drama: 30, dev_vague: 25, transfer_rumor: 25, scandal: 20 };
+  else if (isLate) weights = { transfer_rumor: 40, drama: 25, scandal: 20, dev_vague: 15 };
+  else             weights = { transfer_rumor: 55, scandal: 25, drama: 15, dev_vague: 5  };
+
+  const total = Object.values(weights).reduce((a, b) => a + b, 0);
+  let roll = Math.random() * total;
+  let chosen = 'drama';
+  for (const [type, w] of Object.entries(weights)) { roll -= w; if (roll <= 0) { chosen = type; break; } }
+
+  let articleData = null;
+  if (chosen === 'drama') {
     const pA = pick(allPilots);
     const others = allPilots.filter(p => String(p.teamId) !== String(pA.teamId));
     const pB = others.length ? pick(others) : null;
     if (pB) {
-      const tA = teamMap.get(String(pA.teamId));
-      const tB = teamMap.get(String(pB.teamId));
+      const tA = teamMap.get(String(pA.teamId)), tB = teamMap.get(String(pB.teamId));
       if (tA && tB) articleData = genDramaArticle(pA, pB, tA, tB, season.year);
     }
-  } else if (roll < 0.6) {
-    // RUMEUR TRANSFERT — pilote random, équipe cible random (différente)
+  } else if (chosen === 'transfer_rumor') {
     const pilot = pick(allPilots);
     const currentTeam = teamMap.get(String(pilot.teamId));
     const otherTeams  = allTeams.filter(t => String(t._id) !== String(pilot.teamId));
     const targetTeam  = otherTeams.length ? pick(otherTeams) : null;
     if (targetTeam) articleData = genTransferRumorArticle(pilot, currentTeam, targetTeam, season.year);
-  } else if (roll < 0.85) {
-    // DEV VAGUE — équipe random
-    const team = pick(allTeams);
-    articleData = genDevVagueArticle(team, season.year);
-  } else {
-    // SCANDALE — deux équipes random
+  } else if (chosen === 'dev_vague') {
+    articleData = genDevVagueArticle(pick(allTeams), season.year);
+  } else if (chosen === 'scandal') {
     if (allTeams.length >= 2) articleData = genScandalArticle(allTeams, allPilots, season.year);
   }
 
@@ -2191,6 +2212,7 @@ async function runScheduledNews(discordClient) {
     await publishNews(article, channel);
   }
 }
+
 
 // ─── SIMULATION COURSE COMPLÈTE ───────────────────────────
 async function simulateRace(race, grid, pilots, teams, contracts, channel) {
@@ -2264,16 +2286,15 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
 
   const send = async (msg) => {
     if (!channel) return;
-    // Discord limit: 2000 chars per message
     if (msg.length > 1950) msg = msg.slice(0, 1947) + '…';
     try { await channel.send(msg); } catch(e) { console.error('send error:', e.message); }
-    await sleep(5500);
+    await sleep(9000);
   };
 
   const sendEmbed = async (embed) => {
     if (!channel) return;
     try { await channel.send({ embeds: [embed] }); } catch(e) {}
-    await sleep(5500);
+    await sleep(9000);
   };
 
   // ══════════════════════════════════════════════════════════
@@ -2385,16 +2406,18 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         if (!d || !ahead) continue;
         const reactDiff = d.pilot.reactions - ahead.pilot.reactions;
         if (reactDiff > 12 && Math.random() > 0.52) {
-          // Swap des objets dans le tableau
+          // Swap positions ET totalTime pour que le tri par temps reste cohérent
+          const tmpTime = d.totalTime;
+          d.totalTime     = ahead.totalTime;
+          ahead.totalTime = tmpTime;
           [drivers[i], drivers[i - 1]] = [drivers[i - 1], drivers[i]];
-          // Après le swap : drivers[i-1] est l'ancien d (qui monte), drivers[i] est l'ancien ahead (qui descend)
-          drivers[i - 1].pos = i;      // d monte à la position i (1-based)
-          drivers[i].pos     = i + 1;  // ahead descend à i+1
+          drivers[i - 1].pos = i;
+          drivers[i].pos     = i + 1;
           startSwaps.push(`${d.team.emoji}**${d.pilot.name}** P${i+1}→**P${i}** dépasse ${ahead.team.emoji}**${ahead.pilot.name}**`);
         }
       }
-      // Recalcul propre des positions selon l'ordre final du tableau
-      drivers.sort((a,b) => a.pos - b.pos).forEach((d,i) => d.pos = i+1);
+      // Recalcul propre des positions selon totalTime final
+      drivers.sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
       alive.forEach(d => { d.lastPos = d.pos; });
       const startLeader = drivers.find(d => d.pos === 1) || drivers[0];
       if (startSwaps.length) {
@@ -2635,15 +2658,17 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
     }
 
     // ── Pit stops ────────────────────────────────────────────
-    const aliveNow = drivers.filter(d => !d.dnf);
-    aliveNow.sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+    // Snapshot figé — évite les bugs de mutation pendant l'itération
+    const aliveNow = [...drivers.filter(d => !d.dnf)].sort((a,b) => a.totalTime - b.totalTime);
+    aliveNow.forEach((d,i) => d.pos = i+1);
 
     for (const driver of aliveNow) {
+      if (driver.pittedThisLap) continue; // garde anti double-pit
+
       const myIdx    = aliveNow.findIndex(d => String(d.pilot._id) === String(driver.pilot._id));
       const gapAhead = myIdx > 0 ? driver.totalTime - aliveNow[myIdx - 1].totalTime : null;
 
       // Sous SC : pas d'undercut possible, mais on laisse les pits normaux (usure)
-      // On force reason à 'tires_worn' pour ne pas déclencher d'undercut sous SC
       const { pit, reason: rawReason } = shouldPit(driver, lapsRemaining, gapAhead);
       const reason = (scActive && rawReason === 'undercut') ? null : rawReason;
       const doPit  = pit && reason !== null;
@@ -2652,7 +2677,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         const posIn      = driver.pos;
         const oldTire    = driver.tireCompound;
         const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds);
-        // Sous SC : arrêt plus rapide (pas de trafic), et perte de position moindre
         const pitTime    = scActive ? randInt(19_000, 21_000) : randInt(19_000, 24_000);
 
         driver.totalTime   += pitTime;
@@ -2663,7 +2687,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         driver.pittedThisLap = true;
         if (!driver.usedCompounds.includes(newCompound)) driver.usedCompounds.push(newCompound);
 
-        aliveNow.sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+        // Recalcul sur le vrai tableau drivers (source de vérité)
+        drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
         const posOut = driver.pos;
         const pitDur = (pitTime / 1000).toFixed(1);
 
@@ -2839,15 +2864,17 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
         }).join('\n');
     }
 
-    // Toujours envoyer (commentary garanti)
+    // GIF d'abord — apparaît avant le commentaire pour éviter le décalage
+    if (topGif && channel) {
+      try { await channel.send(topGif); } catch(e) {}
+      await sleep(3500);
+    }
+
+    // Commentaire du tour
     const header = `**⏱ Tour ${lap}/${totalLaps}**` +
       (scState.state === 'SC'  ? ` 🚨 **SAFETY CAR**` : '') +
       (scState.state === 'VSC' ? ` 🟡 **VSC**`        : '');
     await send([header, eventsText, standingsText].filter(Boolean).join('\n'));
-    if (topGif && channel) {
-      try { await channel.send(topGif); } catch(e) {}
-      await sleep(2000);
-    }
   }
 
   // ══════════════════════════════════════════════════════════
@@ -3029,7 +3056,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel) {
   // ── News post-GP ─────────────────────────────────────────
   try {
     await sleep(4000);
-    await generatePostRaceNews(race, results, season, channel);
+    const seasonForNews = await getActiveSeason();
+    if (seasonForNews) await generatePostRaceNews(race, results, seasonForNews, channel);
   } catch(e) { console.error('Post-race news erreur:', e); }
 
   return { results, collisions: raceCollisions };
@@ -3166,6 +3194,7 @@ async function getAllPilotsWithTeams() {
 
 async function applyRaceResults(raceResults, raceId, season, collisions = []) {
   const teams = await Team.find();
+  console.log(`[applyRaceResults] Début — ${raceResults.length} résultats, seasonId=${season._id}, raceId=${raceId}`);
 
   // Récupérer les infos de la course pour les GPRecords
   const raceDoc = await Race.findById(raceId);
@@ -3177,17 +3206,19 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
   for (const r of raceResults) {
     await Pilot.findByIdAndUpdate(r.pilotId, { $inc: { plcoins: r.coins, totalEarned: r.coins } });
     const pts = F1_POINTS[r.pos - 1] || 0;
-    await Standing.findOneAndUpdate(
+    const standingResult = await Standing.findOneAndUpdate(
       { seasonId: season._id, pilotId: r.pilotId },
       { $inc: { points: pts, wins: r.pos===1&&!r.dnf?1:0, podiums: r.pos<=3&&!r.dnf?1:0, dnfs: r.dnf?1:0 } },
-      { upsert: true }
+      { upsert: true, new: true }
     );
+    console.log(`[applyRaceResults] P${r.pos} pilotId=${r.pilotId} pts+${pts} dnf=${r.dnf} → standing total=${standingResult?.points}`);
     // Classement constructeurs
-    await ConstructorStanding.findOneAndUpdate(
+    const constrResult = await ConstructorStanding.findOneAndUpdate(
       { seasonId: season._id, teamId: r.teamId },
       { $inc: { points: pts } },
-      { upsert: true }
+      { upsert: true, new: true }
     );
+    console.log(`[applyRaceResults] teamId=${r.teamId} constructeur total=${constrResult?.points}`);
 
     // ── Enregistrement GPRecord ──────────────────────────────
     if (raceDoc) {
@@ -3263,6 +3294,7 @@ async function createNewSeason() {
 
   const startDate = new Date();
   startDate.setHours(0,0,0,0);
+  startDate.setDate(startDate.getDate() + 1); // GP 1 = demain, jamais le jour même
   for (let i = 0; i < CIRCUITS.length; i++) {
     const d = new Date(startDate);
     d.setDate(d.getDate() + Math.round(i * 1.2));
@@ -3596,13 +3628,20 @@ const commands = [
     .setDescription('[ADMIN] Lance une nouvelle saison'),
 
   new SlashCommandBuilder().setName('admin_force_practice')
-    .setDescription('[ADMIN] Force les essais libres'),
+    .setDescription('[ADMIN] Force les essais libres du GP en cours (ou d\'un GP précis)')
+    .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP (0=GP1, 1=GP2...) — défaut: GP en cours').setMinValue(0)),
 
   new SlashCommandBuilder().setName('admin_force_quali')
-    .setDescription('[ADMIN] Force les qualifications'),
+    .setDescription('[ADMIN] Force les qualifications du GP en cours (ou d\'un GP précis)')
+    .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP — défaut: GP en cours').setMinValue(0)),
 
   new SlashCommandBuilder().setName('admin_force_race')
-    .setDescription('[ADMIN] Force la course'),
+    .setDescription('[ADMIN] Force la course du GP en cours (ou d\'un GP précis)')
+    .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP — défaut: GP en cours').setMinValue(0)),
+
+  new SlashCommandBuilder().setName('admin_skip_gp')
+    .setDescription('[ADMIN] Saute le GP en cours sans le simuler (rattraper un retard)')
+    .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP à sauter — défaut: GP en cours').setMinValue(0)),
 
   new SlashCommandBuilder().setName('admin_transfer')
     .setDescription('[ADMIN] Lance la période de transfert'),
@@ -5685,23 +5724,41 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_force_practice') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-    // Répondre IMMÉDIATEMENT (Discord expire après 3s)
-    await interaction.reply({ content: '✅ Essais libres en cours... Les résultats arrivent dans le channel de course.', ephemeral: true });
-    runPractice(interaction.channel).catch(e => console.error('admin_force_practice error:', e.message));
+    const gpIndex = interaction.options.getInteger('gp_index');
+    await interaction.reply({ content: `✅ Essais libres en cours${gpIndex !== null ? ` (GP index ${gpIndex})` : ''}... Les résultats arrivent dans le channel de course.`, ephemeral: true });
+    runPractice(interaction.channel, gpIndex).catch(e => console.error('admin_force_practice error:', e.message));
   }
 
   if (commandName === 'admin_force_quali') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-    await interaction.reply({ content: '✅ Qualifications en cours... Les résultats arrivent dans le channel de course.', ephemeral: true });
-    runQualifying(interaction.channel).catch(e => console.error('admin_force_quali error:', e.message));
+    const gpIndex = interaction.options.getInteger('gp_index');
+    await interaction.reply({ content: `✅ Qualifications en cours${gpIndex !== null ? ` (GP index ${gpIndex})` : ''}... Les résultats arrivent dans le channel de course.`, ephemeral: true });
+    runQualifying(interaction.channel, gpIndex).catch(e => console.error('admin_force_quali error:', e.message));
   }
 
   if (commandName === 'admin_force_race') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-    await interaction.reply({ content: '🏁 Course lancée ! Suivez le direct dans le channel de course.', ephemeral: true });
-    runRace(interaction.channel).catch(e => console.error('admin_force_race error:', e.message));
+    const gpIndex = interaction.options.getInteger('gp_index');
+    await interaction.reply({ content: `🏁 Course lancée${gpIndex !== null ? ` (GP index ${gpIndex})` : ''} ! Suivez le direct dans le channel de course.`, ephemeral: true });
+    runRace(interaction.channel, gpIndex).catch(e => console.error('admin_force_race error:', e.message));
+  }
+
+  if (commandName === 'admin_skip_gp') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    const season = await getActiveSeason();
+    if (!season) return interaction.editReply('❌ Aucune saison active.');
+    const gpIndex = interaction.options.getInteger('gp_index');
+    const race = gpIndex !== null
+      ? await Race.findOne({ seasonId: season._id, index: gpIndex })
+      : await getCurrentRace(season);
+    if (!race) return interaction.editReply('❌ Aucun GP trouvé.');
+    if (race.status === 'done') return interaction.editReply(`❌ Le GP **${race.circuit}** (index ${race.index}) est déjà terminé.`);
+    await Race.findByIdAndUpdate(race._id, { status: 'done' });
+    return interaction.editReply(`✅ GP **${race.emoji} ${race.circuit}** (index ${race.index}) passé en \`done\` — sans simulation.\nLe prochain \`/admin_force_*\` ciblera le GP suivant.`);
   }
 
   if (commandName === 'admin_transfer') {
@@ -5753,9 +5810,12 @@ async function isRaceDay(race, override) {
   return d.getTime() === today.getTime();
 }
 
-async function runPractice(override) {
+async function runPractice(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
-  const race   = await getCurrentRace(season); if (!race) return;
+  const race   = gpIndex !== null
+    ? await Race.findOne({ seasonId: season._id, index: gpIndex })
+    : await getCurrentRace(season);
+  if (!race) return;
   if (!await isRaceDay(race, override)) return;
 
   const { pilots, teams } = await getAllPilotsWithTeams();
@@ -5763,23 +5823,51 @@ async function runPractice(override) {
 
   const { results, weather } = await simulatePractice(race, pilots, teams);
   const channel = await getRaceChannel(override);
-  const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+  if (!channel) { await Race.findByIdAndUpdate(race._id, { status: 'practice_done' }); return; }
+
+  const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+  const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
+
+  // ~30% des pilotes n'ont pas montré leur vrai rythme
+  const sandbagging = new Set(
+    [...results].sort(() => Math.random() - 0.5)
+      .slice(0, Math.floor(results.length * 0.3))
+      .map(r => String(r.pilot._id))
+  );
+
+  const lines = results.map((r, i) => {
+    const note = sandbagging.has(String(r.pilot._id))
+      ? pick([' *(programme réduit)*', ' *(pas poussé)*', ' *(essais techniques)*', ' *(longues distances)*'])
+      : '';
+    return `**P${i+1}** ${r.team.emoji} ${r.pilot.name} — ${msToLapStr(r.time)}${note}`;
+  }).join('\n');
+
+  const chaosNotes = [
+    '⚠️ *Ces temps sont à prendre avec des pincettes — certains n\'ont pas montré leur rythme réel.*',
+    '⚠️ *Programme très varié en piste : peu représentatif de la hiérarchie réelle.*',
+    '⚠️ *Les essais libres brouillent souvent les cartes. La vraie hiérarchie se dessinera en qualifs.*',
+    '⚠️ *Certaines écuries ont clairement caché leur jeu. Les qualifs diront tout.*',
+  ];
 
   const embed = new EmbedBuilder()
     .setTitle(`🔧 Essais Libres — ${race.emoji} ${race.circuit}`)
     .setColor('#888888')
     .setDescription(
-      `Météo : **${weather}** | Style : **${race.gpStyle.toUpperCase()}** ${styleEmojis[race.gpStyle]}\n\n` +
-      results.slice(0,10).map((r,i) => `**P${i+1}** ${r.team.emoji} ${r.pilot.name} — ${msToLapStr(r.time)}`).join('\n')
-    );
+      `Météo : **${weatherLabels[weather] || weather}** · Style : **${race.gpStyle.toUpperCase()}** ${styleEmojis[race.gpStyle] || ''}\n\n` +
+      lines + '\n\n' + pick(chaosNotes)
+    )
+    .setFooter({ text: 'Classement complet · Qualifications à 15h 🏎️' });
 
-  if (channel) await channel.send({ embeds: [embed] });
+  await channel.send({ embeds: [embed] });
   await Race.findByIdAndUpdate(race._id, { status: 'practice_done' });
 }
 
-async function runQualifying(override) {
+async function runQualifying(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
-  const race   = await getCurrentRace(season); if (!race) return;
+  const race   = gpIndex !== null
+    ? await Race.findOne({ seasonId: season._id, index: gpIndex })
+    : await getCurrentRace(season);
+  if (!race) return;
   if (!await isRaceDay(race, override)) return;
 
   const { pilots, teams } = await getAllPilotsWithTeams();
@@ -6074,9 +6162,12 @@ async function sendSeasonCeremony(season, channel) {
   } catch(e) { console.error('HallOfFame save error:', e.message); }
 }
 
-async function runRace(override) {
+async function runRace(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
-  const race   = await getCurrentRace(season); if (!race || race.status === 'done') return;
+  const race   = gpIndex !== null
+    ? await Race.findOne({ seasonId: season._id, index: gpIndex })
+    : await getCurrentRace(season);
+  if (!race || race.status === 'done') return;
   if (!await isRaceDay(race, override)) return;
 
   const { pilots, teams } = await getAllPilotsWithTeams();
