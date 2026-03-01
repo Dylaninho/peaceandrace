@@ -5832,56 +5832,60 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_apply_last_race') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-    await interaction.deferReply({ ephemeral: true });
 
-    const season = await getActiveSeason();
-    if (!season) return await interaction.editReply('❌ Aucune saison active.');
+    // Répondre IMMÉDIATEMENT avant tout await pour éviter l'expiration des 3s
+    await interaction.reply({ content: '⏳ Application des résultats en cours...', ephemeral: true });
 
     const rawId = interaction.options.getString('race_id');
-    let race;
-    try {
-      // Chercher la course spécifiée, ou la dernière course avec des résultats mais status pas 'done'
-      if (rawId) {
-        race = await Race.findById(rawId);
-      } else {
-        // Chercher la course la plus récente avec raceResults mais status != done
-        const allRaces = await Race.find({ seasonId: season._id }).sort({ index: -1 });
-        race = allRaces.find(r => r.raceResults?.length && r.status !== 'done');
-        // Si toutes sont done, prendre la dernière done pour vérifier
-        if (!race) race = allRaces.find(r => r.raceResults?.length);
+
+    // Tout le travail async APRÈS le reply
+    (async () => {
+      try {
+        const season = await getActiveSeason();
+        if (!season) return await interaction.editReply('❌ Aucune saison active.');
+
+        let race;
+        try {
+          if (rawId) {
+            race = await Race.findById(rawId);
+          } else {
+            const allRaces = await Race.find({ seasonId: season._id }).sort({ index: -1 });
+            race = allRaces.find(r => r.raceResults?.length && r.status !== 'done');
+            if (!race) race = allRaces.find(r => r.raceResults?.length);
+          }
+        } catch(e) {
+          return await interaction.editReply(`❌ ID invalide : ${e.message}`);
+        }
+
+        if (!race) return await interaction.editReply('❌ Aucune course avec des résultats trouvée.');
+        if (!race.raceResults?.length) {
+          const hint = race.status === 'race_computed'
+            ? `\n✅ Status \`race_computed\` — la simulation a tourné mais les résultats n'ont pas été appliqués. Relance la commande.`
+            : race.status === 'quali_done'
+            ? `\n⚠️ Status \`quali_done\` — la course n'a pas encore été simulée. Utilise \`/admin_force_race\` d'abord.`
+            : '';
+          return await interaction.editReply(`❌ La course **${race.circuit}** n'a pas de résultats enregistrés. (status : \`${race.status}\`)${hint}`);
+        }
+
+        const alreadyApplied = race.status === 'done';
+        await applyRaceResults(race.raceResults, race._id, season, []);
+
+        const F1_POINTS_LOCAL = [25,18,15,12,10,8,6,4,2,1];
+        const summary = race.raceResults.slice(0, 10).map((r, i) => {
+          const pts = F1_POINTS_LOCAL[r.pos - 1] || 0;
+          return `P${r.pos} ${r.pilotId} → +${pts}pts${r.dnf?' DNF':''}`;
+        }).join('\n');
+
+        await interaction.editReply(
+          `${alreadyApplied ? '⚠️ Course déjà done — résultats RE-appliqués' : '✅ Résultats appliqués !'}\n` +
+          `**${race.emoji || '🏁'} ${race.circuit}** (index ${race.index})\n\`\`\`\n${summary}\n\`\`\`\n` +
+          `Race status → \`done\` ✅`
+        );
+      } catch(e) {
+        console.error('[admin_apply_last_race] Erreur :', e.message);
+        try { await interaction.editReply(`❌ Erreur : ${e.message}`); } catch(_) {}
       }
-    } catch(e) {
-      return await interaction.editReply(`❌ ID invalide : ${e.message}`);
-    }
-
-    if (!race) return await interaction.editReply('❌ Aucune course avec des résultats trouvée.');
-    if (!race.raceResults?.length) {
-      const hint = race.status === 'race_computed'
-        ? `\n✅ La course a été simulée (status \`race_computed\`) mais les résultats n'ont pas été appliqués en BDD. Lance \`/admin_apply_last_race\` sans paramètre pour les appliquer.`
-        : race.status === 'quali_done'
-        ? `\n⚠️ La course est en \`quali_done\` — les qualifications sont faites mais la course n'a pas encore tourné. Lance d'abord la course avec \`/admin_run_race\` (ou attends 18h).`
-        : '';
-      return await interaction.editReply(`❌ La course **${race.circuit}** n'a pas de résultats enregistrés. (status : \`${race.status}\`)${hint}`);
-    }
-
-    const alreadyApplied = race.status === 'done';
-
-    try {
-      await applyRaceResults(race.raceResults, race._id, season, []);
-      const F1_POINTS_LOCAL = [25,18,15,12,10,8,6,4,2,1];
-      const summary = race.raceResults.slice(0, 10).map((r, i) => {
-        const pts = F1_POINTS_LOCAL[r.pos - 1] || 0;
-        return `P${r.pos} pilotId=${r.pilotId} → +${pts}pts${r.dnf?' DNF':''}`;
-      }).join('\n');
-      await interaction.editReply(
-        `${alreadyApplied ? '⚠️ Course déjà marquée done — résultats RE-appliqués (doublons possibles !)' : '✅ Résultats appliqués !'}\n` +
-        `**${race.emoji || '🏁'} ${race.circuit}** (index ${race.index})\n\`\`\`\n${summary}\n\`\`\`\n` +
-        `Race status → \`done\` ✅`
-      );
-    } catch(e) {
-      console.error('[admin_apply_last_race] Erreur :', e.message);
-      try { await interaction.editReply(`❌ Erreur lors de l'application : ${e.message}`); } catch(_) {}
-    }
+    })();
     return;
   }
 
