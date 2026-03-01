@@ -266,7 +266,7 @@ const RaceSchema = new mongoose.Schema({
   laps          : { type: Number, default: 50 },
   gpStyle       : { type: String, enum: ['urbain','mixte','rapide','technique','endurance'], default: 'mixte' },
   scheduledDate : Date,
-  status        : { type: String, enum: ['upcoming','practice_done','quali_done','done'], default: 'upcoming' },
+  status        : { type: String, enum: ['upcoming','practice_done','quali_done','race_computed','done'], default: 'upcoming' },
   qualiGrid     : { type: Array, default: [] },
   raceResults   : { type: Array, default: [] },
 });
@@ -2942,6 +2942,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   }
 
   // ── Drapeau à damier ────────────────────────────────────
+    // Sauvegarde immédiate — avant messages Discord
+  await Race.findByIdAndUpdate(race._id, { raceResults: results, status: "race_computed" });
+
   const winner    = finalRanked[0];
   const runnerUp  = finalRanked[1];
   const gapWin    = runnerUp && !runnerUp.dnf ? (runnerUp.totalTime - winner.totalTime) / 1000 : null;
@@ -3248,7 +3251,7 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
     // ── Enregistrement GPRecord ──────────────────────────────
     if (raceDoc) {
       const team = teams.find(t => String(t._id) === String(r.teamId));
-      await PilotGPRecord.create({
+      const gpRecordData = {
         pilotId      : r.pilotId,
         seasonId     : season._id,
         seasonYear   : season.year,
@@ -3267,7 +3270,13 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
         coins        : r.coins,
         fastestLap   : r.fastestLap || false,
         raceDate     : raceDoc.scheduledDate || new Date(),
-      });
+      };
+      // Upsert pour éviter les doublons en cas de re-application (admin_apply_last_race)
+      await PilotGPRecord.findOneAndUpdate(
+        { pilotId: r.pilotId, raceId: raceId },
+        { $set: gpRecordData },
+        { upsert: true }
+      );
     }
   }
 
@@ -5826,7 +5835,7 @@ async function handleInteraction(interaction) {
     await interaction.deferReply({ ephemeral: true });
 
     const season = await getActiveSeason();
-    if (!season) return interaction.editReply('❌ Aucune saison active.');
+    if (!season) return await interaction.editReply('❌ Aucune saison active.');
 
     const rawId = interaction.options.getString('race_id');
     let race;
@@ -5842,11 +5851,18 @@ async function handleInteraction(interaction) {
         if (!race) race = allRaces.find(r => r.raceResults?.length);
       }
     } catch(e) {
-      return interaction.editReply(`❌ ID invalide : ${e.message}`);
+      return await interaction.editReply(`❌ ID invalide : ${e.message}`);
     }
 
-    if (!race) return interaction.editReply('❌ Aucune course avec des résultats trouvée.');
-    if (!race.raceResults?.length) return interaction.editReply(`❌ La course **${race.circuit}** n'a pas de résultats enregistrés.`);
+    if (!race) return await interaction.editReply('❌ Aucune course avec des résultats trouvée.');
+    if (!race.raceResults?.length) {
+      const hint = race.status === 'race_computed'
+        ? `\n✅ La course a été simulée (status \`race_computed\`) mais les résultats n'ont pas été appliqués en BDD. Lance \`/admin_apply_last_race\` sans paramètre pour les appliquer.`
+        : race.status === 'quali_done'
+        ? `\n⚠️ La course est en \`quali_done\` — les qualifications sont faites mais la course n'a pas encore tourné. Lance d'abord la course avec \`/admin_run_race\` (ou attends 18h).`
+        : '';
+      return await interaction.editReply(`❌ La course **${race.circuit}** n'a pas de résultats enregistrés. (status : \`${race.status}\`)${hint}`);
+    }
 
     const alreadyApplied = race.status === 'done';
 
@@ -5857,14 +5873,16 @@ async function handleInteraction(interaction) {
         const pts = F1_POINTS_LOCAL[r.pos - 1] || 0;
         return `P${r.pos} pilotId=${r.pilotId} → +${pts}pts${r.dnf?' DNF':''}`;
       }).join('\n');
-      return interaction.editReply(
+      await interaction.editReply(
         `${alreadyApplied ? '⚠️ Course déjà marquée done — résultats RE-appliqués (doublons possibles !)' : '✅ Résultats appliqués !'}\n` +
         `**${race.emoji || '🏁'} ${race.circuit}** (index ${race.index})\n\`\`\`\n${summary}\n\`\`\`\n` +
         `Race status → \`done\` ✅`
       );
     } catch(e) {
-      return interaction.editReply(`❌ Erreur lors de l'application : ${e.message}`);
+      console.error('[admin_apply_last_race] Erreur :', e.message);
+      try { await interaction.editReply(`❌ Erreur lors de l'application : ${e.message}`); } catch(_) {}
     }
+    return;
   }
 
 } // fin handleInteraction
