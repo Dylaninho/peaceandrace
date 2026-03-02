@@ -593,44 +593,40 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const BASE = 90_000;
   const w = GP_STYLE_WEIGHTS[gpStyle];
 
-  // Contribution voiture (45% du temps)
+  // Contribution voiture — max ~2s/tour entre meilleure et pire voiture
   const cScore = carScore(team, gpStyle);
-  const carFRaw = 1 - ((cScore - 70) / 70 * 0.15);
-  // Post-SC : compression des écarts voiture (tout le monde roule au même rythme ~3 tours)
-  const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.15 * (scCooldown / 6)) : carFRaw;
+  const carFRaw = 1 - ((cScore - 70) / 70 * 0.022);
+  const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.022 * (scCooldown / 6)) : carFRaw;
 
-  // Contribution pilote (35% du temps)
+  // Contribution pilote — max ~1.5s/tour
   const pScore = pilotScore(pilot, gpStyle);
-  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.12);
-  // Post-SC : idem compression
-  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.12 * (scCooldown / 6)) : pilotFRaw;
+  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.015);
+  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.015 * (scCooldown / 6)) : pilotFRaw;
 
-  // ── Bonus spécialisation : +3% sur la stat ciblée ────────
-  // On traduit ça en réduction de temps selon l'impact de la stat sur ce style
+  // Spécialisation — bonus marginal
   let specF = 1.0;
   if (pilot.specialization) {
     const specWeight = GP_STYLE_WEIGHTS[gpStyle]?.pilot?.[pilot.specialization] || 1.0;
-    // Bonus : 0.3% de réduction par unité de poids (max ~0.5% de gain en temps)
-    specF = 1 - (specWeight * 0.003);
+    specF = 1 - (specWeight * 0.0005);
   }
 
-  // Pneus
+  // Pneus — dégradation NON-LINÉAIRE (s'emballe après 70% de vie)
   const tireData = TIRE[tireCompound];
-  // Conservation pneus côté voiture réduit la dégradation effective
-  const carTireBonus = (team.conservationPneus - 70) / 70 * 0.3;
-  // Gestion pneus côté pilote réduit aussi la dégradation
+  if (!tireData) return 90_000; // fallback si compound inconnu
+  const carTireBonus   = (team.conservationPneus - 70) / 70 * 0.3;
   const pilotTireBonus = (pilot.gestionPneus - 50) / 50 * 0.2;
-  const effectiveDeg = tireData.deg * (1 - carTireBonus - pilotTireBonus * 0.01);
-  const wearPenalty = tireWear * effectiveDeg;
-  // Warm-up : 2 tours pour atteindre le grip optimal (pneus froids = +1.5%/+0.8% sur temps)
-  const warmupPenalty = tireAge === 0 ? 0.015 : tireAge === 1 ? 0.008 : 0;
-  const tireF = (1 + wearPenalty + warmupPenalty) / tireData.grip;
+  const effectiveDeg   = tireData.deg * (1 - carTireBonus - pilotTireBonus * 0.01);
+  // Cliff exponentiel : au-delà de 70% de vie utile, la dégradation explose
+  const tireLifeRef  = effectiveDeg > 0 ? 1 / (effectiveDeg * 30) : 35;
+  const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 1.5);
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + Math.pow((wearRatio - 0.7) / 0.3, 2.5) * 3.0;
+  const wearPenalty  = tireWear * effectiveDeg * cliffFactor;
+  const tireF        = (1 + wearPenalty) / tireData.grip;
 
-  // Dirty air — voiture derrière une autre souffre plus ou moins selon dirtyAir
+  // Dirty air — pénalité réaliste (~0.3s max)
   let dirtyAirF = 1.0;
   if (position > 1) {
-    const dirtyAirPenalty = (100 - team.dirtyAir) / 100 * 0.012;
-    // Pendant le cooldown post-SC, le dirty air est réduit (DRS train, peloton compact)
+    const dirtyAirPenalty = (100 - team.dirtyAir) / 100 * 0.004;
     const daRandom = scCooldown > 0 ? Math.random() * 0.3 : Math.random();
     dirtyAirF = 1 + dirtyAirPenalty * daRandom;
   }
@@ -638,11 +634,9 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   // Track evolution
   const trackF = 1 - (trackEvo / 100 * 0.015);
 
-  // Variabilité (controle réduit les erreurs de pilotage)
-  // Après un SC/VSC, la variance est réduite pour maintenir le peloton groupé (~5 tours)
-  const cooldownFactor = scCooldown > 0 ? 0.25 : 1.0; // 75% de réduction pendant le cooldown
-  // Variance réduite : max ±60ms/tour pour éviter les téléportations de classement
-  // (Un pilote à ±60ms/tour sur 50 tours = ±3s de dérive max — réaliste F1)
+  // Variance très faible — les positions NE changent PAS par hasard pur
+  // Max ±72ms/tour. Seules stratégie/incidents/pneus changent le classement
+  const cooldownFactor = scCooldown > 0 ? 0.1 : 1.0;
   const errorRange = (100 - pilot.controle) / 100 * 0.08 / 100 * cooldownFactor;
   const randF = 1 + (Math.random() - 0.5) * errorRange;
 
@@ -689,19 +683,46 @@ function chooseStartCompound(laps, weather) {
   return Math.random() > 0.6 ? 'HARD' : 'MEDIUM';
 }
 
-function shouldPit(driver, lapsRemaining, gapAhead) {
-  const { tireWear, tireCompound, pilot, team } = driver;
-  // Seuils de dégradation ajustés par conservationPneus voiture et gestionPneus pilote
+function shouldPit(driver, lapsRemaining, gapAhead, totalLaps) {
+  const { tireWear, tireCompound, pilot, team, tireAge, pitStops, pitStrategy, overcutMode } = driver;
+
+  // Minimum de tours sur les pneus (sauf réparation forcée via tireAge=99)
+  if (tireAge !== 99) {
+    const minLapsOnTire = pitStops === 0 ? 12 : 8;
+    if ((tireAge || 0) < minLapsOnTire) return { pit: false, reason: null };
+  }
+
+  // Stratégie 1-stop : attend 38% de la course avant le 1er arrêt
+  if (pitStrategy === 'one_stop' && (pitStops || 0) === 0) {
+    const lapsRaced = (totalLaps || 60) - lapsRemaining;
+    if (lapsRaced < (totalLaps || 60) * 0.38) return { pit: false, reason: null };
+  }
+  // Stratégie 2-stop : 1er arrêt tôt (~22%), 2ème en fin
+  if (pitStrategy === 'two_stop' && (pitStops || 0) === 0) {
+    const lapsRaced = (totalLaps || 60) - lapsRemaining;
+    if (lapsRaced < (totalLaps || 60) * 0.22) return { pit: false, reason: null };
+  }
+
+  // Mode overcut : reste dehors intentionnellement
+  if (overcutMode && (tireWear || 0) < 30 && lapsRemaining > 12) return { pit: false, reason: null };
+
   const wornThreshold = 35 - (team.conservationPneus - 70) * 0.2 - (pilot.gestionPneus - 50) * 0.1;
   const softThreshold = 22 - (team.conservationPneus - 70) * 0.15;
 
   if (tireWear > wornThreshold) return { pit: true, reason: 'tires_worn' };
   if (tireWear > softThreshold && tireCompound === 'SOFT') return { pit: true, reason: 'tires_worn' };
 
-  // Undercut — amplifié par le stat Dépassement du pilote
-  if (gapAhead !== null && gapAhead < 1800 && tireWear > 18 && lapsRemaining > 15) {
-    const agression = (pilot.depassement / 100) * Math.random();
-    if (agression > 0.52) return { pit: true, reason: 'undercut' };
+  // Undercut — conditions strictes pour éviter le chaos post-SC
+  // Pas d'undercut dans les X premiers tours de pneus (sinon tout le monde undercut post-SC)
+  if (gapAhead !== null && gapAhead < 1500 && tireWear > 22 && lapsRemaining > 18 && (tireAge || 0) >= 14) {
+    // Cooldown personnel : le pilote ne peut pas undercut 2 fois de suite (lastUndercutLap)
+    const lastUnd = driver.lastUndercutLap || -99;
+    if (lapsRemaining < (lastUnd - 4)) return { pit: false, reason: null }; // jamais < 4 tours après le dernier
+    // Probabilité réduite : ~10% par tour pour un pilote très agressif (depassement=100)
+    // → sur 15 tours : ~79% de chance total (réaliste, pas systématique)
+    // ~12%/tour pilote agressif (d=100), ~8%/tour moyen (d=60), réaliste
+    const undChance = (pilot.depassement / 100) * 0.12;
+    if (Math.random() < undChance) return { pit: true, reason: 'undercut' };
   }
 
   return { pit: false, reason: null };
@@ -739,16 +760,17 @@ function resolveSafetyCar(scState, lapIncidents) {
   const hasCrash = dangerousOnTrack.some(i => i.type === 'CRASH');
   if (hasCrash) {
     if (nDangerous >= 2) {
-      // Double incident ou collision → SC quasi-certain
-      if (roll < 0.85) return { state: 'SC',  lapsLeft: randInt(3, 5) };
-      return { state: 'VSC', lapsLeft: randInt(2, 3) };
+      // Double incident : SC possible mais VSC plus fréquent (F1 moderne)
+      if (roll < 0.55) return { state: 'SC',  lapsLeft: randInt(3, 5) };
+      return { state: 'VSC', lapsLeft: randInt(2, 4) };
     }
-    if (roll < 0.55) return { state: 'SC',  lapsLeft: randInt(2, 4) };
-    if (roll < 0.80) return { state: 'VSC', lapsLeft: randInt(1, 3) };
-    return { state: 'NONE', lapsLeft: 0 }; // crash solo qui se range sans bloquer
+    // Crash solo : VSC majoritairement
+    if (roll < 0.30) return { state: 'SC',  lapsLeft: randInt(2, 4) };
+    if (roll < 0.75) return { state: 'VSC', lapsLeft: randInt(2, 3) };
+    return { state: 'NONE', lapsLeft: 0 }; // crash qui se range proprement
   } else {
-    // Crevaison uniquement
-    if (roll < 0.35) return { state: 'VSC', lapsLeft: randInt(1, 2) };
+    // Crevaison → VSC très probable
+    if (roll < 0.55) return { state: 'VSC', lapsLeft: randInt(1, 3) };
     return { state: 'NONE', lapsLeft: 0 };
   }
 }
@@ -2265,30 +2287,48 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       lastPos      : idx + 1,
       // Écart initial réaliste : ~1.2s par position (P20 est à ~22s du leader)
       // Correspond à la réalité F1 où le peloton s'étire progressivement après le départ
-      totalTime    : idx * 1200,
-      tireCompound : startCompound,
-      tireWear     : 0,
-      tireAge      : 0,
-      usedCompounds: [startCompound],
-      pitStops     : 0,
-      pittedThisLap: false,
-      dnf          : false,
-      dnfLap       : null,
-      dnfReason    : '',
-      fastestLap   : Infinity,
+      totalTime       : idx * 2000, // 2s entre positions au départ — réaliste
+      tireCompound    : startCompound,
+      tireWear        : 0,
+      tireAge         : 0,
+      usedCompounds   : [startCompound],
+      pitStops        : 0,
+      pittedThisLap   : false,
+      dnf             : false,
+      dnfLap          : null,
+      dnfReason       : '',
+      fastestLap      : Infinity,
+      warmupLapsLeft  : 0,      // tours de chauffe pneus post-pit
+      catchUpDebt     : 0,      // retard cumulatif à rattraper
+      pitStrategy     : null,   // 'one_stop' | 'two_stop'
+      stratPitsDone   : 0,
+      overcutMode     : false,
+      trafficLapsLeft : 0,      // tours bloqué en trafic post-pit
+      defendExtraWear : 0,      // usure extra par défense agressive
+      pendingRepair   : null,   // 'aileron' | 'suspension'
+      drsActive       : false,
     };
   }).filter(Boolean);
+
+  // ── Stratégies de course (1 ou 2 arrêts) ──────────────────
+  const twoStopBias = gpStyle === 'rapide' ? 0.6 : gpStyle === 'endurance' ? 0.7 : 0.4;
+  for (const d of drivers) {
+    if (!d) continue;
+    const tireAgression = (100 - d.pilot.gestionPneus) / 100;
+    const stratRoll = Math.random() + tireAgression * 0.2 - (d.team.conservationPneus - 70) / 70 * 0.15;
+    d.pitStrategy = stratRoll > (1 - twoStopBias) ? 'two_stop' : 'one_stop';
+  }
 
   let scState          = { state: 'NONE', lapsLeft: 0 };
   let scCooldown       = 0;
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
-  // Charger le record actuel du circuit pour détecter si battu
+  let prevFastestHolder = null; // pour détecter nouveau meilleur tour
   const existingCircuitRecord = await CircuitRecord.findOne({ circuit: race.circuit });
   const raceCollisions = [];
-  // battleMap : clé = "idA_idB" (ordre croissant) → { lapsClose, lastPasser, lastPasserLap }
-  // Suit les duels persistants entre deux pilotes proches pour générer des contre-attaques
-  const battleMap = new Map();
+  const battleMap      = new Map();
+  const undercutTracker = new Map(); // pilotId → { pitLap, pilotAheadPos }
+  const overcutTracker  = new Map(); // pilotId → { startLap, rivalId, myPosAtStart }
 
   const send = async (msg) => {
     if (!channel) return;
@@ -2383,17 +2423,25 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         // (DRY→WET, WET→DRY, HOT→INTER) : on augmente leur usure artificiellement pour déclencher shouldPit
         const forceWear = ['DRY→WET','WET→DRY','HOT→INTER','INTER→WET'].includes(key);
         if (forceWear) {
-          // Forcer l'usure sur 3 tours successifs pour que tout le monde finisse par piter
-          // (pas juste ceux qui n'ont pas encore pité ce tour)
           for (const d of alive) {
-            const needWet  = (weather === 'WET' || weather === 'INTER') && (d.tireCompound === 'SOFT' || d.tireCompound === 'MEDIUM' || d.tireCompound === 'HARD');
-            const needDry  = (weather === 'DRY' || weather === 'HOT')   && (d.tireCompound === 'WET'  || d.tireCompound === 'INTER');
-            if (needWet || needDry) {
-              // Étaler les pits sur 3 tours avec usure progressive (38, 42, 48)
-              const urgency = Math.random();
-              d.tireWear = urgency < 0.4 ? Math.max(d.tireWear, 48)   // 40% pitent ce tour
-                         : urgency < 0.75 ? Math.max(d.tireWear, 38)  // 35% pitent tour suivant
-                         : Math.max(d.tireWear, 30);                   // 25% pitent dans 2 tours
+            const needWet = (weather === 'WET' || weather === 'INTER') && ['SOFT','MEDIUM','HARD'].includes(d.tireCompound);
+            const needDry = (weather === 'DRY' || weather === 'HOT')   && ['WET','INTER'].includes(d.tireCompound);
+            if (!needWet && !needDry) continue;
+            // Adaptabilité : pilotes réactifs pittent vite, les autres tardent
+            const adapt = d.pilot.adaptabilite || 50;
+            if (adapt >= 75) {
+              d.tireWear = Math.max(d.tireWear, 38); // réagit immédiatement
+            } else if (adapt >= 50) {
+              d.tireWear = Math.max(d.tireWear, 28); // réaction tardive — perd du temps
+              d.catchUpDebt = (d.catchUpDebt || 0) + 2000;
+            } else {
+              d.tireWear = Math.max(d.tireWear, 18); // reste trop longtemps dehors
+              d.catchUpDebt = (d.catchUpDebt || 0) + 5000;
+              if (d.pos <= 10 && Math.random() < 0.5) {
+                events.push({ priority: 5, text:
+                  `⚠️ **T${lap}** — ${d.team.emoji}**${d.pilot.name}** (P${d.pos}) tarde à réagir au changement de météo ! *Pneus inadaptés — l'équipe hésite.*`
+                });
+              }
             }
           }
         }
@@ -2450,7 +2498,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           `🚦 **DÉPART PROPRE !** ${startLeader.team.emoji} **${startLeader.pilot.name}** conserve la pole et mène le peloton dans le premier virage.`,
           `🚦 **EN ROUTE !** ${startLeader.team.emoji} **${startLeader.pilot.name}** réaction parfaite — il fuit en tête dès l'extinction des feux !`,
         ];
-        events.push({ priority: 9, text: pick(cleanFlavors) });
+        const oneStoppers = drivers.filter(d => d.pitStrategy === 'one_stop').length;
+        const twoStoppers = drivers.filter(d => d.pitStrategy === 'two_stop').length;
+        const stratNote = `
+📋 *Stratégies : **${oneStoppers}** pilote(s) sur 1 arrêt · **${twoStoppers}** pilote(s) sur 2 arrêts*`;
+        events.push({ priority: 9, text: pick(cleanFlavors) + stratNote });
       }
     }
 
@@ -2511,7 +2563,21 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
             incidentText = collisionDescription(driver, nearest, lap, true, true, 0);
           } else {
             nearest.totalTime += damage;
-            incidentText = collisionDescription(driver, nearest, lap, true, false, damage);
+            nearest.catchUpDebt = (nearest.catchUpDebt || 0) + damage;
+            // 30% : les dégâts forcent un pit d'urgence
+            const forcedPit = Math.random() < 0.30 && (nearest.pitStops || 0) < 3 && lapsRemaining > 6;
+            if (forcedPit) {
+              const dmgType = Math.random() < 0.5 ? 'aileron' : 'suspension';
+              nearest.pendingRepair = dmgType;
+              nearest.tireWear = 40;
+              nearest.tireAge  = 99;
+              const dmgLabel = dmgType === 'aileron' ? 'aileron avant endommagé' : 'suspension touchée';
+              incidentText = collisionDescription(driver, nearest, lap, true, false, damage) +
+                `
+  🔧 *${dmgLabel} — ${nearest.pilot.name} doit rentrer en urgence !*`;
+            } else {
+              incidentText = collisionDescription(driver, nearest, lap, true, false, damage);
+            }
           }
           if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('crash_collision') });
         } else {
@@ -2588,9 +2654,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       if (aliveSC.length > 1) {
         const leaderTime = aliveSC[0].totalTime;
         if (scState.state === 'SC') {
-          // SC : tout le monde à ~0.5s max entre chaque voiture
+          // SC : tout le monde à ~1.5s max entre chaque voiture (réaliste)
           for (let i = 1; i < aliveSC.length; i++) {
-            const maxGap = i * 500; // 0.5s par position
+            const maxGap = i * 1500;
             aliveSC[i].totalTime = leaderTime + maxGap;
           }
         } else {
@@ -2639,26 +2705,92 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
     for (const driver of drivers.filter(d => !d.dnf)) {
       if (scActive) {
-        // ── SOUS SC/VSC : on n'utilise PAS calcLapTime normal ──
-        // Tous les pilotes roulent à la même vitesse (neutre), les écarts restent figés.
-        // On ajoute juste un temps de tour SC identique pour tous (légère variance ~50ms max).
-        const scLapBase = scState.state === 'SC' ? 115_000 : 100_000; // SC = ~1:55, VSC = ~1:40
+        const scLapBase = scState.state === 'SC' ? 115_000 : 100_000;
         driver.totalTime += scLapBase + randInt(-50, 50);
-        // Pas d'usure pneus sous SC (quasi aucune)
         driver.tireAge += 1;
+        if ((driver.warmupLapsLeft || 0) > 0) driver.warmupLapsLeft--;
       } else {
-        // ── Hors SC : calcul normal ──
         let lt = calcLapTime(
           driver.pilot, driver.team,
           driver.tireCompound, driver.tireWear,
           weather, trackEvo, gpStyle, driver.pos,
-          scCooldown, driver.tireAge
+          scCooldown
         );
+
+        // ── DRS réaliste : bonus si < 1.2s du pilote devant ──
+        if (scCooldown === 0 && (driver.pos || 1) > 1 && lap > 1) {
+          const drsCircuit = gpStyle === 'rapide' || gpStyle === 'mixte';
+          if (drsCircuit) {
+            const pilotAheadObj = drivers.find(d => !d.dnf && d.pos === driver.pos - 1);
+            if (pilotAheadObj) {
+              const myPreTime    = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
+              const aheadPreTime = preLapTimes.get(String(pilotAheadObj.pilot._id)) ?? pilotAheadObj.totalTime;
+              const realGapMs    = Math.max(0, myPreTime - aheadPreTime);
+              if (realGapMs < 1200) {
+                const drsBonus = Math.round((driver.team.drs / 100) * 600 * (1 - realGapMs / 1200));
+                lt -= drsBonus;
+                driver.drsActive = true;
+              } else { driver.drsActive = false; }
+            }
+          }
+        } else { driver.drsActive = false; }
+
+        // ── Chauffe pneus post-pit ──
+        if ((driver.warmupLapsLeft || 0) > 0) {
+          lt += driver.warmupLapsLeft === 2 ? 3500 : 1500;
+          driver.warmupLapsLeft--;
+        }
+
+        // ── Trafic post-pit ──
+        if ((driver.trafficLapsLeft || 0) > 0) {
+          lt += 1500 + randInt(0, 1000);
+          driver.trafficLapsLeft--;
+          if (driver.trafficLapsLeft === 0) {
+            events.push({ priority: 3, text:
+              `🚦 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** se dégage du trafic ! Les pneus frais peuvent maintenant faire la différence.`
+            });
+          }
+        }
+
+        // ── Défense agressive = usure pneus extra ──
+        const behindDrv = drivers.find(d => !d.dnf && d.pos === driver.pos + 1);
+        if (behindDrv && !scActive) {
+          const gapBehind = (preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime)
+                          - (preLapTimes.get(String(behindDrv.pilot._id)) ?? behindDrv.totalTime);
+          if (gapBehind < 0 && Math.abs(gapBehind) < 1500) {
+            const defWear = driver.pilot.defense < 50 ? 0.8 : 0.3;
+            driver.tireWear = (driver.tireWear || 0) + defWear;
+            driver.defendExtraWear = (driver.defendExtraWear || 0) + defWear;
+          }
+        }
+
+        // ── Récupération post-dégâts (catchUpDebt) ──
+        // Après un contact, le pilote "contre-attaque" : légèrement plus rapide pendant quelques tours
+        // Récupération fixe : ~800-1200ms/tour (jamais plus que le lt ne le permet)
+        if ((driver.catchUpDebt || 0) > 0) {
+          const recovery = Math.min(driver.catchUpDebt, 1000);
+          lt -= recovery;
+          driver.catchUpDebt = Math.max(0, driver.catchUpDebt - recovery);
+        }
+
         driver.totalTime += lt;
         driver.tireWear  += 1;
         driver.tireAge   += 1;
         if (lt < driver.fastestLap) driver.fastestLap = lt;
-        if (lt < fastestLapMs) { fastestLapMs = lt; fastestLapHolder = driver; }
+        if (lt < fastestLapMs) {
+          const prevHolder = fastestLapHolder;
+          fastestLapMs     = lt;
+          fastestLapHolder = driver;
+          // Annonce meilleur tour en direct (après T3)
+          if (lap >= 3 && (!prevHolder || String(prevHolder.pilot._id) !== String(driver.pilot._id))) {
+            const flStr = msToLapStr(lt);
+            const isTop10 = (driver.pos || 1) <= 10;
+            const pointNote = isTop10 && lapsRemaining <= 5 ? ' 🏅 *+1 pt possible !*' : '';
+            events.push({ priority: 4, text:
+              `⚡ **MEILLEUR TOUR !** ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) — **${flStr}**${isTop10 ? pointNote : ' *(hors top 10)*'}`,
+            });
+          }
+        }
       }
     }
 
@@ -2668,7 +2800,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       const aliveMid = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
       if (aliveMid.length > 1) {
         const lt0 = aliveMid[0].totalTime;
-        const maxGapPerPos = scState.state === 'SC' ? 600 : 2000; // max 0.6s/pos sous SC
+        const maxGapPerPos = scState.state === 'SC' ? 1600 : 3000; // max ~1.6s/pos sous SC
         for (let i = 1; i < aliveMid.length; i++) {
           const maxAllowed = lt0 + i * maxGapPerPos;
           if (aliveMid[i].totalTime > maxAllowed) aliveMid[i].totalTime = maxAllowed;
@@ -2688,39 +2820,117 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       const myIdx    = aliveNow.findIndex(d => String(d.pilot._id) === String(driver.pilot._id));
       const gapAhead = myIdx > 0 ? driver.totalTime - aliveNow[myIdx - 1].totalTime : null;
 
-      // Sous SC : pas d'undercut possible, mais on laisse les pits normaux (usure)
-      const { pit, reason: rawReason } = shouldPit(driver, lapsRemaining, gapAhead);
-      const reason = (scActive && rawReason === 'undercut') ? null : rawReason;
+      // Sous SC ou dans les 4 tours post-SC : pas d'undercut (tout le monde est groupé)
+      const { pit, reason: rawReason } = shouldPit(driver, lapsRemaining, gapAhead, totalLaps);
+      const blockUndercut = scActive || scCooldown > 0;
+      const reason = (blockUndercut && rawReason === 'undercut') ? null : rawReason;
       const doPit  = pit && reason !== null;
 
       if (doPit && driver.pitStops < 3 && lapsRemaining > 5) {
         const posIn      = driver.pos;
         const oldTire    = driver.tireCompound;
         const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds);
-        const pitTime    = scActive ? randInt(19_000, 21_000) : randInt(19_000, 24_000);
 
-        driver.totalTime   += pitTime;
-        driver.tireCompound = newCompound;
-        driver.tireWear     = 0;
-        driver.tireAge      = 0;
-        driver.pitStops    += 1;
+        // Pit de réparation : aileron = +12-20s, suspension = +8-14s
+        let pitTime;
+        let repairDesc = null;
+        if (driver.pendingRepair) {
+          if (driver.pendingRepair === 'aileron') {
+            pitTime    = scActive ? randInt(30_000, 36_000) : randInt(32_000, 40_000);
+            repairDesc = `⚙️ *Remplacement de l'aileron avant — arrêt long !*`;
+          } else {
+            pitTime    = scActive ? randInt(26_000, 32_000) : randInt(28_000, 36_000);
+            repairDesc = `🔩 *Réparation de suspension — arrêt rallongé !*`;
+          }
+          delete driver.pendingRepair;
+        } else {
+          pitTime = scActive ? randInt(19_000, 21_000) : randInt(19_000, 24_000);
+        }
+
+        driver.totalTime    += pitTime;
+        driver.tireCompound  = newCompound;
+        driver.tireWear      = 0;
+        driver.tireAge       = 0;
+        driver.pitStops     += 1;
+        driver.stratPitsDone = (driver.stratPitsDone || 0) + 1;
         driver.pittedThisLap = true;
+        driver.warmupLapsLeft = 2;
+        driver.overcutMode    = false;
         if (!driver.usedCompounds.includes(newCompound)) driver.usedCompounds.push(newCompound);
 
-        // Recalcul sur le vrai tableau drivers (source de vérité)
+        // Trafic à la sortie : si 2+ voitures proches
+        const carsNearPitExit = aliveNow.filter(d =>
+          !d.pittedThisLap &&
+          String(d.pilot._id) !== String(driver.pilot._id) &&
+          Math.abs(d.totalTime - driver.totalTime) < 4000
+        ).length;
+        if (carsNearPitExit >= 2) driver.trafficLapsLeft = randInt(1, 2);
+
+        // Recalcul positions
         drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
         const posOut = driver.pos;
         const pitDur = (pitTime / 1000).toFixed(1);
 
         const scPitTag = scActive ? ' 🚨 *sous Safety Car*' : '';
-        const pitFlavors = reason === 'undercut' ? [
-          `🔧 **T${lap} — UNDERCUT !** ${driver.team.emoji}**${driver.pilot.name}** plonge aux stands depuis **P${posIn}** — ${TIRE[oldTire].emoji} → ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** — arrêt de **${pitDur}s** — ressort **P${posOut}**. La stratégie va-t-elle payer ?`,
-          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** tente l'undercut depuis **P${posIn}** ! Chaussage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s — ressort **P${posOut}**. L'équipe joue le tout pour le tout.`,
+        // Position sur la piste vs position en timing
+        // Les pilotes qui n'ont pas encore pité et ont moins de totalTime sont "devant" sur la piste
+        const carsAheadOnTrack = drivers.filter(d =>
+          !d.dnf &&
+          !d.pittedThisLap &&
+          (d.pitStops || 0) < (driver.pitStops || 0) && // pas encore pité autant
+          d.totalTime < driver.totalTime
+        ).length;
+        const trackPos = carsAheadOnTrack + 1;
+        const posOutContext = trackPos !== posOut
+          ? `**P${posOut}** en timing *(~P${trackPos} sur la piste)*`
+          : `**P${posOut}**`;
+        const gapToLeader = ranked && ranked.length > 0 && driver.pos > 1
+          ? ` · ${((driver.totalTime - ranked[0].totalTime) / 1000).toFixed(1)}s du leader`
+          : '';
+        const warmupNote = repairDesc ? `
+  ${repairDesc}` : ' *Pneus à chauffer — 2 tours lents.*';
+
+        const pitFlavors = repairDesc ? [
+          `🔧 **T${lap} — PIT D'URGENCE !** ${driver.team.emoji}**${driver.pilot.name}** (P${posIn}) rentre précipitamment. Arrêt de **${pitDur}s** — ressort ${posOutContext}${gapToLeader}.${warmupNote}`,
+        ] : reason === 'undercut' ? [
+          `🔧 **T${lap} — UNDERCUT !** ${driver.team.emoji}**${driver.pilot.name}** plonge aux stands depuis **P${posIn}** — ${TIRE[oldTire].emoji} → ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** — **${pitDur}s** — ressort ${posOutContext}${gapToLeader}. La stratégie va-t-elle payer ?${warmupNote}`,
+          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** tente l'undercut depuis **P${posIn}** ! ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s — ressort ${posOutContext}${gapToLeader}.${warmupNote}`,
         ] : [
-          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${TIRE[oldTire].emoji} en fin de vie. Passage en ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort **P${posOut}**.`,
-          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag} — ${TIRE[oldTire].emoji} cramés. L'équipe boulonne les ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. **P${posOut}** à la sortie du pitlane.`,
+          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${TIRE[oldTire].emoji} cramés. ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort ${posOutContext}${gapToLeader}.${warmupNote}`,
+          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag}. ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. Ressort ${posOutContext}${gapToLeader}.${warmupNote}`,
         ];
-        events.push({ priority: 7, gif: pickGif('pit_stop'), text: pick(pitFlavors) });
+
+        // Tracker undercut
+        if (reason === 'undercut') {
+          undercutTracker.set(String(driver.pilot._id), { pitLap: lap, pilotAheadPos: posIn - 1 });
+          driver.lastUndercutLap = lap; // cooldown : évite double undercut trop tôt
+        }
+
+        events.push({ priority: repairDesc ? 9 : 7, gif: pickGif('pit_stop'), text: pick(pitFlavors) });
+      }
+    }
+
+    // ── Overcut : détecter les pilotes qui restent intentionnellement dehors ──
+    if (!scActive && lap > 10 && lapsRemaining > 8) {
+      const pittersPos = drivers.filter(d => d.pittedThisLap).map(d => d.pos);
+      for (const d of drivers.filter(d => !d.dnf && !d.pittedThisLap)) {
+        const rivalPitted = pittersPos.some(pp => Math.abs(pp - d.pos) <= 2);
+        if (rivalPitted && (d.tireWear || 0) < 28 && (d.pitStops || 0) < 2 && !d.overcutMode) {
+          if (Math.random() < (d.pilot.adaptabilite / 100) * 0.45) {
+            d.overcutMode = true;
+            if (Math.random() < 0.6) {
+              events.push({ priority: 5, text: pick([
+                `📻 **T${lap}** — ${d.team.emoji}**${d.pilot.name}** reste en piste ! L'équipe mise sur l'**overcut** — creuser l'écart avant de pitter. *Risqué mais audacieux.*`,
+                `📻 **T${lap}** — ${d.team.emoji}**${d.pilot.name}** ne rentre PAS aux stands ! L'équipe joue l'overcut — rester dehors pendant que les autres chaussent du frais.`,
+              ]) });
+            }
+            const nearPitter = drivers.find(drv => drv.pittedThisLap && Math.abs(drv.pos - d.pos) <= 2);
+            if (nearPitter && !overcutTracker.has(String(d.pilot._id))) {
+              overcutTracker.set(String(d.pilot._id), { startLap: lap, rivalId: String(nearPitter.pilot._id), myPosAtStart: d.pos });
+            }
+          }
+        }
+        if (d.overcutMode && (d.tireWear || 0) > 30) d.overcutMode = false;
       }
     }
 
@@ -2767,17 +2977,36 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       const movedDown = driver.pos > driver.lastPos;
       const posGained = driver.lastPos - driver.pos; // positif si remonté
 
-      // ── Gain de 2+ positions (indirect : DNF d'autres, pit stops) ──
-      // On le mentionne brièvement sans l'habiller en dépassement en piste
+      // ── Gain de 2+ positions ───────────────────────────────
+      // Autorisé uniquement si des pits/DNF se sont produits devant (pas par rythme pur)
       if (movedUp && posGained >= 2) {
-        const isTop8Move = driver.pos <= 8 || driver.lastPos <= 8;
-        if (isTop8Move) {
-          events.push({
-            priority: 5,
-            text: `📊 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** remonte de **P${driver.lastPos}→P${driver.pos}** (+${posGained}) suite aux incidents / arrêts devant.`,
-          });
+        // Vérifier si des voitures devant ont pitté ou DNF ce tour (justifie le saut)
+        const pitOrDnfAhead = drivers.filter(d =>
+          (d.pittedThisLap || d.dnfLap === lap) &&
+          d.startPos < driver.startPos
+        ).length;
+        // Si aucune raison externe ET gain > 3 positions : cap artificiel (anti-TP)
+        if (pitOrDnfAhead === 0 && posGained > 3) {
+          // Forcer la position à lastPos - 3 maximum (limiter le saut inexpliqué)
+          const cappedPos = driver.lastPos - 3;
+          const cappedDriver = drivers.find(d => !d.dnf && d.pos === cappedPos);
+          if (cappedDriver) {
+            // Swap totalTime pour rétablir un ordre réaliste
+            const tmp = driver.totalTime;
+            driver.totalTime = cappedDriver.totalTime + 100;
+            drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+          }
         }
-        continue; // ne pas entrer dans le bloc dépassement normal
+        if (posGained >= 2) {
+          const isTop8Move = driver.pos <= 8 || driver.lastPos <= 8;
+          if (isTop8Move) {
+            events.push({
+              priority: 5,
+              text: `📊 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** remonte de **P${driver.lastPos}→P${driver.pos}** (+${driver.lastPos - driver.pos}) suite aux arrêts / incidents devant.`,
+            });
+          }
+          continue;
+        }
       }
 
       // ── Dépassement (le pilote a gagné UNE place) ──────────
@@ -2848,8 +3077,75 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       }
     }
 
+    // ── Undercut : confirmation 2-4 tours après ──────────────
+    for (const [undId, uc] of undercutTracker.entries()) {
+      if (lap < uc.pitLap + 2) continue;
+      if (lap > uc.pitLap + 4) { undercutTracker.delete(undId); continue; }
+      const undDriver = ranked.find(d => String(d.pilot._id) === undId);
+      if (!undDriver || (undDriver.warmupLapsLeft || 0) > 0) continue;
+      const target = ranked.find(d => d.pos === uc.pilotAheadPos);
+      if (!target) { undercutTracker.delete(undId); continue; }
+      const undWorked = undDriver.pos < target.pos;
+      const gap = Math.abs(undDriver.totalTime - target.totalTime);
+      const gapStr = gap < 1000 ? `${gap}ms` : `${(gap/1000).toFixed(3)}s`;
+      events.push({ priority: 7, text: undWorked
+        ? `✅ **T${lap} — L'UNDERCUT A PAYÉ !** ${undDriver.team.emoji}**${undDriver.pilot.name}** est devant ${target.team.emoji}**${target.pilot.name}** — **${gapStr}** d'avance. Stratégie parfaite.`
+        : `❌ **T${lap} — L'UNDERCUT N'A PAS FONCTIONNÉ.** ${target.team.emoji}**${target.pilot.name}** a tenu le rythme — ${undDriver.team.emoji}**${undDriver.pilot.name}** ressort toujours derrière (${gapStr}).`,
+      });
+      undercutTracker.delete(undId);
+    }
+
+    // ── Overcut : confirmation 3-6 tours après ──────────────
+    for (const [ocId, oc] of overcutTracker.entries()) {
+      if (lap < oc.startLap + 3) continue;
+      if (lap > oc.startLap + 6) { overcutTracker.delete(ocId); continue; }
+      const ocDriver = ranked.find(d => String(d.pilot._id) === ocId);
+      if (!ocDriver || ocDriver.overcutMode) continue;
+      const rival = ranked.find(d => String(d.pilot._id) === oc.rivalId);
+      if (!rival) { overcutTracker.delete(ocId); continue; }
+      const ocWorked = ocDriver.pos < rival.pos;
+      const gap = Math.abs(ocDriver.totalTime - rival.totalTime);
+      const gapStr = gap < 1000 ? `${gap}ms` : `${(gap/1000).toFixed(3)}s`;
+      events.push({ priority: 6, text: ocWorked
+        ? `✅ **T${lap} — L'OVERCUT A FONCTIONNÉ !** ${ocDriver.team.emoji}**${ocDriver.pilot.name}** est devant ${rival.team.emoji}**${rival.pilot.name}** — **${gapStr}** d'avance. Rester dehors était le bon choix.`
+        : `❌ **T${lap} — L'OVERCUT N'A PAS PAYÉ.** ${rival.team.emoji}**${rival.pilot.name}** ressort devant avec des pneus frais — ${ocDriver.team.emoji}**${ocDriver.pilot.name}** a perdu le pari stratégique (${gapStr} derrière).`,
+      });
+      overcutTracker.delete(ocId);
+    }
+
+    // ── Contacts légers ────────────────────────────────────────
+    if (!scActive && lap > 1 && Math.random() < 0.08) {
+      const closeDrivers = ranked.filter((d, i) => {
+        if (i === 0) return false;
+        const gap = (d.totalTime - ranked[i-1].totalTime) / 1000;
+        return gap < 0.8 && !d.pittedThisLap && !ranked[i-1].pittedThisLap;
+      });
+      if (closeDrivers.length) {
+        const victim   = pick(closeDrivers);
+        const attacker = ranked.find(d => d.pos === victim.pos - 1);
+        if (attacker) {
+          const roll = Math.random();
+          if (roll < 0.5) {
+            const penalty = randInt(2000, 4000);
+            attacker.totalTime += penalty;
+            drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+            raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id) });
+            events.push({ priority: 5, text: pick([
+              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** accroche légèrement ${victim.team.emoji}**${victim.pilot.name}** — pénalité **+${(penalty/1000).toFixed(0)}s** pour ${attacker.pilot.name}.`,
+              `⚠️ **T${lap}** — Petit contact ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. Pénalité **+${(penalty/1000).toFixed(0)}s** infligée.`,
+            ]) });
+          } else {
+            raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id) });
+            events.push({ priority: 3, text: pick([
+              `🔍 **T${lap}** — Contact discutable ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Sous investigation — aucune pénalité pour l'instant.*`,
+              `🔍 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}**. *La FIA surveille mais ne pénalise pas.*`,
+            ]) });
+          }
+        }
+      }
+    }
+
     // ── Défenses sans changement de position ──────────────────
-    // Si deux pilotes sont proches depuis 2+ tours et aucun n'a dépassé → peut-être une belle défense
     if (!scActive && !justRestarted && lap > 2 && Math.random() < 0.35) {
       for (let i = 0; i < ranked.length - 1; i++) {
         const ahead  = ranked[i];
@@ -2858,11 +3154,19 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         const gap  = (behind.totalTime - ahead.totalTime) / 1000;
         const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
         const battle = battleMap.get(bkey);
-        // 3+ tours proches, personne n'a dépassé ce tour → narrer la défense
         if (battle && battle.lapsClose >= 3 && gap < 1.2) {
-          const defText = defenseDescription(ahead, behind, gpStyle);
+          let defText = defenseDescription(ahead, behind, gpStyle);
+          // Mentionner l'usure pneus si défense longue
+          if (battle.lapsClose >= 5 && (ahead.defendExtraWear || 0) > 1.5) {
+            const wornNote = (ahead.defendExtraWear || 0) > 3
+              ? `
+  › *Les pneus de **${ahead.pilot.name}** paient le prix — ils s'effondreront bientôt.*`
+              : `
+  › *La défense coûte des pneus à **${ahead.pilot.name}** — fenêtre stratégique qui se resserre.*`;
+            defText += wornNote;
+          }
           events.push({ priority: 4, text: defText });
-          break; // une seule défense par tour max
+          break;
         }
       }
     }
@@ -2880,6 +3184,19 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     const showFullStandings = (lap % 10 === 0) || lap === totalLaps;
     const showTop5          = (lap % 5 === 0 && !showFullStandings) || (scActive && prevScState !== 'NONE');
 
+    // Helper: état d'usure pneu
+    const tireWearLabel = (d) => {
+      const td = TIRE[d.tireCompound];
+      if (!td) return '⬜';
+      const worn  = d.tireWear || 0;
+      const deg   = td.deg || 0.016;
+      const thr   = deg > 0 ? Math.round(30 / deg) : 35;
+      const wup   = (d.warmupLapsLeft || 0) > 0 ? '🌡️' : '';
+      if (worn >= thr * 0.85) return `${td.emoji}🔴${wup}`;
+      if (worn >= thr * 0.60) return `${td.emoji}🟡${wup}`;
+      return `${td.emoji}🟢${wup}`;
+    };
+
     let standingsText = '';
     if (showFullStandings) {
       const dnfLines = drivers.filter(d => d.dnf);
@@ -2887,7 +3204,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         ranked.map((d, i) => {
           const gapMs  = i === 0 ? null : d.totalTime - ranked[0].totalTime;
           const gapStr = i === 0 ? '⏱ **LEADER**' : `+${(gapMs/1000).toFixed(3)}s / leader`;
-          return `\`P${String(i+1).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${TIRE[d.tireCompound].emoji} (${d.pitStops} arr.)`;
+          return `\`P${String(i+1).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${tireWearLabel(d)} (${d.pitStops} arr.)`;
         }).join('\n') +
         (dnfLines.length ? '\n' + dnfLines.map(d => `~~${d.team.emoji}${d.pilot.name}~~ ❌ T${d.dnfLap}`).join(' · ') : '');
     } else if (showTop5) {
@@ -2895,7 +3212,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         ranked.slice(0, 5).map((d, i) => {
           const gapMs  = i === 0 ? null : d.totalTime - ranked[0].totalTime;
           const gapStr = i === 0 ? 'LEADER' : `+${(gapMs/1000).toFixed(3)}s / leader`;
-          return `**P${i+1}** ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${TIRE[d.tireCompound].emoji}`;
+          return `**P${i+1}** ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${tireWearLabel(d)}`;
         }).join('\n');
     }
 
@@ -3070,33 +3387,30 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     }
   }
 
-  // ── Conférence de presse ─────────────────────────────────
-  try {
-    const allPilots      = await Pilot.find();
-    const allTeams2      = await Team.find();
-    const allStandings   = await Standing.find({ seasonId: season._id });
-    const cStandings     = await ConstructorStanding.find({ seasonId: season._id });
-
-    const confBlocks = await generatePressConference(
-      race, results, season, allPilots, allTeams2, allStandings, cStandings
-    );
-
-    if (confBlocks?.length) {
-      await sleep(2500);
-      const confEmbed = new EmbedBuilder()
-        .setTitle(`🎤 Conférence de presse — ${race.emoji} ${race.circuit}`)
-        .setColor('#2B2D31')
-        .setDescription(confBlocks.join('\n\n─────────────────\n\n'));
-      await sendEmbed(confEmbed);
-    }
-  } catch(e) { console.error('Conf de presse erreur:', e); }
-
-  // ── News post-GP ─────────────────────────────────────────
-  try {
-    await sleep(4000);
-    const seasonForNews = await getActiveSeason();
-    if (seasonForNews) await generatePostRaceNews(race, results, seasonForNews, channel);
-  } catch(e) { console.error('Post-race news erreur:', e); }
+  // ── Conférence de presse + news — délai 2-3 min après la fin ──
+  setTimeout(async () => {
+    try {
+      const allPilots    = await Pilot.find();
+      const allTeams2    = await Team.find();
+      const allStandings = await Standing.find({ seasonId: season._id });
+      const cStandings   = await ConstructorStanding.find({ seasonId: season._id });
+      const confBlocks   = await generatePressConference(
+        race, results, season, allPilots, allTeams2, allStandings, cStandings
+      );
+      if (confBlocks?.length) {
+        const confEmbed = new EmbedBuilder()
+          .setTitle(`🎤 Conférence de presse — ${race.emoji} ${race.circuit}`)
+          .setColor('#2B2D31')
+          .setDescription(confBlocks.join('\n\n─────────────────\n\n'));
+        if (channel) { try { await channel.send({ embeds: [confEmbed] }); } catch(e) {} }
+        await sleep(5000);
+      }
+    } catch(e) { console.error('Conf de presse erreur:', e); }
+    try {
+      const seasonForNews = await getActiveSeason();
+      if (seasonForNews) await generatePostRaceNews(race, results, seasonForNews, channel);
+    } catch(e) { console.error('Post-race news erreur:', e); }
+  }, 150_000 + Math.random() * 30_000); // 2min30 à 3min après la fin
 
   return { results, collisions: raceCollisions };
 }
@@ -3687,6 +4001,9 @@ const commands = [
     .setDescription('[ADMIN] Applique manuellement les résultats du dernier GP simulé (si points non crédités)')
     .addStringOption(o => o.setName('race_id').setDescription('ID MongoDB de la course (optionnel — défaut: dernier GP simulé)').setRequired(false)),
 
+  new SlashCommandBuilder().setName('admin_inject_results')
+    .setDescription('[ADMIN] Injecte manuellement les résultats d\'un GP terminé sans points')
+    .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP — défaut: dernier GP done').setMinValue(0)),
   new SlashCommandBuilder().setName('admin_skip_gp')
     .setDescription('[ADMIN] Saute le GP en cours sans le simuler (rattraper un retard)')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP à sauter — défaut: GP en cours').setMinValue(0)),
@@ -4093,7 +4410,7 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race'].includes(commandName);
@@ -5799,6 +6116,24 @@ async function handleInteraction(interaction) {
     const gpIndex = interaction.options.getInteger('gp_index');
     await interaction.reply({ content: `🏁 Course lancée${gpIndex !== null ? ` (GP index ${gpIndex})` : ''} ! Suivez le direct dans le channel de course.`, ephemeral: true });
     runRace(interaction.channel, gpIndex).catch(e => console.error('admin_force_race error:', e.message));
+  }
+
+  if (commandName === 'admin_inject_results') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const season = await getActiveSeason();
+      if (!season) return interaction.editReply('❌ Pas de saison active.');
+      const gpIdx = interaction.options.getInteger('gp_index');
+      const race  = gpIdx !== null
+        ? await Race.findOne({ seasonId: season._id, index: gpIdx })
+        : await Race.findOne({ seasonId: season._id, status: 'done' }).sort({ index: -1 });
+      if (!race)          return interaction.editReply('❌ GP introuvable.');
+      if (!race.raceResults?.length) return interaction.editReply('❌ Pas de résultats sauvegardés pour ce GP.');
+      await applyRaceResults(race.raceResults, race._id, season, []);
+      return interaction.editReply(`✅ Points du GP ${race.emoji} ${race.circuit} injectés !`);
+    } catch(e) { return interaction.editReply(`❌ Erreur : ${e.message}`); }
   }
 
   if (commandName === 'admin_skip_gp') {
