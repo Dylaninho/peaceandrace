@@ -185,7 +185,7 @@ const CircuitRecord = mongoose.model('CircuitRecord', CircuitRecordSchema);
 
 // ── NewsArticle — Tabloïd de paddock ──────────────────────
 const NewsArticleSchema = new mongoose.Schema({
-  type       : { type: String, required: true },  // 'rivalry','transfer_rumor','drama','hype','form_crisis','teammate_duel','dev_vague','scandal','title_fight','driver_interview'
+  type       : { type: String, required: true },  // 'rivalry','transfer_rumor','drama','hype','form_crisis','teammate_duel','dev_vague','scandal','title_fight','driver_interview','sponsoring','social_media','tv_show','relationship','friendship','lifestyle','scandal_offtrack','charity','brand_deal'
   source     : { type: String, required: true },  // 'pitlane_insider','paddock_whispers','pl_racing_news','f1_weekly'
   headline   : { type: String, required: true },
   body       : { type: String, required: true },
@@ -315,19 +315,19 @@ const DraftSession = mongoose.model('DraftSession', DraftSchema);
 // ============================================================
 
 const DEFAULT_TEAMS = [
-  { name:'Red Bull Racing', emoji:'🔵', color:'#1E3A5F', budget:100,
+  { name:'Red Bull Racing', emoji:'🟡', color:'#1E3A5F', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
   { name:'Ferrari',         emoji:'🔴', color:'#DC143C', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
-  { name:'Mercedes',        emoji:'⚪', color:'#00D2BE', budget:100,
+  { name:'Mercedes',        emoji:'🩶', color:'#00D2BE', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
   { name:'McLaren',         emoji:'🟠', color:'#FF7722', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
   { name:'Aston Martin',    emoji:'🟢', color:'#006400', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
-  { name:'Alpine',          emoji:'💙', color:'#0066CC', budget:100,
+  { name:'Alpine',          emoji:'🩷', color:'#0066CC', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
-  { name:'Williams',        emoji:'🔷', color:'#00B4D8', budget:100,
+  { name:'Williams',        emoji:'🔵', color:'#00B4D8', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
   { name:'Haas',            emoji:'⬜', color:'#AAAAAA', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
@@ -1726,10 +1726,18 @@ function buildPressBlock(ctx, angle) {
 // ─── MOTEUR DE NEWS — Tabloïd de paddock ─────────────────
 
 const NEWS_SOURCES = {
-  pitlane_insider  : { name: '🔥 PitLane Insider',    color: '#FF4444' },
-  paddock_whispers : { name: '🤫 Paddock Whispers',   color: '#9B59B6' },
-  pl_racing_news   : { name: '🗞️ PL Racing News',     color: '#2C3E50' },
-  f1_weekly        : { name: '📡 F1 Weekly',          color: '#2980B9' },
+  // ── Sport / Paddock ──────────────────────────────────────
+  pitlane_insider  : { name: '🔥 PitLane Insider',        color: '#FF4444' },
+  paddock_whispers : { name: '🤫 Paddock Whispers',        color: '#9B59B6' },
+  pl_racing_news   : { name: '🗞️ PL Racing News',          color: '#2C3E50' },
+  f1_weekly        : { name: '📡 F1 Weekly',               color: '#2980B9' },
+  // ── Gossip / Lifestyle ───────────────────────────────────
+  turbo_people     : { name: '💅 Turbo People',            color: '#E91E8C' },
+  paddock_mag      : { name: '✨ Paddock Mag',             color: '#FF9800' },
+  speed_gossip     : { name: '🏎️💬 Speed Gossip',         color: '#E040FB' },
+  grid_social      : { name: '📲 Grid Social',             color: '#00BCD4' },
+  pl_celebrity     : { name: '🌟 PL Celebrity',            color: '#FFD700' },
+  the_pit_wall_tmz : { name: '📸 The Pit Wall — TMZ Ed.',  color: '#FF5722' },
 };
 
 // Publier un article dans le channel de course
@@ -2463,7 +2471,789 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
   }
 }
 
-async function runScheduledNews(discordClient) {
+// ============================================================
+// 🌟  GÉNÉRATEURS GOSSIP / LIFESTYLE / HORS-PISTE
+// ============================================================
+
+// ─── Helpers communs ─────────────────────────────────────────
+const FOLLOWERS_POOL = ['12,4K','38,9K','67K','102K','215K','480K','1,2M','3,8M','8,1M'];
+const TV_SHOWS = [
+  { name: 'Danse avec les Stars',       emoji: '💃', country: 'France'      },
+  { name: 'The Tonight Show',           emoji: '🎙️', country: 'US'          },
+  { name: 'Jimmy Fallon',               emoji: '😂', country: 'US'          },
+  { name: 'The Late Late Show',         emoji: '🎤', country: 'US'          },
+  { name: 'Sunday Brunch',              emoji: '🍳', country: 'UK'          },
+  { name: 'Quotidien',                  emoji: '📺', country: 'France'      },
+  { name: 'C à vous',                   emoji: '🛋️', country: 'France'      },
+  { name: 'Canal Sport Club',           emoji: '⚽', country: 'France'      },
+  { name: 'TF1 — 20h',                  emoji: '📰', country: 'France'      },
+  { name: 'Graham Norton Show',         emoji: '🇬🇧', country: 'UK'         },
+  { name: 'Top Gear Live',              emoji: '🚗', country: 'UK'          },
+  { name: 'The Ellen DeGeneres Show',   emoji: '🎁', country: 'US'          },
+  { name: 'Good Morning America',       emoji: '☀️', country: 'US'          },
+  { name: 'Touche pas à mon poste',     emoji: '📡', country: 'France'      },
+  { name: 'Les Enfants de la télé',     emoji: '🎬', country: 'France'      },
+  { name: 'Ninja Warrior',              emoji: '💪', country: 'France'      },
+  { name: 'Le Grand Bain',              emoji: '🏊', country: 'France'      },
+  { name: 'Fort Boyard',                emoji: '🏰', country: 'France'      },
+];
+const LUXURY_BRANDS = ['Rolex','Louis Vuitton','Prada','Gucci','Dior','Balenciaga','Off-White','Stone Island','AMG Performance','Porsche Design','Hugo Boss','Tommy Hilfiger','Nike Lab','Adidas Y-3'];
+const GAMING_BRANDS = ['EA Sports','Gran Turismo','F1 24','Fortnite','Red Bull Gaming','Logitech G','Razer','SteelSeries'];
+const CHARITY_CAUSES = [
+  'la lutte contre le décrochage scolaire',
+  'l\'accès au sport pour les jeunes défavorisés',
+  'la sensibilisation au changement climatique',
+  'la recherche contre les maladies rares',
+  'l\'aide aux réfugiés',
+  'les Restos du Cœur',
+  'l\'alphabétisation en Afrique',
+  'la protection des océans',
+  'la santé mentale des sportifs de haut niveau',
+  'UNICEF France',
+  'la Fondation Abbé Pierre',
+];
+const DESTINATIONS_VACANCES = [
+  'Ibiza','Dubaï','Miami','Monaco','Mykonos','Maldives','Bali','Tokyo','Los Angeles','Saint-Tropez','Courchevel','Tulum','New York','Marrakech','Zanzibar'
+];
+const RELATION_NOMS = [
+  'une influenceuse','un mannequin','une actrice','un acteur','une chanteuse','un chanteur',
+  'une joueuse de tennis','une athlète','une DJ','une podcasteuse',
+  'une journaliste sportive','un entrepreneur tech',
+];
+
+// ─── 1. SPONSORING / PARTENARIAT COMMERCIAL ──────────────────
+function genSponsoringArticle(pilot, team, seasonYear) {
+  const source  = pick(['paddock_mag', 'pl_celebrity', 'pl_racing_news']);
+  const brand   = pick([...LUXURY_BRANDS, ...GAMING_BRANDS, 'Red Bull','Monster Energy','Heineken 0.0','Qatar Airways','Aramco','Crypto.com','Oracle','AWS','Salesforce','DHL','LVMH']);
+  const isLuxury = LUXURY_BRANDS.includes(brand);
+  const isGaming = GAMING_BRANDS.includes(brand);
+
+  const dealTypes = [
+    { label: 'ambassadeur mondial', value: 'ambassador' },
+    { label: 'partenariat lifestyle', value: 'lifestyle' },
+    { label: 'collab capsule limitée', value: 'capsule' },
+    { label: 'contrat d\'image pluriannuel', value: 'multi_year' },
+  ];
+  const deal = pick(dealTypes);
+
+  const headlines = [
+    `${pilot.name} × ${brand} : le deal de l'année est officiel`,
+    `${team.emoji}${pilot.name} devient ${deal.label} de ${brand}`,
+    `Coup de théâtre commercial : ${brand} mise sur ${pilot.name}`,
+    `${pilot.name} rejoint la famille ${brand} — les chiffres font tourner la tête`,
+    `"Un partenariat naturel" — ${pilot.name} s'associe à ${brand}`,
+  ];
+
+  const moneyLines = [
+    `Les montants évoqués dans le paddock oscilleraient entre **800K et 2M PLcoins** par an.`,
+    `Le deal serait évalué à plusieurs millions sur trois ans — une rémunération qui dépasse son salaire de pilote selon nos sources.`,
+    `Pas de chiffres officiels communiqués, mais l'entourage du pilote parle d'un "contrat transformateur".`,
+    `La somme reste confidentielle. Ce qu'on sait : ${pilot.name} a refusé deux autres offres pour celle-ci.`,
+  ];
+
+  const contextLines = isLuxury ? pick([
+    `${brand} confirme ainsi son appétit pour le monde du sport automobile premium, après des années à flirter avec la F1 PL.`,
+    `L'univers du luxe et de la vitesse se rencontrent. ${pilot.name} incarne exactement ce que ${brand} cherche : performance, style, présence internationale.`,
+  ]) : isGaming ? pick([
+    `${brand} cherchait un ambassadeur crédible dans l'esport et le vrai sport. ${pilot.name}, connu pour ses sessions gaming streamées, s'imposait naturellement.`,
+    `"Les pilotes F1 PL sont des athlètes que la gen Z respecte." — un cadre de ${brand}, lors de la conférence d'annonce.`,
+  ]) : pick([
+    `${brand} élargit son portfolio sportif avec cette signature surprise.`,
+    `Ce partenariat s'inscrit dans la stratégie de ${brand} d'associer son image à la nouvelle génération de champions.`,
+  ]);
+
+  const reactionLine = pick([
+    `${team.emoji}${pilot.name} a réagi sur ses réseaux : *"Fier de rejoindre la famille ${brand}. Vivement la suite."* La publication a déjà dépassé les **47K likes**.`,
+    `Dans un communiqué sobre, ${pilot.name} se dit "honoré et aligné avec les valeurs de ${brand}".`,
+    `Première apparition prévue lors d'un événement parisien la semaine prochaine. Le paddock retient son souffle.`,
+    `Son agent confirme : "C'est le partenariat le plus important de sa carrière hors piste à ce jour."`,
+  ]);
+
+  const body = `${pick(moneyLines)}\n\n${contextLines}\n\n${reactionLine}`;
+
+  return {
+    type: 'sponsoring', source,
+    headline: pick(headlines),
+    body, pilotIds: [pilot._id], teamIds: [team._id], seasonYear,
+  };
+}
+
+// ─── 2. RÉSEAUX SOCIAUX — Buzz, clash, post viral ────────────
+function genSocialMediaArticle(pilot, team, standing, seasonYear) {
+  const source    = pick(['grid_social', 'speed_gossip', 'turbo_people', 'the_pit_wall_tmz']);
+  const followers = pick(FOLLOWERS_POOL);
+  const wins      = standing?.wins || 0;
+  const dnfs      = standing?.dnfs || 0;
+
+  // Différents angles social media
+  const angles = [
+    // Post viral après victoire
+    wins >= 1 ? () => {
+      const likes = `${randInt(15, 890)}K`;
+      const headline = pick([
+        `${pilot.name} explose les compteurs sur Instagram après sa victoire`,
+        `Le post de ${pilot.name} dépasse les ${likes} likes — record personnel`,
+        `${team.emoji}${pilot.name} fait le buzz : son célébration en photo cartonne`,
+      ]);
+      const body = `Une simple photo publiée dans l'heure suivant sa victoire — et les chiffres ont tout de suite parlé.\n\n` +
+        `**${likes} likes · ${randInt(2, 48)}K commentaires · ${randInt(5, 80)}K partages** en moins de 24h. Le compte de ${pilot.name} a gagné **+${randInt(8, 120)}K abonnés** dans la foulée.\n\n` +
+        pick([
+          `Parmi les commentaires, beaucoup de "GOAT 🐐" et des mentions de ses rivaux. L'ambiance est électrique.`,
+          `Des célébrités, des athlètes, des pilotes adverses — tout le monde a liké. Même ${team.name} a relayé.`,
+          `Son story "behind the scenes" a été vue ${randInt(200, 900)}K fois. Les sponsors ont dû se frotter les mains.`,
+        ]);
+      return { headline, body };
+    } : null,
+    // Clash en ligne
+    () => {
+      const platform = pick(['Twitter / X','Instagram','TikTok','Threads']);
+      const headline = pick([
+        `${pilot.name} répond à ses critiques sur ${platform} — ça part en live`,
+        `Un troll s'en prend à ${pilot.name} — la réponse est cinglante`,
+        `Le tweet de ${pilot.name} divise le paddock virtuel`,
+        `${pilot.name} vs les haters : le thread qui fait le tour du web`,
+      ]);
+      const body = pick([
+        `Après une sortie difficile, ${pilot.name} n'a pas pu s'empêcher de répondre aux commentaires négatifs sur ${platform}.\n\n"${pick(['Critiquez-moi quand vous aurez conduit à 300km/h sous la pluie.','Facile de juger depuis son canapé.','J\'ai hâte de voir votre temps au tour.'])}" Le post a été liké **${randInt(12, 340)}K fois** avant d'être supprimé — ou pas.`,
+        `Une publication anodine de ${pilot.name} sur ${platform} a déclenché un débat inattendu. En cause : une légende de photo ambiguë que certains ont interprétée comme une pique envers ${team.name}.\n\n"Ce n'était absolument pas ce que je voulais dire" — son service comm a tenté d'éteindre l'incendie. Résultat mitigé.`,
+        `Le compte de ${pilot.name} a liké puis unliké une publication critique à l'égard d'un pilote concurrent. Le screenshot circule. Sur ${platform}, rien ne disparaît vraiment.`,
+      ]);
+      return { headline, body };
+    },
+    // Stats followers / ranking
+    () => {
+      const rank = randInt(1, 15);
+      const headline = pick([
+        `${pilot.name} — ${followers} abonnés : le pilote PL le plus suivi de la grille ?`,
+        `Classement réseaux : ${pilot.name} grimpe, et ce n'est pas anodin`,
+        `Les chiffres ne mentent pas : ${pilot.name} est une marque à part entière`,
+      ]);
+      const body = `Avec **${followers} abonnés** sur Instagram seul, ${pilot.name} se classe parmi les pilotes les plus suivis de la grille PL.\n\n` +
+        `Son taux d'engagement (**${(Math.random()*4+1).toFixed(1)}%**) dépasse la moyenne des sportifs de sa catégorie. Les annonceurs le savent.\n\n` +
+        pick([
+          `Sa présence sur TikTok commence aussi à peser : **${randInt(20, 800)}K followers**, des vidéos à plusieurs millions de vues.`,
+          `Le ratio followers/publications est particulièrement bon — signe d'une communauté organique, pas achetée. Les marques adorent ça.`,
+          `"${pilot.name} a une authenticité rare sur les réseaux. Il ne poste pas pour poster." — un community manager de l'écurie, sous couvert d'anonymat.`,
+        ]);
+      return { headline, body };
+    },
+    // TikTok viral / challenge
+    () => {
+      const views = `${randInt(1, 28)},${randInt(1, 9)}M`;
+      const headline = pick([
+        `La vidéo de ${pilot.name} dépasse les ${views} vues sur TikTok`,
+        `Viral : ${pilot.name} relève un challenge et fait exploser TikTok`,
+        `${pilot.name} se lâche en dehors de la piste — le web adore`,
+      ]);
+      const content = pick([
+        `un POV "une journée dans ma vie de pilote"`,
+        `un défi de réflexe avec ses mécaniciens`,
+        `une réponse hilarante à un commentaire de fan`,
+        `un "rate my setup" de son volant F1`,
+        `une recette de cuisine ratée en cuisine de l'hôtel`,
+        `un karting challenge contre son coéquipier filmé en caméra cachée`,
+      ]);
+      const body = `${views} vues en 48h. La vidéo de ${pilot.name} montrant ${content} est devenue le moment viral de la semaine dans la communauté F1 PL.\n\n` +
+        pick([
+          `Les commentaires affluent des quatre coins du monde. "On veut plus de contenu de ce genre" — c'est le sentiment dominant.`,
+          `Plusieurs comptes de sport majeurs ont relayé la vidéo. Le nom de ${pilot.name} trend dans ${randInt(3, 12)} pays.`,
+          `L'équipe a répondu avec humour dans les commentaires. ${team.emoji}${team.name} sait s'amuser sur les réseaux.`,
+        ]);
+      return { headline, body };
+    },
+  ].filter(Boolean);
+
+  const chosen = pick(angles)();
+  return {
+    type: 'social_media', source,
+    headline: chosen.headline,
+    body: chosen.body,
+    pilotIds: [pilot._id], teamIds: [team._id], seasonYear,
+  };
+}
+
+// ─── 3. INVITATION ÉMISSION TV ───────────────────────────────
+function genTVShowArticle(pilot, team, seasonYear) {
+  const source = pick(['turbo_people', 'pl_celebrity', 'paddock_mag', 'the_pit_wall_tmz']);
+  const show   = pick(TV_SHOWS);
+  const isReality = ['Danse avec les Stars','Ninja Warrior','Fort Boyard','Le Grand Bain'].includes(show.name);
+  const isTalkShow = ['Jimmy Fallon','The Tonight Show','The Late Late Show','Graham Norton Show','Quotidien','C à vous','Touche pas à mon poste'].includes(show.name);
+
+  const headlines = [
+    `${pilot.name} invité sur le plateau de **${show.name}** — une première !`,
+    `${show.emoji} ${pilot.name} × ${show.name} : le crossover inattendu`,
+    `${pilot.name} confirme sa présence dans **${show.name}** — le paddock n'en revient pas`,
+    `Après la piste, le plateau : ${pilot.name} accepte l'invitation de ${show.name}`,
+    `${show.name} frappe fort en invitant ${pilot.name}`,
+  ];
+
+  const contexts = isReality ? pick([
+    `Le défi est simple : sortir de sa zone de confort. Pour un pilote habitué à gérer l'adrénaline à 300km/h, ${show.name} représente un territoire inconnu — et c'est exactement pour ça que la production l'a approché.`,
+    `La production a contacté l'entourage de ${pilot.name} après ses vidéos virales. "Il a une présence naturelle. Le public l'aimera au-delà du sport." La date d'enregistrement n'est pas encore confirmée.`,
+  ]) : isTalkShow ? pick([
+    `L'interview promet d'être sans filtre. ${show.name} est connu pour mettre ses invités à l'aise — et pour poser les questions que les journalistes sportifs évitent.`,
+    `"On veut vous entendre parler d'autre chose que de courses", aurait dit la production à son agent. Le segment lifestyle, les projets personnels, la vie hors monoplace — tout sera sur la table.`,
+  ]) : pick([
+    `La participation est encore à confirmer. Mais les discussions sont "très avancées" selon notre source.`,
+    `Un plateau inattendu pour un pilote de course — mais ${pilot.name} a toujours aimé surprendre.`,
+  ]);
+
+  const reactions = pick([
+    `Dans le paddock, les avis sont partagés. "C'est bien de montrer un autre visage." "Ça le distraira de la piste." Les deux camps ont leurs arguments.`,
+    `Son équipier ${team.emoji}${team.name} a commenté avec humour : "Tant qu'il est dans les points dimanche, il peut faire la télé le reste de la semaine."`,
+    `La chaîne a officialisé la date : l'émission sera diffusée en direct. ${pilot.name} sera en plateau, pas en duplex — signal fort.`,
+    `Son entourage précise que l'agenda sportif prime : "Si un GP tombe en conflit, l'émission passe à la trappe. Les priorités sont claires."`,
+    `Première réaction publique de ${pilot.name} sur ses réseaux : un simple emoji 🤫. Les fans s'emballent.`,
+  ]);
+
+  const body = `${contexts}\n\n${reactions}`;
+  return {
+    type: 'tv_show', source,
+    headline: pick(headlines),
+    body, pilotIds: [pilot._id], teamIds: [team._id], seasonYear,
+  };
+}
+
+// ─── 4. VIE SENTIMENTALE / RELATIONS ─────────────────────────
+function genRelationshipArticle(pilot, team, seasonYear) {
+  const source   = pick(['turbo_people', 'the_pit_wall_tmz', 'speed_gossip', 'paddock_mag']);
+  const relType  = pick(['romance_debut','rupture','fiancailles','coup_de_coeur_public','vu_ensemble']);
+  const partner  = pick(RELATION_NOMS);
+
+  const headlines = {
+    romance_debut   : [`${pilot.name} en couple ? Les photos qui font parler`, `${team.emoji}${pilot.name} et ${partner} : romance confirmée ou rumeur ?`, `L'amour dans le paddock : ${pilot.name} ne cache plus rien`],
+    rupture         : [`${pilot.name} — rupture confirmée : le communiqué officiel`, `Séparation choc : ${pilot.name} et sa moitié prendraient des chemins différents`, `${pilot.name} solo : la vie après la séparation`],
+    fiancailles     : [`💍 Officiel : ${pilot.name} est fiancé !`, `${pilot.name} demande ${partner} en mariage — le paddock s'emballe`, `Après la piste, l'amour : ${pilot.name} passe la bague au doigt`],
+    coup_de_coeur_public: [`${pilot.name} aperçu avec ${partner} lors d'un gala — les regards complices`, `Soirée mondaine : ${pilot.name} et ${partner} font sensation`, `Qui était à côté de ${pilot.name} au gala de Monte-Carlo ?`],
+    vu_ensemble     : [`${pilot.name} et ${partner} : les paparazzis ont tout vu`, `Discrétion impossible : ${pilot.name} repéré en vacances avec ${partner}`, `La photo qui vaut mille mots : ${pilot.name} et ${partner} ensemble`],
+  };
+
+  const bodies = {
+    romance_debut: pick([
+      `Ça fait quelques semaines que les rumeurs circulent. Hier, une série de photos prises lors d'un dîner à Monaco semble confirmer ce que beaucoup suspectaient.\n\n${pilot.name} et ${partner} ont été vus sortir ensemble d'un restaurant étoilé vers 23h. Discrets, mais pas assez.\n\n${pick(['Aucun commentaire officiel. Le silence a parfois valeur de confirmation.','Son équipe de communication n\'a pas répondu à nos sollicitations — ce qui, dans ce milieu, veut souvent dire oui.'])}`,
+      `Les fans avaient remarqué les likes croisés sur Instagram. Les photographes ont fait le reste.\n\nVus ensemble à ${pick(DESTINATIONS_VACANCES)}, ${pilot.name} et ${partner} ne semblent plus faire d'efforts pour se cacher. La romance de la saison ?`,
+    ]),
+    rupture: pick([
+      `Après ${randInt(6, 30)} mois de relation, l'entourage de ${pilot.name} confirme : c'est terminé. Les raisons invoquées gravitent autour des "contraintes du calendrier sportif et des emplois du temps incompatibles".\n\nFormule connue. Vraie dans ce cas-ci ? Le paddock retient son souffle.\n\n${pick(['${pilot.name} n\'a pas commenté sur les réseaux. Un silence éloquent.','Sa dernière story Instagram — un coucher de soleil, seul. Beaucoup ont interprété.'])}`,
+      `La nouvelle a fuité en fin de week-end de course. Mauvais timing ou timing calculé ? Dans ce milieu, on ne laisse rien au hasard.\n\nSelon nos sources, la décision serait "mutuelle et amiable". ${pilot.name} serait actuellement à ${pick(DESTINATIONS_VACANCES)} pour "prendre du recul".`,
+    ]),
+    fiancailles: pick([
+      `La demande aurait eu lieu lors d'un séjour privé à ${pick(DESTINATIONS_VACANCES)}. ${pilot.name} aurait mis plusieurs semaines à préparer le moment. Et manifestement, la réponse a été oui.\n\nLa publication Instagram qui officialise la nouvelle a explosé : **${randInt(100, 890)}K likes** en moins d'une heure. Le paddock envoie ses félicitations.`,
+      `${pilot.name} a annoncé ses fiançailles avec ${partner} via un post sobre et touchant sur ses réseaux. Pas de mots — juste une photo et un émoji 💍.\n\nLes commentaires débordent de soutien. Même ses rivaux ont liké. Le sport unit, l'amour aussi.`,
+    ]),
+    coup_de_coeur_public: pick([
+      `Invité au gala de charité organisé à Monaco, ${pilot.name} n'est pas passé inaperçu — ni lui, ni la personne avec qui il a passé une bonne partie de la soirée : ${partner}.\n\nLes photographes ont immortalisé plusieurs échanges très complices. Les regards étaient là. La suite ?`,
+      `Le monde du sport et celui du spectacle se croisent régulièrement dans certains événements. Cette fois-ci, c'est ${pilot.name} et ${partner} qu'on remarque. Assis à la même table. Discutant longuement. Souriant souvent.`,
+    ]),
+    vu_ensemble: pick([
+      `Les photographes étaient au bon endroit. ${pilot.name} et ${partner} ont été vus à ${pick(DESTINATIONS_VACANCES)}, détendus, apparemment en vacances.\n\nAucune déclaration officielle. Mais les images ont suffi à enflammer les réseaux. **${randInt(200, 800)}K impressions** sur le post des photographes en quelques heures.`,
+      `Ce n'est pas la première fois qu'on les voit ensemble — mais c'est la première fois qu'on les voit ensemble *comme ça*. ${pilot.name} et ${partner}, aperçus à ${pick(DESTINATIONS_VACANCES)}. Le tabloïd a les photos.`,
+    ]),
+  };
+
+  return {
+    type: 'relationship', source,
+    headline: pick(headlines[relType]),
+    body: bodies[relType],
+    pilotIds: [pilot._id], teamIds: [team._id], seasonYear,
+  };
+}
+
+// ─── 5. AMITIÉS / CERCLE SOCIAL ──────────────────────────────
+function genFriendshipArticle(pilotA, pilotB, teamA, teamB, seasonYear) {
+  const source  = pick(['paddock_mag', 'speed_gossip', 'turbo_people', 'grid_social']);
+  const isSameTeam = String(pilotA.teamId) === String(pilotB.teamId);
+  const angle   = pick(['amitié_forte','brouille','réconciliation','sortie_ensemble']);
+
+  const headlines = {
+    amitié_forte      : [`${pilotA.name} & ${pilotB.name} : le duo qu'on ne s'attendait pas à voir`, `L'amitié inattendue de la saison : ${pilotA.name} et ${pilotB.name}`, `"On se comprend hors de la piste" — l'amitié ${pilotA.name}/${pilotB.name} surprend`],
+    brouille          : [`${pilotA.name} et ${pilotB.name} : l'amitié sur pause ?`, `Froid entre ${pilotA.name} et ${pilotB.name} — qu'est-ce qui a changé ?`, `Plus de photos ensemble, plus d'interactions : ${pilotA.name} et ${pilotB.name} se sont-ils brouillés ?`],
+    réconciliation    : [`${pilotA.name} et ${pilotB.name} : la réconciliation est officielle`, `Après la tension, le sourire : ${pilotA.name} et ${pilotB.name} font la paix`, `Ils se sont revus — et ça s'est bien passé`],
+    sortie_ensemble   : [`${pilotA.name} et ${pilotB.name} aperçus ensemble à ${pick(DESTINATIONS_VACANCES)}`, `Soirée privée : ${pilotA.name}, ${pilotB.name} et quelques amis — les détails`, `Le circuit, c'est fini pour ce week-end. ${pilotA.name} et ${pilotB.name} se retrouvent hors paddock`],
+  };
+
+  const bodies = {
+    amitié_forte: `Adversaires sur la piste, amis dans la vie — c'est le paradoxe de ${pilotA.name} et ${pilotB.name}.\n\n` +
+      pick([
+        `Les deux pilotes ${isSameTeam ? "de la même écurie" : "d'équipes rivales"} ont été vus plusieurs fois ensemble ces dernières semaines : matchs de basketball, restaurant, voyage. Une complicité qui dépasse la simple politesse de collègues.`,
+        `"On ne parle presque jamais de course quand on se voit." — ${pilotA.name}, dans une interview récente, sans mentionner ${pilotB.name} nommément. Mais tout le monde a compris.`,
+      ]),
+    brouille: `Quelque chose a changé. Les deux pilotes qui s'affichaient ensemble régulièrement ne se suivent plus sur Instagram. Ils ne commentent plus les posts de l'autre. Et en paddock, les regards ne se croisent plus.\n\n` +
+      pick([
+        `La brouille daterait d'il y a ${randInt(2, 8)} semaines. La cause ? Personne ne parle officiellement. Mais les proches de chacun auraient des versions très différentes.`,
+        `"Parfois les amitiés ne résistent pas aux pressions du sport de haut niveau." — une source du paddock, philosophe malgré lui.`,
+      ]),
+    réconciliation: `On les croyait fâchés pour longtemps. Mais une photo publiée hier soir semble dire le contraire.\n\n${pilotA.name} et ${pilotB.name} souriants, ensemble, dans ce qui ressemble à une soirée privée. Le contexte ? Inconnu. Le message ? Limpide.\n\n` +
+      pick([
+        `Les fans des deux côtés ont réagi avec joie. Dans ce sport, les inimitiés qui durent font du mal à tout le monde.`,
+        `Aucun des deux n'a commenté publiquement. Mais la photo parle d'elle-même.`,
+      ]),
+    sortie_ensemble: `Week-end libre dans le calendrier — et ${pilotA.name} et ${pilotB.name} en ont profité.\n\n` +
+      pick([
+        `Vus à ${pick(DESTINATIONS_VACANCES)}, les deux pilotes semblaient décontractés, loin des caméras du paddock. Club privé, restaurant, promenade — une tranche de vie normale pour deux athlètes qui n'ont pas grand-chose de normal dans leur quotidien.`,
+        `Soirée privée organisée par ${pilotA.name} — ${pilotB.name} était de la partie, ainsi que quelques personnalités du monde du sport et du divertissement. Discrétion demandée. Les photos ont quand même fuité.`,
+      ]),
+  };
+
+  return {
+    type: 'friendship', source,
+    headline: pick(headlines[angle]),
+    body: bodies[angle],
+    pilotIds: [pilotA._id, pilotB._id], teamIds: [teamA._id, teamB._id], seasonYear,
+  };
+}
+
+// ─── 6. LIFESTYLE — Achats, vacances, villa, voitures ────────
+function genLifestyleArticle(pilot, team, seasonYear) {
+  const source = pick(['turbo_people', 'paddock_mag', 'the_pit_wall_tmz', 'pl_celebrity']);
+  const angle  = pick(['voiture','villa','vacances','collection','jet_privé']);
+
+  const carBrands = ['Bugatti Chiron','Ferrari 812 Superfast','Lamborghini Urus','McLaren 720S','Porsche 911 GT3 RS','Rolls-Royce Ghost','Bentley Continental GT','Aston Martin DBS','Mercedes-AMG G63','Ford GT Mk.IV'];
+  const dest = pick(DESTINATIONS_VACANCES);
+
+  const content = {
+    voiture: () => {
+      const car = pick(carBrands);
+      return {
+        headline: pick([`${pilot.name} s'offre une ${car} — les photos circulent`, `La nouvelle acquisition de ${pilot.name} : une ${car} qui fait parler`, `${team.emoji}${pilot.name} et sa ${car} : bienvenue dans une autre dimension`]),
+        body: `Aperçue dans le parking d'un grand hôtel de ${dest}, la toute nouvelle ${car} de ${pilot.name} n'est pas passée inaperçue.\n\n` +
+          pick([
+            `Prix catalogue annoncé : autour de **${randInt(180, 450)}K PLcoins**. Couleur sur commande, sellerie personnalisée, plaques personnalisées. Le soin du détail.`,
+            `Selon son entourage, la voiture aurait été livrée il y a moins d'une semaine. "Il la cherchait depuis un moment — c'est une récompense qu'il s'est faite."`,
+            `C'est la **${pick(['3ème','4ème','5ème'])} voiture de collection** de ${pilot.name}. La vitesse, une passion qui dépasse largement la F1 PL.`,
+          ]),
+      };
+    },
+    villa: () => ({
+      headline: pick([`${pilot.name} s'offre une villa à ${dest} — les rumeurs chiffrées`, `Nouveau nid de luxe pour ${pilot.name} : les détails de la propriété`, `Investissement immobilier : ${pilot.name} achète à ${dest}`]),
+      body: `Après des mois de rumeurs, c'est confirmé : ${pilot.name} a acquis une propriété à ${dest}.\n\n` +
+        `Selon les estimations locales, le bien aurait été cédé autour de **${randInt(1, 8)},${randInt(1,9)}M PLcoins**. ` +
+        pick([
+          `Vue sur mer, piscine à débordement, terrain de basketball privé. Le tout dans une résidence ultra-sécurisée prisée des sportifs de haut niveau.`,
+          `La propriété avait appartenu à une célébrité du cinéma avant d'être mise sur le marché. ${pilot.name} ne s'est pas fait prier.`,
+          `Ce serait sa résidence principale en dehors des périodes de GP. "Il cherchait un endroit pour vraiment décompresser", selon un proche.`,
+        ]),
+    }),
+    vacances: () => ({
+      headline: pick([`${pilot.name} en vacances à ${dest} — le vrai repos`, `Escale soleil pour ${pilot.name} : une semaine à ${dest}`, `Recharge mentale : ${pilot.name} loin du circuit à ${dest}`]),
+      body: `Quelques jours sans casque, sans monoplace — juste ${pilot.name}, le soleil, et ${dest}.\n\n` +
+        pick([
+          `Ses stories Instagram en disent plus long qu'un communiqué : plongée, cocktails, piscine, coucher de soleil. La désactivation totale du mode pilote.`,
+          `Entouré de proches, ${pilot.name} a visiblement profité de cette fenêtre dans le calendrier. Le prochain GP est dans ${randInt(5, 18)} jours — le timing était parfait.`,
+          `On l'a vu dans un beach club réputé, détendu, souriant. Les autres clients ont fait semblant de ne pas le reconnaître. Lui a fait semblant d'y croire.`,
+        ]),
+    }),
+    collection: () => {
+      const item = pick(['montres de luxe','sneakers rares','NFTs sportifs','cartes Pokémon graded','œuvres d\'art contemporain','vinyles rares','maillots de sport signés','figurines Funko Pop F1']);
+      return {
+        headline: pick([`La passion méconnue de ${pilot.name} : sa collection de ${item}`, `${pilot.name} révèle sa collection — la valeur dépasse l'imagination`, `Hors de la piste, ${pilot.name} chine des ${item}`]),
+        body: `Peu de gens le savent, mais ${pilot.name} est un collectionneur passionné de ${item}.\n\n` +
+          pick([
+            `Il en parle rarement en public, mais une interview récente dans un magazine lifestyle a levé le voile. Sa collection serait estimée à "plusieurs centaines de milliers de PLcoins" selon un expert consulté.`,
+            `"C'est ma façon de décrocher du monde du sport. Chaque pièce a une histoire." — ${pilot.name}, rare confidence sur sa vie hors piste.`,
+            `Sa dernière acquisition a fait le tour des forums spécialisés. Le prix payé ? Il a refusé de confirmer, mais les rumeurs parlent d'un record.`,
+          ]),
+      };
+    },
+    jet_privé: () => ({
+      headline: pick([`${pilot.name} : le jet-set, c'est son mode de vie`, `5 vols en 7 jours : le planning aérien vertigineux de ${pilot.name}`, `De ${dest} à Monaco en jet privé — la semaine type de ${pilot.name}`]),
+      body: `GP le dimanche, ${dest} le lundi, Monaco le mercredi, usine le jeudi. La vie de ${pilot.name} se compte en fuseaux horaires.\n\n` +
+        pick([
+          `Son équipe gère un agenda qui ferait pâlir n'importe quel cadre dirigeant. "Je dors bien dans les avions — c'est une compétence essentielle dans ce sport."`,
+          `Aperçu dans trois aéroports différents en une semaine, ${pilot.name} semble avoir optimisé le concept de mobilité internationale.`,
+          `L'empreinte carbone questionne, certes. Mais dans le monde de la F1 PL, le jet privé reste souvent le seul moyen de tenir l'agenda.`,
+        ]),
+    }),
+  };
+
+  const chosen = content[angle]();
+  return {
+    type: 'lifestyle', source,
+    headline: chosen.headline,
+    body: chosen.body,
+    pilotIds: [pilot._id], teamIds: [team._id], seasonYear,
+  };
+}
+
+// ─── 7. SCANDALE HORS PISTE ───────────────────────────────────
+function genScandalOffTrackArticle(pilot, team, seasonYear) {
+  const source = pick(['the_pit_wall_tmz', 'turbo_people', 'speed_gossip']);
+
+  const scandalTypes = [
+    // Soirée qui dérape
+    () => ({
+      headline: pick([
+        `${pilot.name} — la soirée de trop à ${pick(DESTINATIONS_VACANCES)} ?`,
+        `Nuit agitée pour ${pilot.name} : la version officielle vs les témoins`,
+        `${team.emoji}${pilot.name} : l'incident de la soirée qui revient`,
+      ]),
+      body: `Les faits d'abord : ${pilot.name} a été aperçu dans un établissement privé à ${pick(DESTINATIONS_VACANCES)} dans la nuit de ${pick(['vendredi à samedi','samedi à dimanche','jeudi à vendredi'])}.\n\n` +
+        pick([
+          `Selon plusieurs témoins présents, le pilote aurait eu un "comportement exubérant" qui a nécessité l'intervention du service de sécurité. Aucune arrestation, mais l'ambiance était tendue.`,
+          `Une altercation verbale avec un autre client aurait dégénéré brièvement. La vidéo qui circule sur les réseaux est floue, mais suffisamment explicite pour alimenter les spéculations.`,
+          `${pilot.name} aurait quitté les lieux "sous escorte discrète" selon un responsable de l'établissement. Son service de comm n'a pas encore répondu à nos questions.`,
+        ]) +
+        `\n\n${pick([
+          `L'écurie ${team.emoji}${team.name} "prend note" de la situation et "rappellera à ses pilotes leurs obligations contractuelles d'image". Formule diplomatique pour dire que ça ne passe pas.`,
+          `Son agent a publié un communiqué laconique : "Les faits rapportés sont exagérés. ${pilot.name} était en soirée privée entre amis." La communication de crise a commencé.`,
+        ])}`,
+    }),
+    // Déclaration controversée
+    () => ({
+      headline: pick([
+        `La déclaration de ${pilot.name} qui fait scandale`,
+        `${pilot.name} dit ce qu'il pense — et tout le monde réagit`,
+        `"Inexcusable" vs "incompris" : le tweet de ${pilot.name} divise`,
+      ]),
+      body: pick([
+        `Dans une interview accordée à un podcast, ${pilot.name} a tenu des propos qui font polémique depuis ce matin.\n\n"${pick(['Il y a des pilotes sur cette grille qui ne méritent pas leur baquet — tout le monde le pense, personne ne le dit.','L\'argent décide plus que le talent dans ce sport. On ment à tout le monde.','Certaines équipes jouent un jeu que je refuse de jouer. Je préfère perdre proprement que gagner comme ça.'])}" \n\nLa réaction du paddock est immédiate et partagée. La FIA PL "examine les déclarations".`,
+        `Un message posté, supprimé, puis retweeté par des milliers de comptes. ${pilot.name} avait visiblement quelque chose à dire sur ${pick(['la gestion des contrats','le sexisme dans le sport','les inégalités de traitement entre pilotes','la corruption supposée dans certaines décisions de course'])}.\n\nSon équipe de comm est en mode gestion de crise. L'écurie ${team.name} "souhaite rencontrer le pilote pour évoquer la situation".`,
+      ]),
+    }),
+    // Incident de route / comportement public
+    () => ({
+      headline: pick([
+        `${pilot.name} interpellé par la police — les circonstances`,
+        `Excès de vitesse ou malentendu ? L'incident de ${pilot.name} sur la voie publique`,
+        `${team.emoji}${pilot.name} dans une situation délicate — les faits`,
+      ]),
+      body: `Les forces de l'ordre auraient intercepté le véhicule de ${pilot.name} ${pick(['sur l\'autoroute près de Monaco','dans le centre de Paris','sur le périphérique lyonnais'])} ${pick(['jeudi soir','en début de matinée','en pleine après-midi'])}.\n\n` +
+        pick([
+          `Selon le rapport de police, le tachymètre affichait **${randInt(140, 210)} km/h** dans une zone limitée à 130. ${pilot.name} aurait coopéré avec les agents. Amende et rappel à la loi — pas d'arrestation.`,
+          `Aucune infraction confirmée par les autorités. "Un simple contrôle de routine" selon la gendarmerie contactée. Mais la présence de plusieurs photographes présents sur les lieux laisse penser que l'information avait fuité à l'avance.`,
+          `L'incident a été résolu sur place. ${pilot.name} a décliné tout commentaire. Son avocat "gère le dossier".`,
+        ]) +
+        `\n\n${pick([
+          `L'écurie ${team.emoji}${team.name} n'a pas encore réagi officiellement.`,
+          `Dans le paddock, on minimise : "C'est une histoire montée en épingle. Il n'y a rien là-dedans."`,
+        ])}`,
+    }),
+    // Conflit avec célébrité
+    () => {
+      const celebrity = pick(['un influenceur connu','un rappeur français','une star de la télé-réalité','un footballeur international','un joueur NBA','un acteur hollywoodien','une chanteuse populaire']);
+      return {
+        headline: pick([
+          `${pilot.name} vs ${celebrity} : le clash inattendu`,
+          `Guerre ouverte entre ${pilot.name} et ${celebrity} sur les réseaux`,
+          `"Il m'a manqué de respect" — ${celebrity} s'en prend à ${pilot.name}`,
+        ]),
+        body: `Personne n'avait vu ça venir. Un échange sur les réseaux entre ${pilot.name} et ${celebrity} a rapidement dégénéré.\n\n` +
+          pick([
+            `Tout a commencé par un commentaire de ${celebrity} sur les performances de ${pilot.name} cette saison. La réponse du pilote n'a pas tardé — et n'était pas diplomatique.`,
+            `${celebrity} aurait publié une story critiquant le "train de vie ostentatoire" des pilotes F1 PL. ${pilot.name} a répondu directement, nommément. Le ton a monté très vite.`,
+          ]) +
+          `\n\n${pick([
+            `L'affaire a pris des proportions inattendues. Les deux camps ont leurs partisans. Les hashtags flambent.`,
+            `Une médiation serait en cours via leurs agents respectifs. "Ce n'est qu'un malentendu" — formule espérée par les deux écuries de communication.`,
+          ])}`,
+      };
+    },
+  ];
+
+  const chosen = pick(scandalTypes)();
+  return {
+    type: 'scandal_offtrack', source,
+    headline: chosen.headline,
+    body: chosen.body,
+    pilotIds: [pilot._id], teamIds: [team._id], seasonYear,
+  };
+}
+
+// ─── 8. CHARITÉ / ENGAGEMENT SOCIAL ──────────────────────────
+function genCharityArticle(pilot, team, seasonYear) {
+  const source = pick(['pl_racing_news', 'paddock_mag', 'pl_celebrity', 'f1_weekly']);
+  const cause  = pick(CHARITY_CAUSES);
+  const amount = `${randInt(10, 500)}K PLcoins`;
+
+  const headlines = [
+    `${pilot.name} s'engage pour ${cause} — l'annonce qui touche le paddock`,
+    `${team.emoji}${pilot.name} : bien plus qu'un pilote — son action pour ${cause}`,
+    `Geste fort de ${pilot.name} : ${amount} donnés à ${cause}`,
+    `"La course la plus importante" — ${pilot.name} parle de son engagement caritatif`,
+    `${pilot.name} lance sa propre initiative au service de ${cause}`,
+  ];
+
+  const bodies = [
+    `En dehors de la piste, ${pilot.name} mène une autre bataille — et celle-là, il la gagne aussi.\n\n` +
+    `Son engagement pour ${cause} n'est pas nouveau, mais il vient de prendre une nouvelle dimension : un don de **${amount}** annoncé lors d'un événement organisé à Monaco.\n\n` +
+    pick([
+      `"J'ai la chance de vivre dans un monde extraordinaire. C'est une responsabilité." — ${pilot.name}, sobre et sincère.`,
+      `L'initiative a été saluée par ses pairs, son écurie, et plusieurs personnalités du sport mondial.`,
+      `${team.emoji}${team.name} a décidé d'abonder à hauteur de ${randInt(20, 100)}% supplémentaire. Le geste collectif.`,
+    ]),
+
+    `Moins de bruit que ses performances sur la piste, mais peut-être plus d'impact à long terme. ${pilot.name} consacre une partie significative de son temps et de ses revenus à ${cause}.\n\n` +
+    pick([
+      `Une fondation à son nom est en cours de création. Les statuts devraient être déposés avant la fin de la saison.`,
+      `Il s'était engagé en début de saison à reverser **${randInt(5, 20)}%** de ses gains en course à des associations. Promesse tenue.`,
+    ]) +
+    `\n\n"${pick(['Le sport m\'a tout donné. C\'est normal de redonner.','Si ma visibilité peut servir à quelque chose de grand, j\'aurais réussi ma vie hors monoplace.'])}" — ${pilot.name}.`,
+  ];
+
+  return {
+    type: 'charity', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [pilot._id], teamIds: [team._id], seasonYear,
+  };
+}
+
+// ─── 9. BRAND DEAL — Mode, gaming, collab créative ───────────
+function genBrandDealArticle(pilot, team, seasonYear) {
+  const source    = pick(['paddock_mag', 'pl_celebrity', 'grid_social', 'turbo_people']);
+  const brandCat  = pick(['mode','gaming','musique','gastronomie','tech','art']);
+
+  const brandsByCategory = {
+    mode        : pick(LUXURY_BRANDS),
+    gaming      : pick(GAMING_BRANDS),
+    musique     : pick(['Spotify','Apple Music','Deezer','une marque de casques audio haut de gamme','un label indépendant']),
+    gastronomie : pick(['Gordon Ramsay Restaurants','Paul Bocuse Foundation','une marque de champagne','un producteur de café de spécialité','une startup de nutrition sportive']),
+    tech        : pick(['Apple','Samsung','Beats by Dre','DJI','GoPro','Tesla','Dyson']),
+    art         : pick(['un artiste urbain','une galerie contemporaine parisienne','une maison de vente aux enchères','un créateur de streetwear']),
+  };
+
+  const brand = brandsByCategory[brandCat];
+  const collabType = pick(['capsule limitée','collection exclusive','campagne mondiale','collab NFT','ligne signature']);
+
+  const headlines = [
+    `${pilot.name} × ${brand} : la collab ${brandCat} qu'on attendait`,
+    `${collabType} — ${pilot.name} s'associe à ${brand} dans le monde de la ${brandCat}`,
+    `"Deux univers, une vision" : ${pilot.name} et ${brand} officialisent leur projet`,
+    `Au-delà de la piste : ${pilot.name} signe une ${collabType} avec ${brand}`,
+  ];
+
+  const bodies = [
+    `La ${collabType} entre ${pilot.name} et ${brand} sera disponible ${pick(['dans les semaines à venir','dès la fin de saison','en édition limitée de ${randInt(100,2000)} pièces','en ligne uniquement'])}.\n\n` +
+    `"${pick(['J\'ai voulu faire quelque chose d\'authentique, pas juste mettre mon nom sur un produit.','Cette collab, c\'est moi — du style, de la performance, de la précision.','${brand} partage mes valeurs. C\'était une évidence.'])}" — ${pilot.name}, dans le lookbook officiel.\n\n` +
+    pick([
+      `La collection a déjà généré **${randInt(5, 80)}K pré-commandes** avant même l'annonce officielle, selon les data de la boutique en ligne.`,
+      `${team.emoji}${team.name} figure dans les visuels de la campagne. Un alignement rare entre vie privée et image sportive.`,
+      `Le lancement aura lieu lors d'un événement exclusif à Paris. La liste des invités reste confidentielle — mais quelques noms du paddock circulent.`,
+    ]),
+
+    `Dans le monde de la ${brandCat}, les collaborations avec des sportifs pullulent. Mais celle de ${pilot.name} avec ${brand} sort du lot.\n\n` +
+    pick([
+      `Pas une simple photo sur un pack produit — ${pilot.name} a co-conçu la ${collabType} de A à Z. "Il avait des opinions claires sur chaque détail." — un directeur créatif de ${brand}.`,
+      `La ${collabType} sera accompagnée d'un mini-documentaire sur la creation process. En ligne le même jour que le lancement.`,
+    ]) +
+    `\n\nLes premiers visuels ont été lâchés sur les réseaux ce matin. **${randInt(20, 300)}K interactions** en moins de 3 heures. Le public est au rendez-vous.`,
+  ];
+
+  return {
+    type: 'brand_deal', source,
+    headline: pick(headlines),
+    body: pick(bodies),
+    pilotIds: [pilot._id], teamIds: [team._id], seasonYear,
+  };
+}
+
+// ============================================================
+// 📰  MOTEUR DE NEWS MULTI-SLOTS (max 15 news/jour)
+// ============================================================
+// 5 slots cron par jour — chacun génère 1 à 3 articles selon la
+// phase de saison, avec une "couleur" propre à chaque moment.
+//
+// Slot    Heure   Couleur            Count (début/mi/fin/finale)
+// matin    8h     Lifestyle, réseaux  1 / 1 / 1 / 1
+// midi    12h     Sport, interview    1 / 2 / 2 / 2
+// aprem   15h     Gossip, TV, amis    1 / 2 / 3 / 3
+// soir    19h     Drama, transferts   1 / 2 / 2 / 3
+// nuit    22h     Scandale, rumeurs   1 / 1 / 2 / 3
+//                                   ─────────────────
+//                         total/j   5 / 8 / 10/ 12  (±aléatoire → max 15)
+//
+// Anti-répétition :
+//   • Pas le même (type + pilote) dans les 24h
+//   • Types lourds (scandal_offtrack, relationship, scandal) : cooldown 48h/pilote
+//   • Dans un même slot : chaque pilote n'apparaît qu'une fois
+// ============================================================
+
+// Poids de base par slot (indépendants de la phase)
+const SLOT_WEIGHTS = {
+  matin : { lifestyle:20, social_media:18, brand_deal:15, charity:12, tv_show:12, sponsoring:10, friendship:8, driver_interview:5 },
+  midi  : { driver_interview:20, dev_vague:15, sponsoring:12, hype:12, form_crisis:10, teammate_duel:10, drama:8, title_fight_news:8, social_media:5 },
+  aprem : { tv_show:18, friendship:15, relationship:14, lifestyle:12, social_media:12, brand_deal:10, charity:8, drama:6, sponsoring:5 },
+  soir  : { drama:20, transfer_rumor:18, rivalry_news:15, driver_interview:12, scandal:8, scandal_offtrack:8, title_fight_news:8, dev_vague:6, social_media:5 },
+  nuit  : { scandal_offtrack:22, transfer_rumor:18, drama:14, relationship:12, social_media:10, rivalry_news:10, brand_deal:8, lifestyle:6 },
+};
+
+// Combien d'articles par slot selon la phase (index = [début, mi, fin, finale])
+const SLOT_COUNTS = {
+  matin : [1, 1, 1, 1],
+  midi  : [1, 2, 2, 2],
+  aprem : [1, 2, 3, 3],
+  soir  : [1, 2, 2, 3],
+  nuit  : [1, 1, 2, 3],
+};
+
+// Types avec cooldown étendu (48h par pilote)
+const HEAVY_COOLDOWN_TYPES = new Set(['scandal_offtrack','relationship','scandal']);
+
+// Sélection pondérée d'une clé dans un objet { key: weight }
+function weightedPickFrom(weights) {
+  const total = Object.values(weights).reduce((a, b) => a + b, 0);
+  let roll = Math.random() * total;
+  for (const [k, w] of Object.entries(weights)) { roll -= w; if (roll <= 0) return k; }
+  return Object.keys(weights)[0];
+}
+
+// Génère les données d'un article selon son type
+// usedPilotIds : Set de pilotId déjà utilisés dans CE slot (diversité pilotes)
+async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPhase, usedPilotIds) {
+  const getStandings = () => Standing.find({ seasonId: season._id }).lean();
+
+  // Pilotes pas encore vus dans ce slot en priorité, sinon tout le monde
+  const freePilots = allPilots.filter(p => !usedPilotIds.has(String(p._id)));
+  const pool       = freePilots.length ? freePilots : allPilots;
+  const P          = () => pick(pool);                  // pilote libre
+  const PA         = () => pick(allPilots);             // n'importe quel pilote (fallback)
+  const markUsed   = (...ps) => ps.forEach(p => p && usedPilotIds.add(String(p._id)));
+
+  if (type === 'drama') {
+    const pA = P(), others = allPilots.filter(p => String(p.teamId) !== String(pA.teamId) && !usedPilotIds.has(String(p._id)));
+    const pB = others.length ? pick(others) : pick(allPilots.filter(p => String(p._id) !== String(pA._id)));
+    if (!pB) return null;
+    const tA = teamMap.get(String(pA.teamId)), tB = teamMap.get(String(pB.teamId));
+    if (!tA || !tB) return null;
+    markUsed(pA, pB);
+    return genDramaArticle(pA, pB, tA, tB, season.year);
+
+  } else if (type === 'rivalry_news') {
+    const withRival = allPilots.filter(p => p.rivalId && !usedPilotIds.has(String(p._id)));
+    if (withRival.length) {
+      const pA = pick(withRival);
+      const pB = allPilots.find(p => String(p._id) === String(pA.rivalId));
+      if (pB) {
+        const tA = teamMap.get(String(pA.teamId)), tB = teamMap.get(String(pB.teamId));
+        if (tA && tB) { markUsed(pA, pB); return genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts || 1, '(récent)', season.year); }
+      }
+    }
+    return buildArticleData('drama', allPilots, allTeams, teamMap, season, spPhase, usedPilotIds);
+
+  } else if (type === 'transfer_rumor') {
+    const pilot = P(), currentTeam = teamMap.get(String(pilot.teamId));
+    const others = allTeams.filter(t => String(t._id) !== String(pilot.teamId));
+    if (!others.length) return null;
+    markUsed(pilot);
+    return genTransferRumorArticle(pilot, currentTeam, pick(others), season.year);
+
+  } else if (type === 'dev_vague') {
+    return genDevVagueArticle(pick(allTeams), season.year);
+
+  } else if (type === 'scandal') {
+    return allTeams.length >= 2 ? genScandalArticle(allTeams, allPilots, season.year) : null;
+
+  } else if (type === 'hype') {
+    const standings = await getStandings();
+    const sorted = [...standings].sort((a, b) => b.points - a.points);
+    const st = sorted.find(s => !usedPilotIds.has(String(s.pilotId)) && ((s.wins||0)>=1||(s.podiums||0)>=2)) || sorted[0];
+    if (!st) return null;
+    const pilot = allPilots.find(p => String(p._id) === String(st.pilotId));
+    const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
+    if (!pilot || !team) return null;
+    markUsed(pilot);
+    return genHypeArticle(pilot, team, st.wins||0, st.podiums||0, season.year, sorted.findIndex(s => String(s.pilotId) === String(pilot._id)) + 1);
+
+  } else if (type === 'form_crisis') {
+    const standings = await getStandings();
+    const sorted = [...standings].sort((a, b) => b.points - a.points);
+    const st = sorted.slice(Math.floor(sorted.length/2)).find(s => (s.dnfs||0)>=1 && !usedPilotIds.has(String(s.pilotId)));
+    if (!st) return null;
+    const pilot = allPilots.find(p => String(p._id) === String(st.pilotId));
+    const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
+    if (!pilot || !team) return null;
+    markUsed(pilot);
+    return genFormCrisisArticle(pilot, team, st.dnfs||0, null, season.year, false);
+
+  } else if (type === 'teammate_duel') {
+    for (const p of allPilots) {
+      const tid = String(p.teamId);
+      const mates = allPilots.filter(x => String(x.teamId) === tid);
+      if (mates.length < 2) continue;
+      const [a, b] = mates;
+      if (Math.abs((a.teammateDuelWins||0)-(b.teammateDuelWins||0)) < 2) continue;
+      if (usedPilotIds.has(String(a._id)) || usedPilotIds.has(String(b._id))) continue;
+      const team = teamMap.get(tid); if (!team) continue;
+      markUsed(a, b);
+      const [winner, loser] = (a.teammateDuelWins||0) > (b.teammateDuelWins||0) ? [a,b] : [b,a];
+      return genTeammateDuelArticle(winner, loser, team, Math.max(a.teammateDuelWins||0, b.teammateDuelWins||0), Math.min(a.teammateDuelWins||0, b.teammateDuelWins||0), season.year);
+    }
+    return null;
+
+  } else if (type === 'title_fight_news') {
+    const standings = await getStandings();
+    const sorted = [...standings].sort((a, b) => b.points - a.points);
+    if (sorted.length < 2) return null;
+    const [s1, s2] = sorted;
+    const gap = s1.points - s2.points; if (gap > 60) return null;
+    const p1 = allPilots.find(p => String(p._id) === String(s1.pilotId));
+    const p2 = allPilots.find(p => String(p._id) === String(s2.pilotId));
+    const t1 = p1 ? teamMap.get(String(p1.teamId)) : null;
+    const t2 = p2 ? teamMap.get(String(p2.teamId)) : null;
+    if (!p1||!p2||!t1||!t2) return null;
+    const total = await Race.countDocuments({ seasonId: season._id });
+    const done  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
+    return genTitleFightArticle(p1, p2, t1, t2, gap, total - done, season.year);
+
+  } else if (type === 'driver_interview') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const standings = await getStandings();
+    const standing  = standings.find(s => String(s.pilotId) === String(pilot._id));
+    const contract  = await Contract.findOne({ pilotId: pilot._id, active: true }).lean();
+    const teammate  = allPilots.find(p => String(p.teamId) === String(pilot.teamId) && String(p._id) !== String(pilot._id));
+    const teammateSt = teammate ? standings.find(s => String(s.pilotId) === String(teammate._id)) : null;
+    markUsed(pilot);
+    return genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, season.year, spPhase);
+
+  } else if (type === 'sponsoring') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    markUsed(pilot); return genSponsoringArticle(pilot, team, season.year);
+
+  } else if (type === 'social_media') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const standings = await getStandings();
+    const standing  = standings.find(s => String(s.pilotId) === String(pilot._id));
+    markUsed(pilot); return genSocialMediaArticle(pilot, team, standing, season.year);
+
+  } else if (type === 'tv_show') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    markUsed(pilot); return genTVShowArticle(pilot, team, season.year);
+
+  } else if (type === 'relationship') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    markUsed(pilot); return genRelationshipArticle(pilot, team, season.year);
+
+  } else if (type === 'friendship') {
+    const pA = P();
+    const pB = pick(allPilots.filter(p => String(p._id) !== String(pA._id) && !usedPilotIds.has(String(p._id)))) ||
+               pick(allPilots.filter(p => String(p._id) !== String(pA._id)));
+    if (!pB) return null;
+    const tA = teamMap.get(String(pA.teamId)), tB = teamMap.get(String(pB.teamId));
+    if (!tA || !tB) return null;
+    markUsed(pA, pB); return genFriendshipArticle(pA, pB, tA, tB, season.year);
+
+  } else if (type === 'lifestyle') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    markUsed(pilot); return genLifestyleArticle(pilot, team, season.year);
+
+  } else if (type === 'scandal_offtrack') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    markUsed(pilot); return genScandalOffTrackArticle(pilot, team, season.year);
+
+  } else if (type === 'charity') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    markUsed(pilot); return genCharityArticle(pilot, team, season.year);
+
+  } else if (type === 'brand_deal') {
+    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    markUsed(pilot); return genBrandDealArticle(pilot, team, season.year);
+  }
+  return null;
+}
+
+// ── Orchestrateur principal ───────────────────────────────────
+// slotName : 'matin' | 'midi' | 'aprem' | 'soir' | 'nuit'
+async function runScheduledNews(discordClient, slotName = 'soir') {
   const channel = RACE_CHANNEL ? discordClient.channels.cache.get(RACE_CHANNEL) : null;
   if (!channel) return;
 
@@ -2476,71 +3266,97 @@ async function runScheduledNews(discordClient) {
 
   const teamMap = new Map(allTeams.map(t => [String(t._id), t]));
 
+  // ── Phase de saison ──────────────────────────────────────────
   const totalRaces = await Race.countDocuments({ seasonId: season._id });
   const doneRaces  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
   const progress   = totalRaces > 0 ? doneRaces / totalRaces : 0;
-  const isEarly    = progress < 0.25;
-  const isMid      = progress >= 0.25 && progress < 0.6;
-  const isLate     = progress >= 0.6  && progress < 0.85;
-  const isFinale   = progress >= 0.85;
+  const phaseIdx   = progress < 0.25 ? 0 : progress < 0.6 ? 1 : progress < 0.85 ? 2 : 3;
+  const spPhase    = ['début','mi','fin','fin'][phaseIdx];
 
-  // Début : dev_vague(30%) drama(30%) interview(25%) scandal(10%) rumeur(5%)
-  // Milieu : drama(25%) dev_vague(20%) rumeur(20%) interview(20%) scandal(15%)
-  // Fin    : rumeur(35%) interview(25%) drama(20%) scandal(15%) dev_vague(5%)
-  // Finale : rumeur(45%) interview(25%) scandal(20%) drama(10%)
-  let weights;
-  if (isEarly)     weights = { drama: 30, dev_vague: 30, driver_interview: 25, scandal: 10, transfer_rumor: 5  };
-  else if (isMid)  weights = { drama: 25, dev_vague: 20, transfer_rumor: 20, driver_interview: 20, scandal: 15 };
-  else if (isLate) weights = { transfer_rumor: 35, driver_interview: 25, drama: 20, scandal: 15, dev_vague: 5  };
-  else             weights = { transfer_rumor: 45, driver_interview: 25, scandal: 20, drama: 10 };
+  // ── Nombre d'articles pour ce slot ──────────────────────────
+  const baseCount  = (SLOT_COUNTS[slotName] || SLOT_COUNTS.soir)[phaseIdx];
+  // ±1 aléatoire pour varier, borné à [1, 3]
+  const count      = Math.max(1, Math.min(3, baseCount + (Math.random() < 0.35 ? 1 : 0)));
 
-  const total = Object.values(weights).reduce((a, b) => a + b, 0);
-  let roll = Math.random() * total;
-  let chosen = 'drama';
-  for (const [type, w] of Object.entries(weights)) { roll -= w; if (roll <= 0) { chosen = type; break; } }
-
-  let articleData = null;
-  if (chosen === 'drama') {
-    const pA = pick(allPilots);
-    const others = allPilots.filter(p => String(p.teamId) !== String(pA.teamId));
-    const pB = others.length ? pick(others) : null;
-    if (pB) {
-      const tA = teamMap.get(String(pA.teamId)), tB = teamMap.get(String(pB.teamId));
-      if (tA && tB) articleData = genDramaArticle(pA, pB, tA, tB, season.year);
-    }
-  } else if (chosen === 'transfer_rumor') {
-    const pilot = pick(allPilots);
-    const currentTeam = teamMap.get(String(pilot.teamId));
-    const otherTeams  = allTeams.filter(t => String(t._id) !== String(pilot.teamId));
-    const targetTeam  = otherTeams.length ? pick(otherTeams) : null;
-    if (targetTeam) articleData = genTransferRumorArticle(pilot, currentTeam, targetTeam, season.year);
-  } else if (chosen === 'dev_vague') {
-    articleData = genDevVagueArticle(pick(allTeams), season.year);
-  } else if (chosen === 'scandal') {
-    if (allTeams.length >= 2) articleData = genScandalArticle(allTeams, allPilots, season.year);
-  } else if (chosen === 'driver_interview') {
-    const pilot = pick(allPilots);
-    const team  = teamMap.get(String(pilot.teamId));
-    if (team) {
-      try {
-        const standings = await Standing.find({ seasonId: season._id }).lean();
-        const standing  = standings.find(s => String(s.pilotId) === String(pilot._id));
-        const contract  = await Contract.findOne({ pilotId: pilot._id, active: true }).lean();
-        const teammate  = allPilots.find(p =>
-          String(p.teamId) === String(pilot.teamId) && String(p._id) !== String(pilot._id)
-        );
-        const teammateSt = teammate
-          ? standings.find(s => String(s.pilotId) === String(teammate._id))
-          : null;
-        const sp = isEarly ? 'début' : isMid ? 'mi' : 'fin';
-        articleData = genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, season.year, sp);
-      } catch(e) { console.error('Interview gen error:', e.message); }
-    }
+  // ── Poids de ce slot modifiés par la phase ───────────────────
+  const rawWeights = { ...(SLOT_WEIGHTS[slotName] || SLOT_WEIGHTS.soir) };
+  // Ajustements phase : transferts/scandales montent en fin de saison
+  if (phaseIdx >= 2) {
+    if (rawWeights.transfer_rumor) rawWeights.transfer_rumor += 8;
+    if (rawWeights.scandal_offtrack) rawWeights.scandal_offtrack += 5;
+    if (rawWeights.drama) rawWeights.drama += 4;
+    if (rawWeights.lifestyle) rawWeights.lifestyle = Math.max(2, rawWeights.lifestyle - 5);
+    if (rawWeights.charity) rawWeights.charity = Math.max(2, rawWeights.charity - 3);
+  }
+  if (phaseIdx === 0) { // début de saison : plus de positif
+    if (rawWeights.lifestyle) rawWeights.lifestyle += 5;
+    if (rawWeights.brand_deal) rawWeights.brand_deal += 4;
+    if (rawWeights.transfer_rumor) rawWeights.transfer_rumor = Math.max(0, (rawWeights.transfer_rumor||0) - 8);
   }
 
-  if (articleData) {
+  // ── Anti-répétition : articles des 24h ───────────────────────
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const since48h = new Date(Date.now() - 48 * 60 * 60 * 1000);
+  const recent24 = await NewsArticle.find({ publishedAt: { $gte: since24h }, triggered: 'scheduled' }).lean();
+  const recent48 = await NewsArticle.find({ publishedAt: { $gte: since48h }, triggered: 'scheduled', type: { $in: [...HEAVY_COOLDOWN_TYPES] } }).lean();
+
+  // Combos "type:pilotId" vus dans les dernières 24h (normal) ou 48h (types lourds)
+  const cooldown24 = new Set(recent24.flatMap(a => (a.pilotIds||[]).map(pid => `${a.type}:${String(pid)}`)));
+  const cooldown48 = new Set(recent48.flatMap(a => (a.pilotIds||[]).map(pid => `${a.type}:${String(pid)}`)));
+  // Types déjà publiés aujourd'hui — on évite + de 2 fois le même type/jour
+  const typesPublishedToday = {};
+  for (const a of recent24) typesPublishedToday[a.type] = (typesPublishedToday[a.type]||0) + 1;
+
+  // ── Génération des articles ──────────────────────────────────
+  const usedPilotIds = new Set();  // pilotes déjà utilisés dans CE slot
+  const usedTypesThisSlot = new Set(); // types déjà tirés dans CE slot
+  const published = [];
+
+  for (let i = 0; i < count; i++) {
+    // Construire les poids effectifs : retirer les types sursaturés
+    const effectiveWeights = {};
+    for (const [t, w] of Object.entries(rawWeights)) {
+      if (usedTypesThisSlot.has(t)) continue;           // déjà dans ce slot
+      if ((typesPublishedToday[t]||0) >= 2) continue;   // > 2 fois aujourd'hui
+      effectiveWeights[t] = w;
+    }
+    if (!Object.keys(effectiveWeights).length) break;
+
+    const type = weightedPickFrom(effectiveWeights);
+    usedTypesThisSlot.add(type);
+
+    // Filtrer les pilotes en cooldown pour ce type
+    const isHeavy = HEAVY_COOLDOWN_TYPES.has(type);
+    const cooldownSet = isHeavy ? cooldown48 : cooldown24;
+    // On exclut les pilotes en cooldown du pool "libre" — buildArticleData les gérera
+    const pilotsCooled = new Set(
+      allPilots
+        .filter(p => cooldownSet.has(`${type}:${String(p._id)}`))
+        .map(p => String(p._id))
+    );
+    // Injecter dans usedPilotIds pour ce tirage (sera retiré après si non publié)
+    for (const id of pilotsCooled) usedPilotIds.add(id);
+
+    let articleData = null;
+    try {
+      articleData = await buildArticleData(type, allPilots, allTeams, teamMap, season, spPhase, usedPilotIds);
+    } catch(e) { console.error(`News gen error [${type}]:`, e.message); }
+
+    // Retirer les pilotes en cooldown du set (ils ne doivent bloquer que ce tirage)
+    for (const id of pilotsCooled) usedPilotIds.delete(id);
+
+    if (!articleData) continue;
+
     const article = await NewsArticle.create({ ...articleData, triggered: 'scheduled', publishedAt: new Date() });
     await publishNews(article, channel);
+    published.push(type);
+
+    // Délai prestige entre articles : 90s à 4min
+    if (i < count - 1) await sleep(randInt(90_000, 240_000));
+  }
+
+  if (published.length) {
+    console.log(`📰 [News ${slotName}] ${published.length} article(s) publié(s) : ${published.join(', ')}`);
   }
 }
 
@@ -3848,11 +4664,11 @@ const exitNeighborStr = neighborAhead && neighborBehind
 function buildTestFixtures() {
   const ObjectId = require('mongoose').Types.ObjectId;
   const testTeamDefs = [
-    { name:'Red Bull Racing TEST', emoji:'🔵', color:'#1E3A5F', budget:160, vitesseMax:95, drs:95, refroidissement:90, dirtyAir:88, conservationPneus:88, vitesseMoyenne:93, devPoints:0 },
+    { name:'Red Bull Racing TEST', emoji:'🟡', color:'#1E3A5F', budget:160, vitesseMax:95, drs:95, refroidissement:90, dirtyAir:88, conservationPneus:88, vitesseMoyenne:93, devPoints:0 },
     { name:'Scuderia TEST',     emoji:'🔴', color:'#DC143C', budget:150, vitesseMax:92, drs:90, refroidissement:88, dirtyAir:85, conservationPneus:85, vitesseMoyenne:90, devPoints:0 },
-    { name:'Mercedes TEST', emoji:'⚪', color:'#00D2BE', budget:145, vitesseMax:90, drs:88, refroidissement:92, dirtyAir:82, conservationPneus:87, vitesseMoyenne:88, devPoints:0 },
+    { name:'Mercedes TEST', emoji:'🩶', color:'#00D2BE', budget:145, vitesseMax:90, drs:88, refroidissement:92, dirtyAir:82, conservationPneus:87, vitesseMoyenne:88, devPoints:0 },
     { name:'McLaren TEST',      emoji:'🟠', color:'#FF7722', budget:130, vitesseMax:85, drs:84, refroidissement:82, dirtyAir:80, conservationPneus:83, vitesseMoyenne:85, devPoints:0 },
-    { name:'Alpine TEST',       emoji:'💙', color:'#0066CC', budget:110, vitesseMax:75, drs:76, refroidissement:78, dirtyAir:75, conservationPneus:76, vitesseMoyenne:76, devPoints:0 },
+    { name:'Alpine TEST',       emoji:'🩷', color:'#0066CC', budget:110, vitesseMax:75, drs:76, refroidissement:78, dirtyAir:75, conservationPneus:76, vitesseMoyenne:76, devPoints:0 },
   ];
   const testNames = ['Verstappen PL','Hamilton PL','Leclerc PL','Norris PL','Sainz PL','Russell PL','Alonso PL','Perez PL','Piastri PL','Albon PL'];
   const testTeams  = testTeamDefs.map(t => ({ ...t, _id: new ObjectId() }));
@@ -4098,18 +4914,18 @@ async function createNewSeason() {
   // Reset duels coéquipiers pour la nouvelle saison
   await Pilot.updateMany({}, { teammateDuelWins: 0, teamStatus: null });
 
-  const startDate = new Date();
-  startDate.setHours(0,0,0,0);
-  startDate.setDate(startDate.getDate() + 1); // GP 1 = demain
-  // 2 GP par jour : slot 0 (11h/13h/15h) et slot 1 (17h/18h/20h)
-  // Un GP toutes les 12h → i=0 slot0 jour1, i=1 slot1 jour1, i=2 slot0 jour2...
+  // Dates des GPs : construites en UTC-midi pour éviter le décalage
+  // "new Date() avec setHours(0,0,0,0)" sur un serveur UTC donne minuit UTC = 1h ou 2h Paris
+  // → au premier toLocaleDateString le jour affiché peut être -1
+  // Solution : pointer sur 12h UTC (= 13h ou 14h Paris) → toujours le bon jour calendaire
+  const nowUTC = new Date();
+  const tomorrowUTC = new Date(Date.UTC(nowUTC.getUTCFullYear(), nowUTC.getUTCMonth(), nowUTC.getUTCDate() + 1, 12, 0, 0));
+
   for (let i = 0; i < CIRCUITS.length; i++) {
-    const d    = new Date(startDate);
     const slot = i % 2; // 0 = matin, 1 = soir
-    d.setDate(d.getDate() + Math.floor(i / 2)); // 2 GP par jour
-    // Heure cohérente avec le slot : slot 0 → 11h, slot 1 → 17h
-    // Permet d'afficher le bon horaire même si le champ slot est absent/corrompu
-    d.setHours(slot === 1 ? 17 : 11, 0, 0, 0);
+    const d    = new Date(tomorrowUTC);
+    d.setUTCDate(tomorrowUTC.getUTCDate() + Math.floor(i / 2));
+    d.setUTCHours(slot === 1 ? 16 : 10, 0, 0, 0); // 10h UTC = 11h CET | 16h UTC = 17h CET
     await Race.create({ seasonId: season._id, index: i, slot, ...CIRCUITS[i], scheduledDate: d, status: 'upcoming' });
   }
 
@@ -4626,15 +5442,21 @@ client.once('ready', async () => {
   }
   startScheduler();
 
-  // ── Job news 2 fois par jour via cron (résiste aux redémarrages) ──
-  // 10h00 et 21h00 heure de Paris — loin des créneaux de course pour ne pas noyer les articles
-  cron.schedule('0 10 * * *', async () => {
-    try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news 10h error:', e); }
-  }, { timezone: 'Europe/Paris' });
-  cron.schedule('0 21 * * *', async () => {
-    try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news 21h error:', e); }
-  }, { timezone: 'Europe/Paris' });
-  console.log('✅ Job news planifié : 10h00 et 21h00 (Europe/Paris)');
+  // ── 5 slots de news — horaires calés HORS fenêtres de course ──
+  // Slot 0 course : EL 11h · Q 13h · Course 15h  → zone morte 10h30–15h30
+  // Slot 1 course : EL 17h · Q 18h · Course 20h  → zone morte 16h30–20h30
+  //
+  //  8h00  matin   → lifestyle, réseaux       ✅ avant toute activité
+  //  10h00 midi    → sport, interview          ✅ juste avant la zone morte slot 0
+  //  16h00 aprem   → gossip, TV, amis          ✅ entre les deux slots de course
+  //  21h00 soir    → drama, transferts         ✅ après la fin du slot 1 (course 20h)
+  //  23h00 nuit    → scandale, rumeurs         ✅ fin de soirée
+  cron.schedule('0  8 * * *', async () => { try { await runScheduledNews(client, 'matin'); } catch(e) { console.error('News matin error:', e.message); } }, { timezone: 'Europe/Paris' });
+  cron.schedule('0 10 * * *', async () => { try { await runScheduledNews(client, 'midi');  } catch(e) { console.error('News midi error:',  e.message); } }, { timezone: 'Europe/Paris' });
+  cron.schedule('0 16 * * *', async () => { try { await runScheduledNews(client, 'aprem'); } catch(e) { console.error('News aprem error:', e.message); } }, { timezone: 'Europe/Paris' });
+  cron.schedule('0 21 * * *', async () => { try { await runScheduledNews(client, 'soir');  } catch(e) { console.error('News soir error:',  e.message); } }, { timezone: 'Europe/Paris' });
+  cron.schedule('0 23 * * *', async () => { try { await runScheduledNews(client, 'nuit');  } catch(e) { console.error('News nuit error:',  e.message); } }, { timezone: 'Europe/Paris' });
+  console.log('✅ Jobs news : 8h · 10h · 16h · 21h · 23h (hors créneaux de course)');
 });
 
 // ============================================================
@@ -5529,7 +6351,8 @@ async function handleInteraction(interaction) {
     const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
     const lines = races.map(r => {
       const d = new Date(r.scheduledDate);
-      const dateStr  = `${d.getDate()}/${d.getMonth()+1}`;
+      // Utiliser les composantes UTC pour éviter le décalage de fuseau (-1 jour sur serveur UTC)
+      const dateStr  = `${d.getUTCDate()}/${d.getUTCMonth()+1}`;
       const slotTag  = r.slot === 1 ? '🌆 17h' : '🌅 11h';
       const status   = (r.status === 'done' || r.status === 'race_computed') ? '✅' : r.status === 'practice_done' ? '🔧' : r.status === 'quali_done' ? '⏱️' : '🔜';
       return `${status} ${r.emoji} **${r.circuit}** — ${dateStr} ${slotTag} ${styleEmojis[r.gpStyle]}`;
@@ -5573,18 +6396,20 @@ async function handleInteraction(interaction) {
 
     const fields = upcoming.map(r => {
       const d = new Date(r.scheduledDate);
-      // Dériver le slot depuis l'heure de scheduledDate si le champ slot est absent/faux
-      // scheduledDate à 17h+ → soir ; sinon → matin
-      const scheduledHour = parseInt(d.toLocaleString('en-US', { timeZone: 'Europe/Paris', hour: 'numeric', hour12: false }));
-      const isSlot1  = (r.slot === 1) || (r.slot == null && scheduledHour >= 16);
+      // Dériver le slot depuis le champ slot ou l'heure UTC stockée
+      // 10h UTC = slot matin (11h CET) | 16h UTC = slot soir (17h CET)
+      const utcHour  = d.getUTCHours();
+      const isSlot1  = (r.slot === 1) || (r.slot == null && utcHour >= 14);
       const elH      = isSlot1 ? '17h00' : '11h00';
       const qH       = isSlot1 ? '18h00' : '13h00';
       const rH       = isSlot1 ? '20h00' : '15h00';
       const slotIcon = isSlot1 ? '🌆' : '🌅';
       const style    = seStyle[r.gpStyle] || '';
 
-      // Date affichée — utiliser le jour sans heure (les deux GPs d'un jour ont la même date)
-      const dateStr = d.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long', day: 'numeric', month: 'long' });
+      // Affichage de la date : construire à partir des composantes UTC pour éviter
+      // le décalage de fuseau (minuit UTC = veille à Paris → affiche -1 jour)
+      const displayDate = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 0, 0));
+      const dateStr = displayDate.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long', day: 'numeric', month: 'long' });
 
       const isDone  = r.status === 'done' || r.status === 'race_computed';
       const isQDone = isDone || r.status === 'quali_done';
@@ -6600,9 +7425,13 @@ async function handleInteraction(interaction) {
     await interaction.deferReply({ ephemeral: true });
     const channel = client.channels.cache.get(RACE_CHANNEL);
     if (!channel) return interaction.editReply('❌ Channel non configuré (RACE_CHANNEL_ID manquant).');
+    const slotOpt = interaction.options?.getString('slot') || null;
+    const hour = parseInt(new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris', hour: 'numeric', hour12: false }));
+    const autoSlot = hour < 10 ? 'matin' : hour < 14 ? 'midi' : hour < 18 ? 'aprem' : hour < 21 ? 'soir' : 'nuit';
+    const slot = slotOpt || autoSlot;
     try {
-      await runScheduledNews(client);
-      return interaction.editReply('✅ Article de news généré et publié.');
+      await runScheduledNews(client, slot);
+      return interaction.editReply(`✅ News générée — slot **${slot}**.`);
     } catch(e) {
       return interaction.editReply(`❌ Erreur : ${e.message}`);
     }
@@ -6772,49 +7601,54 @@ async function handleInteraction(interaction) {
       const slotStr  = interaction.options.getString('slot') || 'matin';
 
       // Valider la date
-      const refDate = new Date(dateStr + 'T00:00:00+01:00'); // heure Paris (CET)
-      if (isNaN(refDate.getTime()))
+      const parts = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if (!parts)
         return interaction.editReply(`❌ Date invalide : \`${dateStr}\` — utilise le format YYYY-MM-DD.`);
 
-      const refSlot = slotStr === 'soir' ? 1 : 0;
+      // Construire la date en UTC-midi pour éviter le décalage d'un jour sur les serveurs UTC
+      // ex: '2025-03-04' → Date.UTC(2025,2,4,12,0,0) = 2025-03-04T12:00:00Z → Paris = 13h, même jour ✅
+      const [, ry, rm, rd] = parts.map(Number);
+      const refDateUTC = new Date(Date.UTC(ry, rm - 1, rd, 12, 0, 0));
+      if (isNaN(refDateUTC.getTime()))
+        return interaction.editReply(`❌ Date invalide : \`${dateStr}\`.`);
 
-      // Vérifier cohérence index/slot :
-      // Le slot de référence doit correspondre à refIndex % 2
-      // Si ça ne colle pas, on réassigne les index pour que ça marche
-      // (ex: index 6 est pair → slot 0 = matin ✓; si on voulait soir il faudrait décaler)
-      const expectedSlotFromIndex = refIndex % 2;
-      if (expectedSlotFromIndex !== refSlot) {
-        return interaction.editReply(
-          `❌ Incohérence : index **${refIndex}** est ${expectedSlotFromIndex === 0 ? 'pair → slot matin' : 'impair → slot soir'}, ` +
-          `mais tu as choisi **${slotStr}**.\n` +
-          `> Si tu veux Emilia Romagna (index 6) **au matin**, utilise slot \`matin\` ✅\n` +
-          `> Si tu veux Emilia Romagna (index 6) **au soir**, change l'index en 7 (impair) et ajuste les noms via la BDD.`
-        );
-      }
+      const refSlot = slotStr === 'soir' ? 1 : 0;
+      // ── Suppression du blocage par parité d'index ──────────────
+      // L'ancien code forçait index pair = matin, index impair = soir.
+      // Désormais le slot de référence est libre : Miami (index 5) peut être matin.
 
       const races = await Race.find({ seasonId: season._id }).sort({ index: 1 });
       if (!races.length) return interaction.editReply('❌ Aucun GP trouvé.');
 
-      // Calculer l'ancre : date du GP index 0
-      // GP[refIndex] est au jour refDate — recule de floor(refIndex/2) jours pour trouver le jour du GP 0
-      const anchor = new Date(refDate);
-      anchor.setDate(anchor.getDate() - Math.floor(refIndex / 2));
-      anchor.setHours(11, 0, 0, 0); // GP 0 = toujours slot 0 = 11h
+      // ── Calcul du décalage en jours depuis la course de référence ──
+      // Chaque GP = 1 "demi-journée". La formule tient compte du slot de départ :
+      //   refSlot=0 (matin) : steps +1 = même jour (soir), +2 = j+1 (matin)…
+      //   refSlot=1 (soir)  : steps +1 = j+1 (matin), +2 = j+1 (soir)…
+      function dayOffset(steps, startSlot) {
+        if (steps >= 0) return Math.floor((steps + startSlot) / 2);
+        return -Math.floor((-steps + (1 - startSlot)) / 2);
+      }
 
       let updated = 0;
       const preview = [];
       for (const r of races) {
-        const slot      = r.index % 2;
-        const dayOffset = Math.floor(r.index / 2);
-        const fixedDate = new Date(anchor);
-        fixedDate.setDate(anchor.getDate() + dayOffset);
-        fixedDate.setHours(slot === 1 ? 17 : 11, 0, 0, 0);
-        await Race.findByIdAndUpdate(r._id, { slot, scheduledDate: fixedDate });
-        // Aperçu des premiers et derniers GP pour confirmation
+        const steps   = r.index - refIndex;
+        // Slot dérivé : alterne à partir du slot de référence
+        const newSlot = ((refSlot + steps) % 2 + 2) % 2;
+        const dOff    = dayOffset(steps, refSlot);
+
+        const fixedDate = new Date(refDateUTC);
+        fixedDate.setUTCDate(refDateUTC.getUTCDate() + dOff);
+        // Heures stockées en UTC : 10h UTC = 11h CET (hiver) / 12h CEST (été)
+        // Le display utilise r.slot pour afficher 11h/17h, l'heure stockée sert juste de repère
+        fixedDate.setUTCHours(newSlot === 1 ? 16 : 10, 0, 0, 0);
+
+        await Race.findByIdAndUpdate(r._id, { slot: newSlot, scheduledDate: fixedDate });
+
         if (r.index <= 2 || r.index >= races.length - 2 || r.index === refIndex || r.index === refIndex + 1) {
           const ds = fixedDate.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday:'short', day:'numeric', month:'short' });
-          const slotIcon = slot === 1 ? '🌆' : '🌅';
-          preview.push(`${slotIcon} **#${r.index}** ${r.emoji} ${r.circuit} — ${ds} ${slot === 1 ? '17h' : '11h'}`);
+          const slotIcon = newSlot === 1 ? '🌆' : '🌅';
+          preview.push(`${slotIcon} **#${r.index}** ${r.emoji} ${r.circuit} — ${ds} ${newSlot === 1 ? '17h' : '11h'}`);
         }
         updated++;
       }
