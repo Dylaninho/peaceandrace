@@ -266,6 +266,7 @@ const RaceSchema = new mongoose.Schema({
   laps          : { type: Number, default: 50 },
   gpStyle       : { type: String, enum: ['urbain','mixte','rapide','technique','endurance'], default: 'mixte' },
   scheduledDate : Date,
+  slot          : { type: Number, default: 0 }, // 0 = matin (11h/13h/15h) · 1 = soir (17h/18h/20h)
   status        : { type: String, enum: ['upcoming','practice_done','quali_done','race_computed','done'], default: 'upcoming' },
   qualiGrid     : { type: Array, default: [] },
   raceResults   : { type: Array, default: [] },
@@ -400,11 +401,11 @@ const NATIONALITIES = [
 // ============================================================
 
 const TIRE = {
-  SOFT  : { grip: 1.00, deg: 0.028, emoji: '🔴', label: 'Soft'   },
-  MEDIUM: { grip: 0.94, deg: 0.016, emoji: '🟡', label: 'Medium' },
-  HARD  : { grip: 0.87, deg: 0.008, emoji: '⚪', label: 'Hard'   },
-  INTER : { grip: 0.91, deg: 0.013, emoji: '🟢', label: 'Inter'  },
-  WET   : { grip: 0.85, deg: 0.010, emoji: '🔵', label: 'Wet'    },
+  SOFT  : { grip: 1.00, deg: 0.0024, emoji: '🔴', label: 'Soft'   }, // cliff ~lap 25
+  MEDIUM: { grip: 0.99, deg: 0.0016, emoji: '🟡', label: 'Medium' }, // cliff ~lap 38
+  HARD  : { grip: 0.98, deg: 0.0010, emoji: '⚪', label: 'Hard'   }, // cliff ~lap 60
+  INTER : { grip: 0.99, deg: 0.0013, emoji: '🟢', label: 'Inter'  },
+  WET   : { grip: 0.99, deg: 0.0008, emoji: '🔵', label: 'Wet'    },
 };
 
 // ─── Poids des stats selon le style de GP ─────────────────
@@ -561,7 +562,7 @@ function buildPickRevealEmbed(team, pilot, globalPick, totalPicks, round, pickIn
 // ─── Score voiture pondéré selon le style de GP ───────────
 // Retourne un score 0-100 représentant la performance de la voiture sur ce circuit
 function carScore(team, gpStyle) {
-  const w = GP_STYLE_WEIGHTS[gpStyle].car;
+  const w = (GP_STYLE_WEIGHTS[gpStyle] || GP_STYLE_WEIGHTS['mixte']).car;
   const total = Object.values(w).reduce((a,b) => a+b, 0);
   const score =
     (team.vitesseMax        * w.vitesseMax +
@@ -575,7 +576,7 @@ function carScore(team, gpStyle) {
 
 // ─── Score pilote pondéré selon le style de GP ────────────
 function pilotScore(pilot, gpStyle) {
-  const w = GP_STYLE_WEIGHTS[gpStyle].pilot;
+  const w = (GP_STYLE_WEIGHTS[gpStyle] || GP_STYLE_WEIGHTS['mixte']).pilot;
   const total = Object.values(w).reduce((a,b) => a+b, 0);
   const score =
     (pilot.depassement  * w.depassement +
@@ -589,44 +590,45 @@ function pilotScore(pilot, gpStyle) {
 }
 
 // ─── Calcul du lap time ───────────────────────────────────
-function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0, tireAge = 99) {
+function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0) {
   const BASE = 90_000;
-  const w = GP_STYLE_WEIGHTS[gpStyle];
+  const w = GP_STYLE_WEIGHTS[gpStyle] || GP_STYLE_WEIGHTS['mixte'];
 
-  // Contribution voiture — max ~2s/tour entre meilleure et pire voiture
+  // Contribution voiture — max ~0.3s/tour entre meilleure et pire (anti-téléportation)
   const cScore = carScore(team, gpStyle);
-  const carFRaw = 1 - ((cScore - 70) / 70 * 0.022);
-  const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.022 * (scCooldown / 6)) : carFRaw;
+  const carFRaw = 1 - ((cScore - 70) / 70 * 0.005);
+  const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.005 * (scCooldown / 6)) : carFRaw;
 
-  // Contribution pilote — max ~1.5s/tour
+  // Contribution pilote — max ~0.35s/tour
   const pScore = pilotScore(pilot, gpStyle);
-  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.015);
-  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.015 * (scCooldown / 6)) : pilotFRaw;
+  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.004);
+  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.004 * (scCooldown / 6)) : pilotFRaw;
 
-  // Spécialisation — bonus marginal
+  // Spécialisation — bonus très marginal (évite les sauts de position)
   let specF = 1.0;
   if (pilot.specialization) {
     const specWeight = GP_STYLE_WEIGHTS[gpStyle]?.pilot?.[pilot.specialization] || 1.0;
-    specF = 1 - (specWeight * 0.0005);
+    specF = 1 - (specWeight * 0.0002);
   }
 
-  // Pneus — dégradation NON-LINÉAIRE (s'emballe après 70% de vie)
+  // Pneus — dégradation linéaire avec légère accélération après 70% de vie utile
   const tireData = TIRE[tireCompound];
   if (!tireData) return 90_000; // fallback si compound inconnu
-  const carTireBonus   = (team.conservationPneus - 70) / 70 * 0.3;
-  const pilotTireBonus = (pilot.gestionPneus - 50) / 50 * 0.2;
-  const effectiveDeg   = tireData.deg * (1 - carTireBonus - pilotTireBonus * 0.01);
-  // Cliff exponentiel : au-delà de 70% de vie utile, la dégradation explose
-  const tireLifeRef  = effectiveDeg > 0 ? 1 / (effectiveDeg * 30) : 35;
-  const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 1.5);
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + Math.pow((wearRatio - 0.7) / 0.3, 2.5) * 3.0;
+  const carTireBonus   = Math.max(-0.3, Math.min(0.3, (team.conservationPneus - 70) / 70 * 0.3));
+  const pilotTireBonus = Math.max(-0.2, Math.min(0.2, (pilot.gestionPneus - 50) / 50 * 0.2));
+  const effectiveDeg   = Math.max(0.0001, tireData.deg * (1 - carTireBonus - pilotTireBonus * 0.5));
+  // tireLifeRef = seuil de tour où le cliff commence (SOFT~25, MEDIUM~38, HARD~60)
+  const tireLifeRef  = 0.06 / effectiveDeg;
+  const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 1.8);
+  // Cliff linéaire : au-delà de 70% de vie, dégradation ×2.5 supplémentaire
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 2.5;
   const wearPenalty  = tireWear * effectiveDeg * cliffFactor;
   const tireF        = (1 + wearPenalty) / tireData.grip;
 
-  // Dirty air — pénalité réaliste (~0.3s max)
+  // Dirty air — pénalité ~0.1s max (pas une source de téléportation)
   let dirtyAirF = 1.0;
   if (position > 1) {
-    const dirtyAirPenalty = (100 - team.dirtyAir) / 100 * 0.004;
+    const dirtyAirPenalty = (100 - team.dirtyAir) / 100 * 0.001;
     const daRandom = scCooldown > 0 ? Math.random() * 0.3 : Math.random();
     dirtyAirF = 1 + dirtyAirPenalty * daRandom;
   }
@@ -706,18 +708,22 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps) {
   // Mode overcut : reste dehors intentionnellement
   if (overcutMode && (tireWear || 0) < 30 && lapsRemaining > 12) return { pit: false, reason: null };
 
-  const wornThreshold = 35 - (team.conservationPneus - 70) * 0.2 - (pilot.gestionPneus - 50) * 0.1;
-  const softThreshold = 22 - (team.conservationPneus - 70) * 0.15;
+  // Seuils en tours (tireWear = nombre de tours sur ces pneus)
+  // MEDIUM: pit autour de lap 38 ± ajustements; SOFT: plus tôt; HARD: plus tard
+  const compoundFactor = tireCompound === 'SOFT' ? 0.65 : tireCompound === 'HARD' ? 1.4 : 1.0;
+  const wornBase = 35 * compoundFactor;
+  const wornThreshold = wornBase - (team.conservationPneus - 70) * 0.2 - (pilot.gestionPneus - 50) * 0.15;
+  const urgentThreshold = wornThreshold * 1.2; // on attend plus longtemps si possible
 
-  if (tireWear > wornThreshold) return { pit: true, reason: 'tires_worn' };
-  if (tireWear > softThreshold && tireCompound === 'SOFT') return { pit: true, reason: 'tires_worn' };
+  if (tireWear > urgentThreshold) return { pit: true, reason: 'tires_worn' }; // obligé
+  if (tireWear > wornThreshold && Math.random() < 0.6) return { pit: true, reason: 'tires_worn' }; // progressif
 
   // Undercut — conditions strictes pour éviter le chaos post-SC
   // Pas d'undercut dans les X premiers tours de pneus (sinon tout le monde undercut post-SC)
   if (gapAhead !== null && gapAhead < 1500 && tireWear > 22 && lapsRemaining > 18 && (tireAge || 0) >= 14) {
     // Cooldown personnel : le pilote ne peut pas undercut 2 fois de suite (lastUndercutLap)
     const lastUnd = driver.lastUndercutLap || -99;
-    if (lapsRemaining < (lastUnd - 4)) return { pit: false, reason: null }; // jamais < 4 tours après le dernier
+    if (lapsRemaining > (lastUnd - 4)) return { pit: false, reason: null }; // bloque pendant 4 tours après le dernier undercut
     // Probabilité réduite : ~10% par tour pour un pilote très agressif (depassement=100)
     // → sur 15 tours : ~79% de chance total (réaliste, pas systématique)
     // ~12%/tour pilote agressif (d=100), ~8%/tour moyen (d=60), réaliste
@@ -848,7 +854,7 @@ async function simulateQualifying(race, pilots, teams) {
     segment  : i < q3Size ? 'Q3' : i < q2Size ? 'Q2' : 'Q1',
   }));
 
-  return { grid: finalGrid, weather, q3Size, q2Size };
+  return { grid: finalGrid, weather, q3Size, q2Size, allTimes };
 }
 
 // ─── SIMULATION ESSAIS LIBRES ─────────────────────────────
@@ -2383,7 +2389,17 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   // ══════════════════════════════════════════════════════════
   // BOUCLE PRINCIPALE
   // ══════════════════════════════════════════════════════════
+  // Stocker la référence abort dans un Map global pour que /admin_stop_race puisse l'invoquer
+  if (!global.activeRaces) global.activeRaces = new Map();
+  let raceAborted = false;
+  const raceKey = String(race._id);
+  global.activeRaces.set(raceKey, { abort: () => { raceAborted = true; } });
+
   for (let lap = 1; lap <= totalLaps; lap++) {
+    if (raceAborted) {
+      if (channel) await channel.send('🛑 **COURSE ARRÊTÉE PAR UN ADMINISTRATEUR.** Les résultats actuels ne seront pas comptabilisés.');
+      break;
+    }
     const lapsRemaining = totalLaps - lap;
     const trackEvo      = (lap / totalLaps) * 100;
     drivers.forEach(d => { d.pittedThisLap = false; });
@@ -2448,12 +2464,12 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       }
     }
 
-    // Snapshot des positions avant ce tour
-    alive.forEach(d => { d.lastPos = d.pos; });
-
     const events    = []; // { priority, text }
     const lapDnfs   = []; // DNFs survenus CE tour — pour expliquer le SC
     const lapIncidents = []; // incidents ce tour pour SC logic
+
+    // Snapshot des positions avant ce tour
+    alive.forEach(d => { d.lastPos = d.pos; });
 
     // ── Snapshot des temps AVANT calcul du tour ──────────────
     // Clé = String(pilot._id), valeur = totalTime avant ce tour
@@ -2617,26 +2633,39 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('mechanical') });
 
       } else if (incident.type === 'PUNCTURE') {
-        driver.dnf       = true;
-        driver.dnfLap    = lap;
-        driver.dnfReason = 'PUNCTURE';
-        lapDnfs.push({ driver, reason: 'PUNCTURE' });
+        const canRecover = lapsRemaining > 5 && (driver.pitStops || 0) < 3 && Math.random() < 0.40;
         lapIncidents.push({ type: 'PUNCTURE' });
         const posp    = driver.pos;
         const isTop3p = posp <= 3;
         const isTop8p = posp <= 8;
         const np      = `${driver.team.emoji}**${driver.pilot.name}**`;
-        const puncFlavors = isTop3p ? [
-          `***🫧 CREVAISON !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} — P${posp} — DNF !!!***\n  › Le pneu explose à haute vitesse — la voiture devient incontrôlable depuis ***P${posp}***. Il rentre sur la jante, impuissant. ***Tout s'effondre en une fraction de seconde.*** ❌`,
-          `***💥 NON !!! CREVAISON POUR ${driver.team.emoji}${driver.pilot.name.toUpperCase()} !!!***\n  › ***P${posp}*** — et un pneu explose. ***La course lui est volée par la malchance pure.*** ❌ **DNF.**`,
-        ] : isTop8p ? [
-          `🫧 **T${lap} — CREVAISON !** ${np} (P${posp}) perd un pneu à pleine vitesse — il rentre sur la jante. Impossible de continuer. ❌ **DNF.**`,
-          `💥 **T${lap}** — Explosion de pneu pour ${np} (P${posp}) — la voiture part en travers. ❌ **DNF.**`,
-        ] : [
-          `🫧 **T${lap}** — Crevaison pour ${np} (P${posp}), il rentre sur la jante. ❌ **DNF.**`,
-          `🫧 **T${lap}** — Délamination sur la voiture de ${np} (P${posp}) — c'est fini. ❌ **DNF.**`,
-        ];
-        incidentText = pick(puncFlavors);
+
+        if (canRecover) {
+          // Pit d'urgence : pneu à changer + temps perdu considérable
+          driver.pendingRepair = 'puncture_repair';
+          driver.tireWear = 99;
+          driver.tireAge  = 99;
+          driver.totalTime += randInt(8000, 15000); // pénalité avant de rentrer
+          incidentText = isTop3p ? [
+            `***🫧 CREVAISON !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} — P${posp} !!!***\n  › Le pneu explose — il rentre en urgence sur la jante. ***Course compromise mais pas terminée !*** 🔧`,
+          ][0] : `🫧 **T${lap} — CREVAISON !** ${np} (P${posp}) — pneu à plat, rentre en urgence aux stands ! *Énorme perte de temps.*`;
+        } else {
+          driver.dnf       = true;
+          driver.dnfLap    = lap;
+          driver.dnfReason = 'PUNCTURE';
+          lapDnfs.push({ driver, reason: 'PUNCTURE' });
+          const puncFlavors = isTop3p ? [
+            `***🫧 CREVAISON !!! ${driver.team.emoji}${driver.pilot.name.toUpperCase()} — P${posp} — DNF !!!***\n  › Le pneu explose à haute vitesse — la voiture devient incontrôlable depuis ***P${posp}***. Il rentre sur la jante, impuissant. ***Tout s'effondre en une fraction de seconde.*** ❌`,
+            `***💥 NON !!! CREVAISON POUR ${driver.team.emoji}${driver.pilot.name.toUpperCase()} !!!***\n  › ***P${posp}*** — et un pneu explose. ***La course lui est volée par la malchance pure.*** ❌ **DNF.**`,
+          ] : isTop8p ? [
+            `🫧 **T${lap} — CREVAISON !** ${np} (P${posp}) perd un pneu à pleine vitesse — il rentre sur la jante. Impossible de continuer. ❌ **DNF.**`,
+            `💥 **T${lap}** — Explosion de pneu pour ${np} (P${posp}) — la voiture part en travers. ❌ **DNF.**`,
+          ] : [
+            `🫧 **T${lap}** — Crevaison pour ${np} (P${posp}), il rentre sur la jante. ❌ **DNF.**`,
+            `🫧 **T${lap}** — Délamination sur la voiture de ${np} (P${posp}) — c'est fini. ❌ **DNF.**`,
+          ];
+          incidentText = pick(puncFlavors);
+        }
         if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('puncture') });
       }
 
@@ -2755,9 +2784,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         // ── Défense agressive = usure pneus extra ──
         const behindDrv = drivers.find(d => !d.dnf && d.pos === driver.pos + 1);
         if (behindDrv && !scActive) {
-          const gapBehind = (preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime)
-                          - (preLapTimes.get(String(behindDrv.pilot._id)) ?? behindDrv.totalTime);
-          if (gapBehind < 0 && Math.abs(gapBehind) < 1500) {
+          const gapBehindAbs = Math.abs(
+            (preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime)
+            - (preLapTimes.get(String(behindDrv.pilot._id)) ?? behindDrv.totalTime)
+          );
+          if (gapBehindAbs < 1500) {
             const defWear = driver.pilot.defense < 50 ? 0.8 : 0.3;
             driver.tireWear = (driver.tireWear || 0) + defWear;
             driver.defendExtraWear = (driver.defendExtraWear || 0) + defWear;
@@ -2838,6 +2869,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           if (driver.pendingRepair === 'aileron') {
             pitTime    = scActive ? randInt(30_000, 36_000) : randInt(32_000, 40_000);
             repairDesc = `⚙️ *Remplacement de l'aileron avant — arrêt long !*`;
+          } else if (driver.pendingRepair === 'puncture_repair') {
+            pitTime    = scActive ? randInt(21_000, 25_000) : randInt(22_000, 28_000);
+            repairDesc = `🫧 *Remplacement de pneu crevé — arrêt express !*`;
           } else {
             pitTime    = scActive ? randInt(26_000, 32_000) : randInt(28_000, 36_000);
             repairDesc = `🔩 *Réparation de suspension — arrêt rallongé !*`;
@@ -2884,8 +2918,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         const posOutContext = trackPos !== posOut
           ? `**P${posOut}** en timing *(~P${trackPos} sur la piste)*`
           : `**P${posOut}**`;
-        const gapToLeader = ranked && ranked.length > 0 && driver.pos > 1
-          ? ` · ${((driver.totalTime - ranked[0].totalTime) / 1000).toFixed(1)}s du leader`
+        const gapToLeader = driver.pos > 1
+          ? (() => {
+              const leaderTime = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime)[0]?.totalTime;
+              return leaderTime != null ? ` · ${((driver.totalTime - leaderTime) / 1000).toFixed(1)}s du leader` : '';
+            })()
           : '';
         const warmupNote = repairDesc ? `
   ${repairDesc}` : ' *Pneus à chauffer — 2 tours lents.*';
@@ -2903,7 +2940,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         // Tracker undercut
         if (reason === 'undercut') {
           undercutTracker.set(String(driver.pilot._id), { pitLap: lap, pilotAheadPos: posIn - 1 });
-          driver.lastUndercutLap = lap; // cooldown : évite double undercut trop tôt
+          driver.lastUndercutLap = lapsRemaining; // cooldown en tours restants — évite double undercut trop tôt
         }
 
         events.push({ priority: repairDesc ? 9 : 7, gif: pickGif('pit_stop'), text: pick(pitFlavors) });
@@ -2978,35 +3015,19 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       const posGained = driver.lastPos - driver.pos; // positif si remonté
 
       // ── Gain de 2+ positions ───────────────────────────────
-      // Autorisé uniquement si des pits/DNF se sont produits devant (pas par rythme pur)
+      // Seulement si un DNF s'est produit CE tour dans cette zone de piste
       if (movedUp && posGained >= 2) {
-        // Vérifier si des voitures devant ont pitté ou DNF ce tour (justifie le saut)
-        const pitOrDnfAhead = drivers.filter(d =>
-          (d.pittedThisLap || d.dnfLap === lap) &&
-          d.startPos < driver.startPos
-        ).length;
-        // Si aucune raison externe ET gain > 3 positions : cap artificiel (anti-TP)
-        if (pitOrDnfAhead === 0 && posGained > 3) {
-          // Forcer la position à lastPos - 3 maximum (limiter le saut inexpliqué)
-          const cappedPos = driver.lastPos - 3;
-          const cappedDriver = drivers.find(d => !d.dnf && d.pos === cappedPos);
-          if (cappedDriver) {
-            // Swap totalTime pour rétablir un ordre réaliste
-            const tmp = driver.totalTime;
-            driver.totalTime = cappedDriver.totalTime + 100;
-            drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
-          }
-        }
-        if (posGained >= 2) {
-          const isTop8Move = driver.pos <= 8 || driver.lastPos <= 8;
+        if (lapDnfs.length > 0) {
+          const isTop8Move = driver.pos <= 6 || driver.lastPos <= 6;
           if (isTop8Move) {
             events.push({
-              priority: 5,
-              text: `📊 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** remonte de **P${driver.lastPos}→P${driver.pos}** (+${driver.lastPos - driver.pos}) suite aux arrêts / incidents devant.`,
+              priority: 4,
+              text: `📊 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** remonte **P${driver.lastPos}→P${driver.pos}** après abandon.`,
             });
           }
-          continue;
         }
+        // Ne pas traiter comme un dépassement normal
+        continue;
       }
 
       // ── Dépassement (le pilote a gagné UNE place) ──────────
@@ -3186,15 +3207,16 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
     // Helper: état d'usure pneu
     const tireWearLabel = (d) => {
-      const td = TIRE[d.tireCompound];
+      const td  = TIRE[d.tireCompound];
       if (!td) return '⬜';
-      const worn  = d.tireWear || 0;
-      const deg   = td.deg || 0.016;
-      const thr   = deg > 0 ? Math.round(30 / deg) : 35;
-      const wup   = (d.warmupLapsLeft || 0) > 0 ? '🌡️' : '';
-      if (worn >= thr * 0.85) return `${td.emoji}🔴${wup}`;
-      if (worn >= thr * 0.60) return `${td.emoji}🟡${wup}`;
-      return `${td.emoji}🟢${wup}`;
+      const worn = d.tireWear || 0;
+      const deg  = td.deg || 0.0016;
+      // tireLifeRef = seuil de tours avant cliff (SOFT~25, MEDIUM~38, HARD~60)
+      const thr  = deg > 0 ? Math.round(0.06 / deg) : 38;
+      const wup  = (d.warmupLapsLeft || 0) > 0 ? '🌡️' : '';
+      if (worn >= thr * 1.0) return `${td.emoji}🔴${wup}`; // au-delà du seuil
+      if (worn >= thr * 0.65) return `${td.emoji}🟡${wup}`; // 65-100% du seuil
+      return `${td.emoji}🟢${wup}`; // < 65% du seuil
     };
 
     let standingsText = '';
@@ -3228,6 +3250,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       (scState.state === 'VSC' ? ` 🟡 **VSC**`        : '');
     await send([header, eventsText, standingsText].filter(Boolean).join('\n'));
   }
+
+  global.activeRaces?.delete(raceKey);
+  if (raceAborted) return { results: [], collisions: [] };
 
   // ══════════════════════════════════════════════════════════
   // RÉSULTATS FINAUX
@@ -3533,9 +3558,17 @@ async function getActiveSeason() {
   return Season.findOne({ status: { $in: ['active','transfer'] } });
 }
 
-async function getCurrentRace(season) {
+async function getCurrentRace(season, slot = null) {
   if (!season) return null;
-  return Race.findOne({ seasonId: season._id, status: { $ne: 'done' } }).sort({ index: 1 });
+  const query = { seasonId: season._id, status: { $ne: 'done' } };
+  if (slot !== null) query.slot = slot;
+  return Race.findOne(query).sort({ index: 1 });
+}
+
+// Détermine le slot actuel selon l'heure (Paris)
+function getCurrentSlot() {
+  const hour = new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris', hour: 'numeric', hour12: false });
+  return parseInt(hour) >= 16 ? 1 : 0; // avant 16h = slot matin, après = slot soir
 }
 
 async function getAllPilotsWithTeams() {
@@ -3652,11 +3685,14 @@ async function createNewSeason() {
 
   const startDate = new Date();
   startDate.setHours(0,0,0,0);
-  startDate.setDate(startDate.getDate() + 1); // GP 1 = demain, jamais le jour même
+  startDate.setDate(startDate.getDate() + 1); // GP 1 = demain
+  // 2 GP par jour : slot 0 (11h/13h/15h) et slot 1 (17h/18h/20h)
+  // Un GP toutes les 12h → i=0 slot0 jour1, i=1 slot1 jour1, i=2 slot0 jour2...
   for (let i = 0; i < CIRCUITS.length; i++) {
-    const d = new Date(startDate);
-    d.setDate(d.getDate() + Math.round(i * 1.2));
-    await Race.create({ seasonId: season._id, index: i, ...CIRCUITS[i], scheduledDate: d, status: 'upcoming' });
+    const d    = new Date(startDate);
+    const slot = i % 2; // 0 = matin, 1 = soir
+    d.setDate(d.getDate() + Math.floor(i / 2)); // 2 GP par jour
+    await Race.create({ seasonId: season._id, index: i, slot, ...CIRCUITS[i], scheduledDate: d, status: 'upcoming' });
   }
 
   const pilots = await Pilot.find({ teamId: { $ne: null } });
@@ -4004,6 +4040,10 @@ const commands = [
   new SlashCommandBuilder().setName('admin_inject_results')
     .setDescription('[ADMIN] Injecte manuellement les résultats d\'un GP terminé sans points')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP — défaut: dernier GP done').setMinValue(0)),
+  new SlashCommandBuilder().setName('admin_stop_race')
+    .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
+  new SlashCommandBuilder().setName('admin_fix_slots')
+    .setDescription('[ADMIN] Recalcule les slots (matin/soir) de tous les GP de la saison active — à lancer après passage 2 GP/jour'),
   new SlashCommandBuilder().setName('admin_skip_gp')
     .setDescription('[ADMIN] Saute le GP en cours sans le simuler (rattraper un retard)')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP à sauter — défaut: GP en cours').setMinValue(0)),
@@ -4410,7 +4450,7 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race'].includes(commandName);
@@ -5050,9 +5090,10 @@ async function handleInteraction(interaction) {
     const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
     const lines = races.map(r => {
       const d = new Date(r.scheduledDate);
-      const dateStr = `${d.getDate()}/${d.getMonth()+1}`;
-      const status  = r.status === 'done' ? '✅' : '🔜';
-      return `${status} ${r.emoji} **${r.circuit}** — ${dateStr} ${styleEmojis[r.gpStyle]}`;
+      const dateStr  = `${d.getDate()}/${d.getMonth()+1}`;
+      const slotTag  = r.slot === 1 ? '🌆 17h' : '🌅 11h';
+      const status   = r.status === 'done' ? '✅' : r.status === 'practice_done' ? '🔧' : r.status === 'quali_done' ? '⏱️' : '🔜';
+      return `${status} ${r.emoji} **${r.circuit}** — ${dateStr} ${slotTag} ${styleEmojis[r.gpStyle]}`;
     });
 
     const chunks = [];
@@ -5485,7 +5526,7 @@ async function handleInteraction(interaction) {
       const styleEmojis  = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
       const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
 
-      const { grid, weather, q3Size, q2Size } = await simulateQualifying(testRace, testPilots, testTeams);
+      const { grid, weather, q3Size, q2Size, allTimes } = await simulateQualifying(testRace, testPilots, testTeams);
 
       const q3Grid  = grid.slice(0, q3Size);
       const q2Grid  = grid.slice(q3Size, q2Size);
@@ -5695,13 +5736,13 @@ async function handleInteraction(interaction) {
           '1️⃣ Les joueurs créent leurs pilotes : `/create_pilot` (2 pilotes max par joueur)',
           '2️⃣ Attribution des écuries via `/admin_draft_start` (snake draft) ou `/admin_transfer`',
           '3️⃣ `/admin_new_season` — crée la saison et les 24 GP',
-          '4️⃣ Courses auto planifiées : **11h** Essais · **15h** Qualifs · **18h** Course',
+          '4️⃣ Courses auto planifiées : **🌅 11h** EL · **13h** Q · **15h** Course · **🌆 17h** EL · **18h** Q · **20h** Course',
           '5️⃣ Fin de saison : `/admin_transfer` — IA génère les offres de transfert',
         ].join('\n') },
         { name: '⚙️ Infos système', value: [
           '🏎️ **2 pilotes max** par joueur Discord — nationalité, numéro et stats personnalisables',
           `📊 **${TOTAL_STAT_POOL} points** à répartir à la création (base ${BASE_STAT_VALUE} par stat)`,
-          '🔔 Keep-alive actif · Ping toutes les 8 min · Courses auto 11h/15h/18h (Europe/Paris)',
+          '🔔 Keep-alive actif · Ping toutes les 8 min · GP auto : 🌅11h/13h/15h · 🌆17h/18h/20h (Paris)',
         ].join('\n') },
       ).setFooter({ text: 'F1 PL Bot — Panneau Admin v2.1' });
     return interaction.editReply({ embeds: [adminHelpEmbed], ephemeral: true });
@@ -5759,7 +5800,7 @@ async function handleInteraction(interaction) {
           '`/concept` — Présentation complète du jeu (pour les nouveaux !)',
           '`/f1` — Affiche ce panneau',
         ].join('\n') },
-      ).setFooter({ text: 'Courses auto : 11h Essais · 15h Qualif · 18h Course (Europe/Paris) · 2 pilotes max par joueur' });
+      ).setFooter({ text: 'GP auto : 🌅11h/13h/15h · 🌆17h/18h/20h (Paris) · 2 pilotes max par joueur' });
     return interaction.editReply({ embeds: [f1Embed], ephemeral: true });
   }
 
@@ -6055,7 +6096,7 @@ async function handleInteraction(interaction) {
       .addFields(
         { name: '📅 Calendrier & Courses', value:
           '**24 GP** par saison (vrais circuits F1) · **1 weekend par jour** · Chaque circuit a un style : 🏙️ Urbain · 💨 Rapide · ⚙️ Technique · 🔀 Mixte · 🔋 Endurance\n' +
-          '> `11h` 🔧 Essais · `15h` ⏱️ Qualifs Q1/Q2/Q3 · `18h` 🏁 Course *(heure Europe/Paris, auto)*' },
+          '> 🌅 `11h` 🔧 EL · `13h` ⏱️ Q · `15h` 🏁 Course  \n> 🌆 `17h` 🔧 EL · `18h` ⏱️ Q · `20h` 🏁 Course *(Europe/Paris)*' },
         { name: '🧬 Créer un pilote — `/create_pilot`', value:
           '• **Nationalité** + **numéro de course** (1–99, unique)\n' +
           `• **${TOTAL_STAT_POOL} points** à répartir sur 7 stats (base fixe ${BASE_STAT_VALUE} par stat · max +${MAX_STAT_BONUS}/stat)\n` +
@@ -6116,6 +6157,51 @@ async function handleInteraction(interaction) {
     const gpIndex = interaction.options.getInteger('gp_index');
     await interaction.reply({ content: `🏁 Course lancée${gpIndex !== null ? ` (GP index ${gpIndex})` : ''} ! Suivez le direct dans le channel de course.`, ephemeral: true });
     runRace(interaction.channel, gpIndex).catch(e => console.error('admin_force_race error:', e.message));
+  }
+
+  if (commandName === 'admin_stop_race') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    const races = global.activeRaces;
+    if (!races || races.size === 0)
+      return interaction.reply({ content: '❌ Aucune course en cours.', ephemeral: true });
+    // Aborter toutes les courses actives (normalement 1 seule)
+    let count = 0;
+    for (const [, r] of races) { r.abort(); count++; }
+    return interaction.reply({ content: `🛑 **Arrêt envoyé** — ${count} course(s) interrompue(s). Les résultats ne seront pas comptabilisés.`, ephemeral: false });
+  }
+
+  if (commandName === 'admin_fix_slots') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const season = await getActiveSeason();
+      if (!season) return interaction.editReply('❌ Pas de saison active.');
+      const races = await Race.find({ seasonId: season._id }).sort({ index: 1 });
+      if (!races.length) return interaction.editReply('❌ Aucun GP trouvé.');
+      // Regrouper les races par jour (date sans heure)
+      const byDay = new Map();
+      for (const r of races) {
+        const key = new Date(r.scheduledDate).toDateString();
+        if (!byDay.has(key)) byDay.set(key, []);
+        byDay.get(key).push(r);
+      }
+      // Réassigner les slots en s'assurant qu'il y a exactement 2 GP/jour
+      let updated = 0;
+      for (const [, dayRaces] of byDay) {
+        // Trier par index pour avoir un ordre stable
+        dayRaces.sort((a, b) => a.index - b.index);
+        for (let i = 0; i < dayRaces.length; i++) {
+          const newSlot = i % 2; // 0 = matin, 1 = soir
+          await Race.findByIdAndUpdate(dayRaces[i]._id, { slot: newSlot });
+          updated++;
+        }
+      }
+      return interaction.editReply(`✅ **${updated}** GP mis à jour avec slots matin/soir.
+> 🌅 slot 0 : 11h EL · 13h Q · 15h Course
+> 🌆 slot 1 : 17h EL · 18h Q · 20h Course`);
+    } catch(e) { return interaction.editReply(`❌ Erreur : ${e.message}`); }
   }
 
   if (commandName === 'admin_inject_results') {
@@ -6356,16 +6442,26 @@ async function isRaceDay(race, override) {
   if (override) return true;
   const today = new Date(); today.setHours(0,0,0,0);
   const d     = new Date(race.scheduledDate); d.setHours(0,0,0,0);
-  return d.getTime() === today.getTime();
+  if (d.getTime() !== today.getTime()) return false;
+  // Vérifier aussi que le slot correspond à l'heure actuelle
+  const currentSlot = getCurrentSlot();
+  if (race.slot !== undefined && race.slot !== currentSlot) return false;
+  return true;
 }
 
 async function runPractice(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
+  const slot   = gpIndex !== null ? null : getCurrentSlot();
   const race   = gpIndex !== null
     ? await Race.findOne({ seasonId: season._id, index: gpIndex })
-    : await getCurrentRace(season);
+    : await getCurrentRace(season, slot);
   if (!race) return;
   if (!await isRaceDay(race, override)) return;
+  // Garde : ne pas relancer si déjà fait
+  if (race.status !== 'upcoming' && !override) {
+    console.log(`[runPractice] Déjà fait pour ${race.circuit} slot=${race.slot} (status=${race.status})`);
+    return;
+  }
 
   const { pilots, teams } = await getAllPilotsWithTeams();
   if (!pilots.length) return;
@@ -6405,7 +6501,7 @@ async function runPractice(override, gpIndex = null) {
       `Météo : **${weatherLabels[weather] || weather}** · Style : **${race.gpStyle.toUpperCase()}** ${styleEmojis[race.gpStyle] || ''}\n\n` +
       lines + '\n\n' + pick(chaosNotes)
     )
-    .setFooter({ text: 'Classement complet · Qualifications à 15h 🏎️' });
+    .setFooter({ text: race.slot === 1 ? 'Classement complet · Qualifications à 18h 🏎️' : 'Classement complet · Qualifications à 13h 🏎️' });
 
   await channel.send({ embeds: [embed] });
   await Race.findByIdAndUpdate(race._id, { status: 'practice_done' });
@@ -6413,16 +6509,21 @@ async function runPractice(override, gpIndex = null) {
 
 async function runQualifying(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
+  const slot   = gpIndex !== null ? null : getCurrentSlot();
   const race   = gpIndex !== null
     ? await Race.findOne({ seasonId: season._id, index: gpIndex })
-    : await getCurrentRace(season);
+    : await getCurrentRace(season, slot);
   if (!race) return;
   if (!await isRaceDay(race, override)) return;
+  if (race.status !== 'practice_done' && !override) {
+    console.log(`[runQualifying] Mauvais status pour ${race.circuit} (status=${race.status})`);
+    return;
+  }
 
   const { pilots, teams } = await getAllPilotsWithTeams();
   if (!pilots.length) return;
 
-  const { grid, weather, q3Size, q2Size } = await simulateQualifying(race, pilots, teams);
+  const { grid, weather, q3Size, q2Size, allTimes } = await simulateQualifying(race, pilots, teams);
   const channel = await getRaceChannel(override);
 
   await Race.findByIdAndUpdate(race._id, {
@@ -6462,6 +6563,20 @@ async function runQualifying(override, gpIndex = null) {
   await sleepMs(3000);
 
   // Résultat Q1 — montrer le bas du tableau (les éliminés)
+  // Drama Q1 : détection gros noms éliminés + temps intermédiaires surprenants
+  const q1DramaLine = (() => {
+    // Chercher qui a le meilleur rang classement parmi les éliminés
+    const bestElim = q1Grid[0]; // premier éliminé = meilleur temps parmi les sortants
+    if (!bestElim) return '';
+    // Comparer le temps du dernier qualifié vs premier éliminé
+    const lastQ2   = allTimes[q2Size - 1];
+    const gapMs    = bestElim.time - lastQ2.time;
+    const gapStr   = (gapMs / 1000).toFixed(3);
+    if (gapMs < 100) return `\n⚠️ *${bestElim.teamEmoji}**${bestElim.pilotName}** éliminé à seulement **${gapStr}s** — scénario cruel !*`;
+    if (gapMs < 300) return `\n⚠️ *${bestElim.teamEmoji}**${bestElim.pilotName}** à **${gapStr}s** de la qualification — si près...*`;
+    return '';
+  })();
+
   const q1EliminEmbed = new EmbedBuilder()
     .setTitle(`🔴 Q1 TERMINÉ — ${race.emoji} ${race.circuit}`)
     .setColor('#FF4444')
@@ -6471,7 +6586,7 @@ async function runQualifying(override, gpIndex = null) {
         const gap = `+${((g.time - poleman.time) / 1000).toFixed(3)}s`;
         return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
       }).join('\n') +
-      `\n\n**Passage en Q2 :** Top ${q2Size} pilotes ✅`
+      `\n\n**Passage en Q2 :** Top ${q2Size} pilotes ✅` + q1DramaLine
     );
   await channel.send({ embeds: [q1EliminEmbed] });
   await sleepMs(4000);
@@ -6511,6 +6626,51 @@ async function runQualifying(override, gpIndex = null) {
   await channel.send({ embeds: [q2EliminEmbed] });
   await sleepMs(4000);
 
+  // ─── DRAMA CLASSEMENT CHAMPIONNAT ─────────────────────────
+  // Si un pilote haut au championnat est mal qualifié → drama
+  try {
+    const season = await getActiveSeason();
+    if (season) {
+      const champStandings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).limit(8);
+      const allPilotsForDrama = await Pilot.find();
+      const pilotMapD = new Map(allPilotsForDrama.map(p => [String(p._id), p]));
+      const allTeamsD = await Team.find();
+      const teamMapD  = new Map(allTeamsD.map(t => [String(t._id), t]));
+
+      const dramaLines = [];
+      champStandings.forEach((s, champPos) => {
+        const pilot = pilotMapD.get(String(s.pilotId));
+        if (!pilot) return;
+        const gridEntry = grid.find(g => String(g.pilotId) === String(s.pilotId));
+        if (!gridEntry) return;
+        const gridPos = grid.indexOf(gridEntry) + 1;
+        const team = teamMapD.get(String(pilot.teamId));
+        const emoji = team?.emoji || '';
+
+        // Drama si un top-5 championnat est qualifié mal (P8+)
+        if (champPos <= 4 && gridPos >= 8) {
+          const gap = ((gridEntry.time - grid[0].time) / 1000).toFixed(3);
+          const severity = gridPos >= 14 ? '🚨' : '⚠️';
+          dramaLines.push(`${severity} **${emoji}${pilot.name}** — P${champPos + 1} au championnat, seulement **P${gridPos}** en grille ! *+${gap}s — session cauchemardesque pour le camp ${team?.name || 'de l\'écurie'}.*`);
+        }
+        // Drama si le leader du championnat est en pole
+        if (champPos === 0 && gridPos === 1) {
+          dramaLines.push(`👑 **${emoji}${pilot.name}** confirme son statut de leader en décrochant la **pole** ! *Le championnat passerait bien par la victoire ici...*`);
+        }
+        // Drama si le P2 du championnat devance le leader en grille
+        if (champPos === 1 && gridPos < (grid.findIndex(g => String(g.pilotId) === String(champStandings[0]?.pilotId)) + 1)) {
+          const leaderPilot = pilotMapD.get(String(champStandings[0]?.pilotId));
+          dramaLines.push(`🔥 **${emoji}${pilot.name}** (P2 championnat) devant **${leaderPilot?.name || 'le leader'}** en grille ! *Retournement de situation possible demain.*`);
+        }
+      });
+
+      if (dramaLines.length > 0) {
+        await channel.send(`📊 **CONTEXT CHAMPIONNAT :**\n${dramaLines.slice(0,3).join('\n')}`);
+        await sleepMs(2500);
+      }
+    }
+  } catch(e) { console.error('Quali drama error:', e.message); }
+
   // ─── Q3 ───────────────────────────────────────────────────
   const q3Names = q3Grid.map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
   await channel.send(
@@ -6531,26 +6691,36 @@ async function runQualifying(override, gpIndex = null) {
   await sleepMs(1500);
 
   // Embed final Q3 — grille de départ
+  // Grille F1-style : P1 gauche, P2 droite, P3 gauche, P4 droite...
+  // ┌─────────────────────────────────────────┐
+  // │ P1 [gauche]    P2 [droite]              │
+  // │ P3 [gauche]    P4 [droite]              │
+  // └─────────────────────────────────────────┘
+  const buildGridDisplay = (gridArr, startIdx = 0) => {
+    const rows = [];
+    for (let i = 0; i < gridArr.length; i += 2) {
+      const left  = gridArr[i];
+      const right = gridArr[i + 1];
+      const posL  = startIdx + i + 1;
+      const posR  = startIdx + i + 2;
+      const leftStr  = left  ? `\`P${String(posL).padStart(2,' ')}\` ${left.teamEmoji}**${left.pilotName}**`  : '';
+      const rightStr = right ? `\`P${String(posR).padStart(2,' ')}\` ${right.teamEmoji}**${right.pilotName}**` : '';
+      rows.push(`${leftStr.padEnd(28,' ')}${rightStr}`);
+    }
+    return rows.join('\n');
+  };
+
+  const fullGrid = [...q3Grid, ...q2Grid, ...q1Grid];
+  const gridLines = buildGridDisplay(fullGrid);
+
   const q3Embed = new EmbedBuilder()
-    .setTitle(`🏆 Q3 — GRILLE DE DÉPART OFFICIELLE — ${race.emoji} ${race.circuit}`)
+    .setTitle(`🏆 GRILLE DE DÉPART — ${race.emoji} ${race.circuit}`)
     .setColor('#FFD700')
     .setDescription(
-      `Météo Q : **${weatherLabels[weather] || weather}**\n\n` +
-      q3Grid.map((g, i) => {
-        const gap    = i === 0 ? '🏆 **POLE POSITION**' : `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-        const medal  = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`P${i+1}\``;
-        return `${medal} ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}`;
-      }).join('\n') +
-      `\n\n— — —\n` +
-      q2Grid.map((g, i) => {
-        const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-        return `\`P${q3Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
-      }).join('\n') +
-      `\n` +
-      q1Grid.map((g, i) => {
-        const gap = `+${((g.time - q3Grid[0].time) / 1000).toFixed(3)}s`;
-        return `\`P${q2Size + 1 + i}\` ${g.teamEmoji} ${g.pilotName} — ${msToLapStr(g.time)} — ${gap}`;
-      }).join('\n')
+      `**🏆 POLE : ${poleman.teamEmoji}${poleman.pilotName}** — ${msToLapStr(poleman.time)}\n` +
+      (q3Grid[1] ? `**2ème : ${q3Grid[1].teamEmoji}${q3Grid[1].pilotName}** — +${((q3Grid[1].time - poleman.time)/1000).toFixed(3)}s` : '') +
+      `\n\n${gridLines}\n\n` +
+      `Météo Q : **${weatherLabels[weather] || weather}**`
     );
   await channel.send({ embeds: [q3Embed] });
   await sleepMs(1500);
@@ -6713,9 +6883,10 @@ async function sendSeasonCeremony(season, channel) {
 
 async function runRace(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
+  const slot   = gpIndex !== null ? null : getCurrentSlot();
   const race   = gpIndex !== null
     ? await Race.findOne({ seasonId: season._id, index: gpIndex })
-    : await getCurrentRace(season);
+    : await getCurrentRace(season, slot);
   if (!race || race.status === 'done' || race.status === 'race_computed') return;
   if (!await isRaceDay(race, override)) return;
 
@@ -6893,11 +7064,17 @@ async function runRace(override, gpIndex = null) {
 // ============================================================
 
 function startScheduler() {
-  cron.schedule('0 11 * * *', () => runPractice().catch(console.error), { timezone: 'Europe/Paris' });
-  cron.schedule('0 15 * * *', () => runQualifying().catch(console.error), { timezone: 'Europe/Paris' });
-  cron.schedule('0 18 * * *', () => runRace().catch(console.error),      { timezone: 'Europe/Paris' });
-  console.log('✅ Scheduler : 11h EL · 15h Q · 18h Course (Europe/Paris)');
-  console.log('✅ Keep-alive : ping toutes les 15min');
+  // ── Slot 0 : GP matin (11h essais · 13h qualifs · 15h course) ──
+  cron.schedule('0 11 * * *', () => runPractice().catch(console.error),   { timezone: 'Europe/Paris' });
+  cron.schedule('0 13 * * *', () => runQualifying().catch(console.error), { timezone: 'Europe/Paris' });
+  cron.schedule('0 15 * * *', () => runRace().catch(console.error),       { timezone: 'Europe/Paris' });
+  // ── Slot 1 : GP soir (17h essais · 18h qualifs · 20h course) ──
+  cron.schedule('0 17 * * *', () => runPractice().catch(console.error),   { timezone: 'Europe/Paris' });
+  cron.schedule('0 18 * * *', () => runQualifying().catch(console.error), { timezone: 'Europe/Paris' });
+  cron.schedule('0 20 * * *', () => runRace().catch(console.error),       { timezone: 'Europe/Paris' });
+  console.log('✅ Scheduler slot 0 : 11h EL · 13h Q · 15h Course');
+  console.log('✅ Scheduler slot 1 : 17h EL · 18h Q · 20h Course');
+  console.log('✅ Keep-alive : ping toutes les 8min');
 }
 
 // ── Vérification des variables d'environnement ──────────────
