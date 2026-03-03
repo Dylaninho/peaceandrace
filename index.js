@@ -4721,7 +4721,7 @@ function pilotLabel(pilot) {
 // ============================================================
 
 // Appelé après chaque course — distribue des devPoints selon les résultats
-// Chaque équipe investit ensuite dans une stat aléatoire
+// Chaque équipe investit ensuite dans une stat prioritaire
 async function evolveCarStats(raceResults, teams) {
   // Points constructeurs par résultat de course
   const teamPoints = {};
@@ -4732,33 +4732,44 @@ async function evolveCarStats(raceResults, teams) {
   }
 
   for (const team of teams) {
-    const key    = String(team._id);
-    const pts    = teamPoints[key] || 0;
-    // Plus une équipe marque de points, plus elle développe
-    // Budget influe aussi (les grosses équipes développent plus vite)
-    const devGained = Math.round(pts * 0.8 + (team.budget / 100) * 2);
+    const key = String(team._id);
+    const pts = teamPoints[key] || 0;
+
+    // ── Calcul des devPoints gagnés ──────────────────────────
+    // Formule : points de course × 1.5 + bonus budget + gain de base garanti
+    // Le gain de base (3 pts) assure que même les équipes sans points progressent
+    // Le budget amplifie légèrement l'avantage des grosses structures
+    const devGained = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3);
     const newDevPts = team.devPoints + devGained;
 
-    // Seuil : 50 devPoints = 1 point de stat gagné aléatoirement
-    let gained = 0;
-    let remaining = newDevPts;
-    while (remaining >= 50) {
-      remaining -= 50;
-      gained++;
-    }
+    // ── Seuil abaissé : 30 devPts = 1 point de stat ─────────
+    // Avant : 50 → le bas de grille ne progressait presque jamais
+    // Maintenant :
+    //   P1  (~35+ pts) → +60 devPts → 2 upgrades/course
+    //   P5  (~18 pts)  → +30 devPts → 1 upgrade/course
+    //   P10 (~1 pt)    → +8  devPts → 1 upgrade toutes les ~4 courses
+    //   Sans points    → +3  devPts → 1 upgrade toutes les ~10 courses (ne stagne plus)
+    const THRESHOLD = 40;
+    let gained    = Math.floor(newDevPts / THRESHOLD);
+    let remaining = newDevPts % THRESHOLD;
 
     if (gained > 0) {
-      // Choisir la stat à améliorer — priorité à la stat la plus faible (réaliste)
       const statKeys = ['vitesseMax','drs','refroidissement','dirtyAir','conservationPneus','vitesseMoyenne'];
-      const statVals = statKeys.map(k => ({ key: k, val: team[k] }));
-      statVals.sort((a,b) => a.val - b.val);
-      // 60% chance d'améliorer la plus faible, sinon aléatoire
-      const targetStat = Math.random() < 0.6 ? statVals[0].key : pick(statKeys);
-      const newVal = clamp(team[targetStat] + gained, 0, 99);
-      await Team.findByIdAndUpdate(team._id, {
-        [targetStat]: newVal,
-        devPoints: remaining,
-      });
+      const statVals = statKeys.map(k => ({ key: k, val: team[k] })).sort((a,b) => a.val - b.val);
+
+      const updates = {};
+      for (let i = 0; i < gained; i++) {
+        // Chaque upgrade : 65% sur la stat la plus faible, sinon aléatoire parmi les 3 plus faibles
+        const weakPool = statVals.slice(0, 3).map(s => s.key);
+        const targetStat = Math.random() < 0.65 ? statVals[0].key : pick(weakPool);
+        updates[targetStat] = clamp((updates[targetStat] ?? team[targetStat]) + 1, 0, 99);
+        // Mettre à jour statVals pour que les prochains upgrades de la boucle restent cohérents
+        const sv = statVals.find(s => s.key === targetStat);
+        if (sv) sv.val = updates[targetStat];
+        statVals.sort((a,b) => a.val - b.val);
+      }
+      updates.devPoints = remaining;
+      await Team.findByIdAndUpdate(team._id, updates);
     } else {
       await Team.findByIdAndUpdate(team._id, { devPoints: newDevPts });
     }
@@ -5713,7 +5724,7 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_fix_emojis', 'admin_stop_race'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race'].includes(commandName);
