@@ -2408,14 +2408,16 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   };
 
   // ══════════════════════════════════════════════════════════
-  // PRE-RACE — Grille de départ complète
+  // PRE-RACE — Grille de départ (format F1 : P1 gauche · P2 droite · P3 gauche · P4 droite...)
   // ══════════════════════════════════════════════════════════
-  const gridLines = drivers.map((d, i) => {
+  const makeGridLine = (d, pos) => {
     const ov   = overallRating(d.pilot);
     const tier = ratingTier(ov);
-    const pos  = String(i + 1).padStart(2, ' ');
-    return `\`P${pos}\` ${d.team.emoji} **${d.pilot.name}** ${tier.badge}**${ov}** — ${TIRE[d.tireCompound].emoji} ${TIRE[d.tireCompound].label}`;
-  });
+    return `\`P${String(pos).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** ${tier.badge}${ov} ${TIRE[d.tireCompound].emoji}`;
+  };
+  // Positions impaires → côté gauche (P1, P3, P5...), positions paires → côté droit (P2, P4, P6...)
+  const oddLines  = drivers.filter((_, i) => i % 2 === 0).map((d, i) => makeGridLine(d, i * 2 + 1));
+  const evenLines = drivers.filter((_, i) => i % 2 === 1).map((d, i) => makeGridLine(d, i * 2 + 2));
 
   // Discord embed description limit 4096 — split grid if needed
   const half      = Math.ceil(drivers.length / 2);
@@ -2427,8 +2429,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     .setColor('#FF1801')
     .setDescription(`${styleEmojis[gpStyle]} **${gpStyle.toUpperCase()}** · ${weatherLabels[weather]} · **${totalLaps} tours**`)
     .addFields(
-      { name: '📋 Positions 1–' + half,       value: gridLeft  || '—', inline: true },
-      { name: '📋 Positions ' + (half+1) + '–' + drivers.length, value: gridRight || '—', inline: true },
+      { name: '◀️ Côté gauche (impairs)', value: oddLines.join('\n')  || '—', inline: true },
+      { name: '▶️ Côté droit (pairs)',    value: evenLines.join('\n') || '—', inline: true },
     );
   await sendEmbed(gridEmbed);
   await sleep(3000);
@@ -3102,16 +3104,15 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
       // ── Dépassement (le pilote a gagné UNE place) ──────────
       if (movedUp && driver.lastPos === driver.pos + 1) {
-        // Chercher le pilote qui était à cette position et qui n'a pas pité
+        // Chercher qui occupait cette position AVANT ce tour (via lastPos)
+        // et qui est maintenant derrière le dépassant
         const passed = ranked.find(d =>
-          d.pos === driver.lastPos &&
+          d.lastPos === driver.pos &&
+          d.pos > driver.pos &&
           !d.pittedThisLap &&
           String(d.pilot._id) !== String(driver.pilot._id)
         );
         if (!passed) continue;
-        // Le pilote passé doit avoir reculé : sa lastPos doit être inférieure à sa pos actuelle
-        // On est plus tolérant ici : on vérifie juste qu'il n'a pas pité et qu'il a reculé
-        if (passed.pos <= passed.lastPos) continue; // il n'a pas reculé → pas un vrai dépassement
 
         // Gap pré-tour
         const preLapD = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
@@ -3283,10 +3284,10 @@ const exitNeighborStr = neighborAhead && neighborBehind
       const deg  = td.deg || 0.0016;
       // tireLifeRef = seuil de tours avant cliff (SOFT~25, MEDIUM~38, HARD~60)
       const thr  = deg > 0 ? Math.round(0.06 / deg) : 38;
-      const wup  = (d.warmupLapsLeft || 0) > 0 ? '🌡️' : '';
-      if (worn >= thr * 1.0) return `${td.emoji}🔴${wup}`; // au-delà du seuil
-      if (worn >= thr * 0.65) return `${td.emoji}🟡${wup}`; // 65-100% du seuil
-      return `${td.emoji}🟢${wup}`; // < 65% du seuil
+      const wup  = (d.warmupLapsLeft || 0) > 0 ? ' 🌡️' : '';
+      if (worn >= thr * 1.0) return `${td.emoji} 🔴${wup}`; // au-delà du seuil
+      if (worn >= thr * 0.65) return `${td.emoji} 🟡${wup}`; // 65-100% du seuil
+      return `${td.emoji} 🟢${wup}`; // < 65% du seuil
     };
 
     let standingsText = '';
@@ -4117,6 +4118,12 @@ const commands = [
   new SlashCommandBuilder().setName('admin_skip_gp')
     .setDescription('[ADMIN] Saute le GP en cours sans le simuler (rattraper un retard)')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP à sauter — défaut: GP en cours').setMinValue(0)),
+
+  new SlashCommandBuilder().setName('admin_scheduler_pause')
+    .setDescription('[ADMIN] ⏸️ Met en pause le lancement automatique des GPs (EL · Qualifs · Course)'),
+
+  new SlashCommandBuilder().setName('admin_scheduler_resume')
+    .setDescription('[ADMIN] ▶️ Réactive le lancement automatique des GPs'),
 
   new SlashCommandBuilder().setName('admin_set_race_results')
     .setDescription(`[ADMIN] Saisit manuellement le classement d'un GP (si la simulation a planté)`)
@@ -5786,6 +5793,8 @@ async function handleInteraction(interaction) {
           '`/admin_skip_gp` — Saute un GP sans le simuler',
           '`/admin_evolve_cars` — Affiche l\'état actuel des stats voitures',
           '`/admin_reset_rivalites` — Réinitialise toutes les rivalités en début de saison',
+          `\`/admin_scheduler_pause\` — ⏸️ Met en pause le scheduler auto${global.schedulerPaused ? ' *(actuellement en pause)*' : ''}`,
+          `\`/admin_scheduler_resume\` — ▶️ Réactive le scheduler auto${!global.schedulerPaused ? ' *(actuellement actif)*' : ''}`,
         ].join('\n') },
         { name: '🔄 Transferts & Draft', value: [
           '`/admin_transfer` — Ouvre la période de transfert (IA génère les offres automatiquement)',
@@ -6241,6 +6250,26 @@ async function handleInteraction(interaction) {
     let count = 0;
     for (const [, r] of races) { r.abort(); count++; }
     return interaction.reply({ content: `🛑 **Arrêt envoyé** — ${count} course(s) interrompue(s). Les résultats ne seront pas comptabilisés.`, ephemeral: false });
+  }
+
+  if (commandName === 'admin_scheduler_pause') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    global.schedulerPaused = true;
+    return interaction.reply({
+      content: '⏸️ **Scheduler mis en pause.** Les EL, qualifications et courses ne se déclencheront plus automatiquement.\n> Utilisez `/admin_force_practice`, `/admin_force_quali`, `/admin_force_race` pour lancer manuellement.\n> Réactivez avec `/admin_scheduler_resume`.',
+      ephemeral: false,
+    });
+  }
+
+  if (commandName === 'admin_scheduler_resume') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    global.schedulerPaused = false;
+    return interaction.reply({
+      content: '▶️ **Scheduler réactivé.** Les GPs se lanceront automatiquement aux horaires habituels.\n> 🌅 11h EL · 13h Q · 15h Course\n> 🌆 17h EL · 18h Q · 20h Course',
+      ephemeral: false,
+    });
   }
 
   if (commandName === 'admin_fix_slots') {
@@ -7135,15 +7164,25 @@ async function runRace(override, gpIndex = null) {
 // ── keep-alive + cron 11h/15h/18h ─────────────────────────
 // ============================================================
 
+// ── Flag global pour pause du scheduler ──────────────────────
+global.schedulerPaused = false;
+
 function startScheduler() {
+  const guardedRun = (fn, label) => () => {
+    if (global.schedulerPaused) {
+      console.log(`[Scheduler] ⏸️ ${label} ignoré — scheduler en pause.`);
+      return;
+    }
+    fn().catch(console.error);
+  };
   // ── Slot 0 : GP matin (11h essais · 13h qualifs · 15h course) ──
-  cron.schedule('0 11 * * *', () => runPractice().catch(console.error),   { timezone: 'Europe/Paris' });
-  cron.schedule('0 13 * * *', () => runQualifying().catch(console.error), { timezone: 'Europe/Paris' });
-  cron.schedule('0 15 * * *', () => runRace().catch(console.error),       { timezone: 'Europe/Paris' });
+  cron.schedule('0 11 * * *', guardedRun(runPractice,   'Essais libres  slot 0'), { timezone: 'Europe/Paris' });
+  cron.schedule('0 13 * * *', guardedRun(runQualifying, 'Qualifications slot 0'), { timezone: 'Europe/Paris' });
+  cron.schedule('0 15 * * *', guardedRun(runRace,       'Course         slot 0'), { timezone: 'Europe/Paris' });
   // ── Slot 1 : GP soir (17h essais · 18h qualifs · 20h course) ──
-  cron.schedule('0 17 * * *', () => runPractice().catch(console.error),   { timezone: 'Europe/Paris' });
-  cron.schedule('0 18 * * *', () => runQualifying().catch(console.error), { timezone: 'Europe/Paris' });
-  cron.schedule('0 20 * * *', () => runRace().catch(console.error),       { timezone: 'Europe/Paris' });
+  cron.schedule('0 17 * * *', guardedRun(runPractice,   'Essais libres  slot 1'), { timezone: 'Europe/Paris' });
+  cron.schedule('0 18 * * *', guardedRun(runQualifying, 'Qualifications slot 1'), { timezone: 'Europe/Paris' });
+  cron.schedule('0 20 * * *', guardedRun(runRace,       'Course         slot 1'), { timezone: 'Europe/Paris' });
   console.log('✅ Scheduler slot 0 : 11h EL · 13h Q · 15h Course');
   console.log('✅ Scheduler slot 1 : 17h EL · 18h Q · 20h Course');
   console.log('✅ Keep-alive : ping toutes les 8min');
