@@ -1139,7 +1139,7 @@ function collisionDescription(attacker, victim, lap, attackerDnf, victimDnf, dam
 }
 
 // Ambiance aléatoire play-by-play — TOUJOURS quelque chose à dire
-function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle) {
+function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justRestarted = false) {
   if (!ranked.length) return null;
   const leader = ranked[0];
   const second = ranked[1];
@@ -1147,6 +1147,15 @@ function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle) {
   const pct    = lap / totalLaps;
 
   const lines = [];
+
+          // ── Tour de relance SC/VSC : commentaire neutre uniquement ──
+  if (justRestarted) {
+    return pick([
+      `🟢 **T${lap}** — Les pilotes chauffent leurs pneus après la relance. Le rythme revient progressivement.`,
+      `🟢 **T${lap}** — Course relancée. Tout le monde cherche son rythme — l'attaque viendra dans quelques tours.`,
+      `🟢 **T${lap}** — Relance propre. Les ingénieurs transmettent les consignes — qui va attaquer en premier ?`,
+    ]);
+  }
 
   // ── Sous SC/VSC : commentaire spécifique ───────────────
   if (scState.state === 'SC') {
@@ -1181,7 +1190,7 @@ function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle) {
       ]));
     } else if (gapTop < 2.5 && third) {
       const gap3 = (third.totalTime - second.totalTime) / 1000;
-      if (gap3 < 1.5) lines.push(`🏎️ **Bagarre à trois !** ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tous dans le même mouchoir !`);
+      if (gap3 < 1.0) lines.push(`🏎️ **Bagarre à trois !** ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tous dans le même mouchoir !`);
       else lines.push(`🏎️ ${leader.team.emoji}**${leader.pilot.name}** devant — **${gapTop.toFixed(1)}s** sur ${second.team.emoji}**${second.pilot.name}**. La pression monte.`);
     } else if (gapTop > 20) {
       lines.push(pick([
@@ -1343,8 +1352,13 @@ async function generatePressConference(raceDoc, finalResults, season, allPilots,
   const confSubjects = [];
 
   // P1 obligatoire
-  if (finishedSorted[0]) confSubjects.push({ result: finishedSorted[0], angle: 'winner' });
-
+if (finishedSorted[0]) {
+  const winnerAngle = Math.random() < 0.3
+    ? pick(['radio_moment', 'paddock_note'])
+    : 'winner';
+  confSubjects.push({ result: finishedSorted[0], angle: winnerAngle });
+}
+        
   // P2 si course serrée ou championship interest
   if (finishedSorted[1]) {
     const gap = finishedSorted[1].pos;
@@ -1645,6 +1659,34 @@ function buildPressBlock(ctx, angle) {
     return `🎤 **${emoji} ${name} — Leader du championnat (P${pos}), ${circuit}**\n${pick(tones)()}`;
   }
 
+  if (angle === 'radio_moment') {
+    const radioLine = pos === 1
+      ? pick([
+          `"Box, box ?" / "Négatif, reste dehors, le rythme est bon." — et ${name} a tenu.`,
+          `"Pneus ?" / "Encore bons pour 8 tours." — le pari était calculé.`,
+        ])
+      : pick([
+          `"Pousse, pousse !" / "J'essaie, la grip n'est plus là." — la réalité de la course.`,
+          `"Position, gap." / "Compris. Je gère." — sobre et efficace.`,
+        ]);
+    return `📻 **${emoji} ${name} — P${pos}, ${circuit} (coulisses radio)**\n${radioLine}\n\n${pos <= 3 ? `Un résultat construit tour après tour. ${name} et son ingénieur ont géré à la perfection.` : `La communication équipe-pilote dit beaucoup. Ce week-end, le message est passé.`}`;
+  }
+
+  // ANGLE : note courte style paddock
+  if (angle === 'paddock_note') {
+    const notes = pos === 1
+      ? [
+          `✍️ **${name}, P1, ${circuit}** — Pas de grand discours. "\${styleStr}. On était là." Court, direct.`,
+          `✍️ **${name} — victoire n°${wins} en ${gpPhase}** — "${constrStr || "L'équipe a encore répondu présente."}"`,
+        ]
+      : dnf
+      ? [`✍️ **${name}, DNF, ${circuit}** — "Ces choses arrivent. Ça ne définit pas notre saison." Calme. Déterminé.`]
+      : [
+          `✍️ **${name}, P${pos}, ${circuit}** — "P${pos}. ${styleStr}. On prend et on avance." L'essentiel est dit.`,
+        ];
+    return pick(notes);
+  }
+
   return null;
 }
 
@@ -1877,15 +1919,19 @@ function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
   };
 }
 
-function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear) {
+function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear, dnfThisRace = false) {
   const source = pick(['pitlane_insider', 'pl_racing_news', 'paddock_whispers']);
 
-  const headlines = [
+  const headlines = dnfThisRace ? [
     `${pilot.name} dans le dur — jusqu'où ?`,
+    `DNF au dernier GP — ${pilot.name} traverse sa période la plus compliquée`,
+    `${dnfs} abandon${dnfs > 1 ? 's' : ''} cette saison — ${pilot.name} dans une mauvaise passe`,
     `La spirale ${pilot.name} : accident de parcours ou signal d'alarme ?`,
+  ] : [
+    `${pilot.name} dans le dur — jusqu'où ?`,
+    `Les résultats ne suivent pas pour ${pilot.name} — le paddock s'interroge`,
     `${team.emoji}${team.name} commence à s'interroger sur ${pilot.name}`,
-    `"Il faut que ça change" — ${pilot.name} sous pression`,
-    `${dnfs} abandons — ${pilot.name} traverse sa pire période`,
+    `${dnfs} abandon${dnfs > 1 ? 's' : ''} en saison — ${pilot.name} peine à trouver la régularité`,
   ];
 
   const bodies = [
@@ -2142,15 +2188,20 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   }
 
   // 4. CRISE DE FORME
-  const crisisChance = isEarly ? 0.2 : isMid ? 0.35 : isLate ? 0.45 : 0.5;
-  for (const s of standings.slice(Math.floor(standings.length / 2))) {
-    const pilot = pilotMap.get(String(s.pilotId));
-    const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
-    if (pilot && team && s.dnfs >= (isEarly ? 1 : 2) && Math.random() < crisisChance) {
-      articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year));
-      break;
-    }
+const crisisChance = isEarly ? 0.2 : isMid ? 0.35 : isLate ? 0.45 : 0.5;
+for (const s of standings.slice(Math.floor(standings.length / 2))) {
+  const pilot = pilotMap.get(String(s.pilotId));
+  const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
+  if (!pilot || !team) continue;
+  const pilotRaceResult = finalResults.find(r => String(r.pilotId) === String(pilot._id));
+  const dnfThisRace     = pilotRaceResult?.dnf === true;
+  // DNF ce GP OU ≥2 DNFs en saison — évite le faux positif pour un pilote P5 sain
+  const qualifiesCrisis = dnfThisRace || s.dnfs >= 2;
+  if (qualifiesCrisis && Math.random() < crisisChance) {
+    articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year, dnfThisRace));
+    break;
   }
+}
 
   // 5. DUEL COÉQUIPIER — seulement mi-saison+
   if (!isEarly) {
@@ -2916,11 +2967,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         // Position sur la piste vs position en timing
         // Les pilotes qui n'ont pas encore pité et ont moins de totalTime sont "devant" sur la piste
         const carsAheadOnTrack = drivers.filter(d =>
-          !d.dnf &&
-          !d.pittedThisLap &&
-          (d.pitStops || 0) < (driver.pitStops || 0) && // pas encore pité autant
-          d.totalTime < driver.totalTime
-        ).length;
+  !d.dnf &&
+  !d.pittedThisLap &&
+  String(d.pilot._id) !== String(driver.pilot._id) &&
+  d.totalTime < driver.totalTime
+).length;
         const trackPos = carsAheadOnTrack + 1;
         const posOutContext = trackPos !== posOut
           ? `**P${posOut}** en timing *(~P${trackPos} sur la piste)*`
@@ -2934,14 +2985,26 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         const warmupNote = repairDesc ? `
   ${repairDesc}` : ' *Pneus à chauffer — 2 tours lents.*';
 
+              // Nommer les voisins directs pour clarifier qui est devant/derrière à la sortie
+const sortedAfterPit = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+const neighborAhead  = sortedAfterPit.find(d => d.pos === posOut - 1);
+const neighborBehind = sortedAfterPit.find(d => d.pos === posOut + 1);
+const exitNeighborStr = neighborAhead && neighborBehind
+  ? ` (derrière ${neighborAhead.team.emoji}**${neighborAhead.pilot.name}**, devant ${neighborBehind.team.emoji}**${neighborBehind.pilot.name}**)`
+  : neighborAhead
+  ? ` (derrière ${neighborAhead.team.emoji}**${neighborAhead.pilot.name}**)`
+  : neighborBehind
+  ? ` (devant ${neighborBehind.team.emoji}**${neighborBehind.pilot.name}**)`
+  : '';
+
         const pitFlavors = repairDesc ? [
-          `🔧 **T${lap} — PIT D'URGENCE !** ${driver.team.emoji}**${driver.pilot.name}** (P${posIn}) rentre précipitamment. Arrêt de **${pitDur}s** — ressort ${posOutContext}${gapToLeader}.${warmupNote}`,
+          `🔧 **T${lap} — PIT D'URGENCE !** ${driver.team.emoji}**${driver.pilot.name}** (P${posIn}) rentre précipitamment. Arrêt de **${pitDur}s** — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
         ] : reason === 'undercut' ? [
-          `🔧 **T${lap} — UNDERCUT !** ${driver.team.emoji}**${driver.pilot.name}** plonge aux stands depuis **P${posIn}** — ${TIRE[oldTire].emoji} → ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** — **${pitDur}s** — ressort ${posOutContext}${gapToLeader}. La stratégie va-t-elle payer ?${warmupNote}`,
-          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** tente l'undercut depuis **P${posIn}** ! ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s — ressort ${posOutContext}${gapToLeader}.${warmupNote}`,
+          `🔧 **T${lap} — UNDERCUT !** ${driver.team.emoji}**${driver.pilot.name}** plonge aux stands depuis **P${posIn}** — ${TIRE[oldTire].emoji} → ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** — **${pitDur}s** — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}. La stratégie va-t-elle payer ?${warmupNote}`,
+          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** tente l'undercut depuis **P${posIn}** ! ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
         ] : [
-          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${TIRE[oldTire].emoji} cramés. ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort ${posOutContext}${gapToLeader}.${warmupNote}`,
-          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag}. ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. Ressort ${posOutContext}${gapToLeader}.${warmupNote}`,
+          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${TIRE[oldTire].emoji} cramés. ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
+          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag}. ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. Ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
         ];
 
         // Tracker undercut
@@ -3009,8 +3072,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     // 5. Ni attaquant ni défenseur n'ont pité
     // 6. Contre-attaque possible si le pilote vient d'être passé au tour précédent
     // NOTE: Si le pilote a gagné 2+ places (à cause d'un pit, SC ou incident), on le mentionne brièvement
-    const justRestarted = prevScState !== 'NONE' && scState.state === 'NONE';
-
+    const justRestarted = (prevScState !== 'NONE' && scState.state === 'NONE') || scCooldown >= 5;
+          
     for (const driver of ranked) {
       if (scActive) continue;
       if (justRestarted) continue;
@@ -3201,7 +3264,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
     // ── Commentary obligatoire chaque tour ───────────────────
     // Toujours un message, même si rien ne se passe
-    const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle);
+   const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justRestarted);
     if (atmo) events.push({ priority: events.length === 0 ? 3 : 1, text: atmo });
 
     // ── Composition et envoi du message ─────────────────────
