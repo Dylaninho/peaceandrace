@@ -4132,6 +4132,20 @@ const commands = [
     .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
   new SlashCommandBuilder().setName('admin_fix_slots')
     .setDescription('[ADMIN] Recalcule les slots matin/soir des GP de la saison active.'),
+  new SlashCommandBuilder().setName('admin_replan')
+    .setDescription('[ADMIN] Replanifie tout le calendrier à partir d\'un GP de référence + date')
+    .addIntegerOption(o => o.setName('gp_index')
+      .setDescription('Index du GP de référence (0=Bahrain, 6=Emilia Romagna, 15=Italian...)')
+      .setRequired(true).setMinValue(0).setMaxValue(30))
+    .addStringOption(o => o.setName('date')
+      .setDescription('Date du GP de référence au format YYYY-MM-DD (ex: 2025-03-04)')
+      .setRequired(true))
+    .addStringOption(o => o.setName('slot')
+      .setDescription('Slot du GP de référence : matin (11h) ou soir (17h) — défaut: matin')
+      .addChoices(
+        { name: '🌅 Matin (11h/13h/15h)', value: 'matin' },
+        { name: '🌆 Soir  (17h/18h/20h)', value: 'soir'  },
+      )),
   new SlashCommandBuilder().setName('admin_skip_gp')
     .setDescription('[ADMIN] Saute le GP en cours sans le simuler (rattraper un retard)')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP à sauter — défaut: GP en cours').setMinValue(0)),
@@ -4542,7 +4556,7 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_replan', 'admin_stop_race'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race'].includes(commandName);
@@ -6404,6 +6418,80 @@ async function handleInteraction(interaction) {
         `> 🌅 index pair  → slot 0 · 11h EL · 13h Q · 15h Course\n` +
         `> 🌆 index impair → slot 1 · 17h EL · 18h Q · 20h Course\n` +
         `> 📅 Dates reconstruites depuis le GP #0.`
+      );
+    } catch(e) { return interaction.editReply(`❌ Erreur : ${e.message}`); }
+  }
+
+  // ── /admin_replan ─────────────────────────────────────────
+  // Replanifie tout le calendrier à partir d'un GP de référence + date
+  // Exemple : gp_index=6 (Emilia Romagna) · date=2025-03-04 · slot=matin
+  //   → GP 6 = 4 mars matin, GP 7 = 4 mars soir, GP 8 = 5 mars matin...
+  //   → GP 5 = 3 mars soir, GP 4 = 3 mars matin, GP 3 = 2 mars soir...
+  if (commandName === 'admin_replan') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const season = await getActiveSeason();
+      if (!season) return interaction.editReply('❌ Pas de saison active.');
+
+      const refIndex = interaction.options.getInteger('gp_index');
+      const dateStr  = interaction.options.getString('date');           // 'YYYY-MM-DD'
+      const slotStr  = interaction.options.getString('slot') || 'matin';
+
+      // Valider la date
+      const refDate = new Date(dateStr + 'T00:00:00+01:00'); // heure Paris (CET)
+      if (isNaN(refDate.getTime()))
+        return interaction.editReply(`❌ Date invalide : \`${dateStr}\` — utilise le format YYYY-MM-DD.`);
+
+      const refSlot = slotStr === 'soir' ? 1 : 0;
+
+      // Vérifier cohérence index/slot :
+      // Le slot de référence doit correspondre à refIndex % 2
+      // Si ça ne colle pas, on réassigne les index pour que ça marche
+      // (ex: index 6 est pair → slot 0 = matin ✓; si on voulait soir il faudrait décaler)
+      const expectedSlotFromIndex = refIndex % 2;
+      if (expectedSlotFromIndex !== refSlot) {
+        return interaction.editReply(
+          `❌ Incohérence : index **${refIndex}** est ${expectedSlotFromIndex === 0 ? 'pair → slot matin' : 'impair → slot soir'}, ` +
+          `mais tu as choisi **${slotStr}**.\n` +
+          `> Si tu veux Emilia Romagna (index 6) **au matin**, utilise slot \`matin\` ✅\n` +
+          `> Si tu veux Emilia Romagna (index 6) **au soir**, change l'index en 7 (impair) et ajuste les noms via la BDD.`
+        );
+      }
+
+      const races = await Race.find({ seasonId: season._id }).sort({ index: 1 });
+      if (!races.length) return interaction.editReply('❌ Aucun GP trouvé.');
+
+      // Calculer l'ancre : date du GP index 0
+      // GP[refIndex] est au jour refDate — recule de floor(refIndex/2) jours pour trouver le jour du GP 0
+      const anchor = new Date(refDate);
+      anchor.setDate(anchor.getDate() - Math.floor(refIndex / 2));
+      anchor.setHours(11, 0, 0, 0); // GP 0 = toujours slot 0 = 11h
+
+      let updated = 0;
+      const preview = [];
+      for (const r of races) {
+        const slot      = r.index % 2;
+        const dayOffset = Math.floor(r.index / 2);
+        const fixedDate = new Date(anchor);
+        fixedDate.setDate(anchor.getDate() + dayOffset);
+        fixedDate.setHours(slot === 1 ? 17 : 11, 0, 0, 0);
+        await Race.findByIdAndUpdate(r._id, { slot, scheduledDate: fixedDate });
+        // Aperçu des premiers et derniers GP pour confirmation
+        if (r.index <= 2 || r.index >= races.length - 2 || r.index === refIndex || r.index === refIndex + 1) {
+          const ds = fixedDate.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday:'short', day:'numeric', month:'short' });
+          const slotIcon = slot === 1 ? '🌆' : '🌅';
+          preview.push(`${slotIcon} **#${r.index}** ${r.emoji} ${r.circuit} — ${ds} ${slot === 1 ? '17h' : '11h'}`);
+        }
+        updated++;
+      }
+
+      return interaction.editReply(
+        `✅ Calendrier replanifié — **${updated} GPs** mis à jour.\n` +
+        `> 📍 Ancre : **#${refIndex} ${races.find(r=>r.index===refIndex)?.emoji||''} ${races.find(r=>r.index===refIndex)?.circuit||'?'}** → **${dateStr}** ${refSlot===1?'🌆 17h':'🌅 11h'}\n\n` +
+        `**Aperçu :**\n${preview.join('\n')}\n\n` +
+        `*Lance \`/planning\` pour voir le calendrier complet.*`
       );
     } catch(e) { return interaction.editReply(`❌ Erreur : ${e.message}`); }
   }
