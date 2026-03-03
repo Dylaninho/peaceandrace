@@ -4185,17 +4185,15 @@ client.once('ready', async () => {
   }
   startScheduler();
 
-  // ── Job news 1-2 fois par jour (base 18h ±6h de variation) ──
-  const NEWS_INTERVAL_BASE = 18 * 60 * 60 * 1000;
-  const scheduleNextNews = () => {
-    const jitter = (Math.random() - 0.5) * 12 * 60 * 60 * 1000; // ±6h → entre 12h et 24h
-    setTimeout(async () => {
-      try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news error:', e); }
-      scheduleNextNews();
-    }, NEWS_INTERVAL_BASE + jitter);
-  };
-  scheduleNextNews();
-  console.log('✅ Job news planifié (1-2 fois par jour, entre 12h et 24h)');
+  // ── Job news 2 fois par jour via cron (résiste aux redémarrages) ──
+  // 10h00 et 21h00 heure de Paris — loin des créneaux de course pour ne pas noyer les articles
+  cron.schedule('0 10 * * *', async () => {
+    try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news 10h error:', e); }
+  }, { timezone: 'Europe/Paris' });
+  cron.schedule('0 21 * * *', async () => {
+    try { await runScheduledNews(client); } catch(e) { console.error('Scheduled news 21h error:', e); }
+  }, { timezone: 'Europe/Paris' });
+  console.log('✅ Job news planifié : 10h00 et 21h00 (Europe/Paris)');
 });
 
 // ============================================================
