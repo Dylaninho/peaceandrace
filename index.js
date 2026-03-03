@@ -185,7 +185,7 @@ const CircuitRecord = mongoose.model('CircuitRecord', CircuitRecordSchema);
 
 // ── NewsArticle — Tabloïd de paddock ──────────────────────
 const NewsArticleSchema = new mongoose.Schema({
-  type       : { type: String, required: true },  // 'rivalry','transfer_rumor','drama','hype','form_crisis','teammate_duel','dev_vague','scandal','title_fight'
+  type       : { type: String, required: true },  // 'rivalry','transfer_rumor','drama','hype','form_crisis','teammate_duel','dev_vague','scandal','title_fight','driver_interview'
   source     : { type: String, required: true },  // 'pitlane_insider','paddock_whispers','pl_racing_news','f1_weekly'
   headline   : { type: String, required: true },
   body       : { type: String, required: true },
@@ -1468,7 +1468,7 @@ if (finishedSorted[0]) {
     };
 
     const block = buildPressBlock(ctx, angle);
-    if (block) blocks.push(block);
+    if (block) blocks.push({ block, photoUrl: pilot.photoUrl || null });
   }
 
   return blocks;
@@ -1742,6 +1742,17 @@ async function publishNews(article, channel) {
     .setColor(src.color)
     .setDescription(article.body)
     .setFooter({ text: `Saison ${article.seasonYear} · ${new Date(article.publishedAt).toLocaleDateString('fr-FR')}` });
+
+  // ── Thumbnail : photo du premier pilote cité qui en possède une ──
+  if (article.pilotIds && article.pilotIds.length > 0) {
+    try {
+      for (const pid of article.pilotIds) {
+        const p = await Pilot.findById(pid).select('photoUrl').lean();
+        if (p?.photoUrl) { embed.setThumbnail(p.photoUrl); break; }
+      }
+    } catch(e) { /* silencieux */ }
+  }
+
   try { await channel.send({ embeds: [embed] }); } catch(e) { console.error('News publish error:', e); }
 }
 
@@ -2115,6 +2126,192 @@ function genDevVagueArticle(team, seasonYear) {
   };
 }
 
+// ─── INTERVIEW PILOTE — ressenti dans l'écurie ───────────────
+// Variables prises en compte : résultats, contrat, status #1/#2, coéquipier,
+// rival, overall, spécialisation, DNFs, victoires, phase de saison.
+function genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, seasonYear, seasonPhase) {
+  const source = pick(['pitlane_insider', 'paddock_whispers', 'pl_racing_news', 'f1_weekly']);
+  const ov     = overallRating(pilot);
+  const wins   = standing?.wins   || 0;
+  const pods   = standing?.podiums || 0;
+  const dnfs   = standing?.dnfs   || 0;
+  const pts    = standing?.points  || 0;
+  const status = pilot.teamStatus; // 'numero1' | 'numero2' | null
+  const seasonsLeft = contract?.seasonsRemaining ?? null;
+  const totalDur    = contract?.seasonsDuration  ?? null;
+  const isLongTerm  = totalDur  && totalDur >= 3;
+  const isShortTerm = totalDur  && totalDur === 1;
+  const isLastYear  = seasonsLeft === 1 && totalDur && totalDur > 1;
+  const spec  = pilot.specialization;
+  const rival = pilot.rivalId; // juste un flag de présence, pas le nom ici
+
+  // ── Humeur globale pilote ───────────────────────────────────
+  // Calcul d'un "mood score" -3 → +3
+  let mood = 0;
+  if (wins >= 3)   mood += 2;
+  else if (wins >= 1) mood += 1;
+  if (pods >= 4)   mood += 1;
+  if (dnfs >= 3)   mood -= 2;
+  else if (dnfs >= 1) mood -= 1;
+  if (status === 'numero1') mood += 1;
+  if (status === 'numero2') mood -= 1;
+  if (seasonPhase === 'fin' && pts < 20) mood -= 1;
+  if (isLastYear) mood -= 1; // contrat qui se termine = pression
+  const moodLabel = mood >= 2 ? 'heureux' : mood >= 0 ? 'neutre' : mood === -1 ? 'tendu' : 'en crise';
+
+  // ── Blocs thématiques ───────────────────────────────────────
+
+  // A. Rapport avec l'écurie / ambiance
+  const teamFeel = (() => {
+    if (moodLabel === 'heureux') return pick([
+      `"Honnêtement, je ne pourrais pas demander mieux. L'écurie ${team.name} m'a donné une voiture compétitive et une atmosphère de travail saine. On est alignés."`,
+      `"L'usine travaille incroyablement bien en ce moment. Je sens qu'on tire tous dans le même sens. C'est rare, et ça se voit sur la piste."`,
+      `"J'ai confiance en mes ingénieurs. On parle le même langage. Quand le pilote et l'ingénieur se comprennent vite, les résultats suivent."`,
+    ]);
+    if (moodLabel === 'neutre') return pick([
+      `"La dynamique est bonne dans l'ensemble. Il y a des choses à améliorer — il y en a toujours — mais le dialogue est ouvert."`,
+      `"On est dans une phase de travail. Pas de résultats fracassants, mais on construit quelque chose de sérieux chez ${team.name}."`,
+      `"Je fais confiance au projet. Ce n'est pas une saison facile pour tout le monde, mais on avance."`,
+    ]);
+    if (moodLabel === 'tendu') return pick([
+      `"Il y a des discussions internes en cours. Je ne vais pas tout détailler ici, mais on sait tous qu'on peut mieux faire."`,
+      `"La relation est professionnelle. Mais professionnelle ne veut pas dire parfaite. On doit se parler franchement."`,
+      `"Certaines décisions tactiques ce week-end m'ont surpris. Je préfère en discuter en interne plutôt qu'en conf de presse."`,
+    ]);
+    // en crise
+    return pick([
+      `"Je ne vais pas mentir : c'est compliqué en ce moment chez ${team.name}. Pas d'excuse — les résultats ne sont pas là, et ça génère de la pression de tous les côtés."`,
+      `"On a des conversations difficiles. C'est normal quand les résultats ne suivent pas. Je reste concentré, mais la situation n'est pas idéale."`,
+      `"${team.name} et moi devons nous reparler de la direction qu'on prend. Il y a un manque d'alignement en ce moment."`,
+    ]);
+  })();
+
+  // B. Rapport avec le coéquipier
+  const teammateFeel = (() => {
+    if (!teammate) return null;
+    const tmWins = teammateSt?.wins || 0;
+    const tmPts  = teammateSt?.points || 0;
+    const isBehind  = pts > tmPts;
+    const isAhead   = pts < tmPts;
+    if (status === 'numero1') return pick([
+      `"${teammate.name} et moi on se challenge mutuellement. C'est sain. Je reste le pilote référence de l'équipe, mais je respecte son travail."`,
+      `"Mon coéquipier monte en puissance. C'est bon pour l'équipe — mais c'est à moi de rester devant."`,
+    ]);
+    if (status === 'numero2') return pick([
+      `"${teammate.name} a été meilleur que moi sur plusieurs courses. Je l'admets. Mon travail c'est de renverser ça."`,
+      `"Je suis en train de trouver mes marques. ${teammate.name} a plus d'expérience dans cette voiture — pour l'instant. Ça va changer."`,
+    ]);
+    if (isBehind) return pick([
+      `"J'ai une meilleure cohérence cette saison. ${teammate.name} a du talent, mais la régularité c'est ce qui compte sur une saison entière."`,
+      `"Le duel interne ? On se bat sur la piste, pas dans les médias. Mais oui, être devant son coéquipier ça compte."`,
+    ]);
+    if (isAhead) return pick([
+      `"${teammate.name} est devant dans les standings internes. Ça me motive à travailler encore plus. Je ne suis pas là pour être numéro 2."`,
+      `"La comparaison avec ${teammate.name} est inévitable dans la même écurie. En ce moment il fait mieux. Je dois regarder pourquoi."`,
+    ]);
+    return pick([
+      `"On est vraiment au coude-à-coude ${teammate.name} et moi. L'équipe peut s'appuyer sur les deux. C'est une force."`,
+      `"${teammate.name} est un bon coéquipier. On se respecte. On se bat aussi. C'est la vie dans le même garage."`,
+    ]);
+  })();
+
+  // C. Contrat / avenir
+  const contractFeel = (() => {
+    if (!contract) return pick([
+      `"Ma situation contractuelle ? Je ne commente pas ça publiquement. Je me concentre sur la piste."`,
+      `"Les négociations, c'est pour les agents et les directeurs. Moi je conduis."`,
+    ]);
+    if (isLastYear) return pick([
+      `"C'est ma dernière saison sous ce contrat. Je vais tout donner pour que l'écurie veuille me renouveler — ou pour attirer d'autres offres. C'est la réalité du sport."`,
+      `"Oui, je suis en fin de contrat. Mais ça ne change pas mon engagement. En fait, ça le renforce."`,
+      `"Le mercato viendra quand il viendra. Pour l'instant, je dois prouver ma valeur sur la piste. C'est le meilleur argument de négociation."`,
+    ]);
+    if (isLongTerm) return pick([
+      `"J'ai un contrat long chez ${team.name}. Ça me permet de construire quelque chose sur la durée. C'est important d'avoir cette stabilité."`,
+      `"${seasonsLeft} saison(s) encore ici. Je suis investi dans ce projet sur le long terme. On a le temps de tout construire."`,
+    ]);
+    if (isShortTerm) return pick([
+      `"Mon contrat est court. Ça m'oblige à performer dès maintenant — il n'y a pas de saison de rodage."`,
+      `"Un contrat d'un an, ça concentre l'esprit. Chaque GP compte double."`,
+    ]);
+    return pick([
+      `"Je suis bien ici. Le contrat est en cours, je ne me projette pas ailleurs."`,
+      `"On verra pour la suite en temps voulu. Pour l'instant, je suis à ${team.name} et je suis concentré sur ça."`,
+    ]);
+  })();
+
+  // D. Performances / overall
+  const perfFeel = (() => {
+    if (wins >= 3) return pick([
+      `"${wins} victoires cette saison — je ne m'en lasse pas. Mais le travail en amont de chaque GP est colossal. Les résultats ne tombent pas du ciel."`,
+      `"On est sur une bonne dynamique. ${wins} victoires, c'est bien, mais je sais qu'on peut encore s'améliorer sur certains aspects."`,
+    ]);
+    if (wins === 1) return pick([
+      `"Cette victoire, elle m'a confirmé que j'avais le niveau pour gagner. Maintenant il faut transformer ça en régularité."`,
+    ]);
+    if (dnfs >= 3) return pick([
+      `"${dnfs} abandons, c'est trop. Qu'est-ce qui cloche ? Un peu de tout : incidents, malchance, quelques erreurs. On doit réduire ça drastiquement."`,
+      `"Les DNFs ont plombé ma saison. Mais je ne suis pas du genre à baisser les bras. Chaque course est une nouvelle page."`,
+    ]);
+    if (pods >= 3) return pick([
+      `"${pods} podiums sans victoire encore — je sais ce que ça veut dire : on est rapide, mais pas encore assez constants sur les moments décisifs."`,
+    ]);
+    if (spec) return pick([
+      `"Ma spécialisation en ${spec} — ça s'est construit naturellement. Je ne cherchais pas à me pigeon-holer, mais si ça me donne un avantage dans certains contextes, tant mieux."`,
+      `"On me dit que je suis fort en ${spec}. Peut-être. Mais un bon pilote doit maîtriser toutes les facettes."`,
+    ]);
+    return pick([
+      `"Saison correcte. Pas ce que je visais au départ, mais on progresse. Le niveau général est très élevé — chaque point arraché a de la valeur."`,
+      `"Je ne suis pas satisfait à 100% de mes perfs — et c'est normal. L'auto-critique, c'est ce qui fait avancer."`,
+    ]);
+  })();
+
+  // ── Assemblage de l'article ─────────────────────────────────
+  const themes = [teamFeel, perfFeel];
+  if (teammateFeel) themes.push(teammateFeel);
+  themes.push(contractFeel);
+
+  // On tire 2-3 thèmes distincts pour composer l'article
+  const chosenThemes = themes.filter(Boolean);
+  const articleThemes = chosenThemes.slice(0, Math.random() < 0.5 ? 2 : 3);
+
+  const introLines = [
+    `Rencontré dans le paddock après les essais, ${pilot.name} s'est livré à une rare confidence.`,
+    `En marge du week-end de course, ${pilot.name} a accepté de répondre à quelques questions sur sa situation.`,
+    `Interview exclusive — ${pilot.name} parle sans filtre de sa saison chez ${team.emoji}${team.name}.`,
+    `${pilot.name} s'est arrêté quelques minutes pour évoquer son quotidien dans le paddock.`,
+  ];
+
+  const body = `${pick(introLines)}\n\n` + articleThemes.join('\n\n');
+
+  const headlines = moodLabel === 'heureux' ? [
+    `${pilot.name} : "Je ne pourrais pas demander mieux"`,
+    `${pilot.name} parle de bonheur et d'alignement chez ${team.name}`,
+    `${team.emoji}${pilot.name} — l'épanouissement au cœur du projet`,
+  ] : moodLabel === 'neutre' ? [
+    `${pilot.name} : "On construit quelque chose de sérieux"`,
+    `${pilot.name} reste pragmatique sur sa saison`,
+    `${team.emoji}${pilot.name} — travail, patience, confiance`,
+  ] : moodLabel === 'tendu' ? [
+    `${pilot.name} : "On doit se parler franchement"`,
+    `Tension dans l'air — ${pilot.name} sort du silence`,
+    `${team.emoji}${pilot.name} : les vérités du paddock`,
+  ] : [
+    `${pilot.name} : "La situation n'est pas idéale" — l'aveu`,
+    `${pilot.name} en crise ? Le pilote répond`,
+    `${team.emoji}${pilot.name} sous pression — il se confie`,
+  ];
+
+  return {
+    type: 'driver_interview', source,
+    headline: pick(headlines),
+    body,
+    pilotIds: [pilot._id],
+    teamIds : [team._id],
+    seasonYear,
+  };
+}
+
 function genTitleFightArticle(leader, challenger, leaderTeam, challengerTeam, gap, gpLeft, seasonYear) {
   const source = pick(['f1_weekly', 'pl_racing_news', 'pitlane_insider']);
 
@@ -2287,15 +2484,15 @@ async function runScheduledNews(discordClient) {
   const isLate     = progress >= 0.6  && progress < 0.85;
   const isFinale   = progress >= 0.85;
 
-  // Début : dev_vague(40%) drama(40%) scandal(15%) rumeur(5%)
-  // Milieu : drama(30%) dev_vague(25%) rumeur(25%) scandal(20%)
-  // Fin    : rumeur(40%) drama(25%) scandal(20%) dev_vague(15%)
-  // Finale : rumeur(55%) scandal(25%) drama(15%) dev_vague(5%)
+  // Début : dev_vague(30%) drama(30%) interview(25%) scandal(10%) rumeur(5%)
+  // Milieu : drama(25%) dev_vague(20%) rumeur(20%) interview(20%) scandal(15%)
+  // Fin    : rumeur(35%) interview(25%) drama(20%) scandal(15%) dev_vague(5%)
+  // Finale : rumeur(45%) interview(25%) scandal(20%) drama(10%)
   let weights;
-  if (isEarly)     weights = { drama: 40, dev_vague: 40, scandal: 15, transfer_rumor: 5  };
-  else if (isMid)  weights = { drama: 30, dev_vague: 25, transfer_rumor: 25, scandal: 20 };
-  else if (isLate) weights = { transfer_rumor: 40, drama: 25, scandal: 20, dev_vague: 15 };
-  else             weights = { transfer_rumor: 55, scandal: 25, drama: 15, dev_vague: 5  };
+  if (isEarly)     weights = { drama: 30, dev_vague: 30, driver_interview: 25, scandal: 10, transfer_rumor: 5  };
+  else if (isMid)  weights = { drama: 25, dev_vague: 20, transfer_rumor: 20, driver_interview: 20, scandal: 15 };
+  else if (isLate) weights = { transfer_rumor: 35, driver_interview: 25, drama: 20, scandal: 15, dev_vague: 5  };
+  else             weights = { transfer_rumor: 45, driver_interview: 25, scandal: 20, drama: 10 };
 
   const total = Object.values(weights).reduce((a, b) => a + b, 0);
   let roll = Math.random() * total;
@@ -2321,6 +2518,24 @@ async function runScheduledNews(discordClient) {
     articleData = genDevVagueArticle(pick(allTeams), season.year);
   } else if (chosen === 'scandal') {
     if (allTeams.length >= 2) articleData = genScandalArticle(allTeams, allPilots, season.year);
+  } else if (chosen === 'driver_interview') {
+    const pilot = pick(allPilots);
+    const team  = teamMap.get(String(pilot.teamId));
+    if (team) {
+      try {
+        const standings = await Standing.find({ seasonId: season._id }).lean();
+        const standing  = standings.find(s => String(s.pilotId) === String(pilot._id));
+        const contract  = await Contract.findOne({ pilotId: pilot._id, active: true }).lean();
+        const teammate  = allPilots.find(p =>
+          String(p.teamId) === String(pilot.teamId) && String(p._id) !== String(pilot._id)
+        );
+        const teammateSt = teammate
+          ? standings.find(s => String(s.pilotId) === String(teammate._id))
+          : null;
+        const sp = isEarly ? 'début' : isMid ? 'mi' : 'fin';
+        articleData = genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, season.year, sp);
+      } catch(e) { console.error('Interview gen error:', e.message); }
+    }
   }
 
   if (articleData) {
@@ -3599,16 +3814,25 @@ const exitNeighborStr = neighborAhead && neighborBehind
       const allTeams2    = await Team.find();
       const allStandings = await Standing.find({ seasonId: season._id });
       const cStandings   = await ConstructorStanding.find({ seasonId: season._id });
-      const confBlocks   = await generatePressConference(
+      const confData = await generatePressConference(
         race, results, season, allPilots, allTeams2, allStandings, cStandings
       );
-      if (confBlocks?.length) {
-        const confEmbed = new EmbedBuilder()
-          .setTitle(`🎤 Conférence de presse — ${race.emoji} ${race.circuit}`)
-          .setColor('#2B2D31')
-          .setDescription(confBlocks.join('\n\n─────────────────\n\n'));
-        if (channel) { try { await channel.send({ embeds: [confEmbed] }); } catch(e) {} }
-        await sleep(5000);
+      if (confData?.length) {
+        // confData est un tableau de { block: string, pilotId?: ObjectId, photoUrl?: string }
+        // Rétrocompat : si c'est un tableau de strings (ancien format), on convertit
+        const normalised = confData.map(item =>
+          typeof item === 'string' ? { block: item } : item
+        );
+        for (const { block, photoUrl } of normalised) {
+          const confEmbed = new EmbedBuilder()
+            .setTitle(`🎤 Conférence de presse — ${race.emoji} ${race.circuit}`)
+            .setColor('#2B2D31')
+            .setDescription(block);
+          if (photoUrl) confEmbed.setThumbnail(photoUrl);
+          if (channel) { try { await channel.send({ embeds: [confEmbed] }); } catch(e) {} }
+          await sleep(3000);
+        }
+        await sleep(2000);
       }
     } catch(e) { console.error('Conf de presse erreur:', e); }
     try {
