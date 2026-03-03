@@ -2495,6 +2495,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     const dnfCount = drivers.filter(d => d.dnf).length;
 
     const events       = []; // { priority, text }
+    const overtakeMentioned = new Set(); // pilotes déjà narratés comme attaquant OU passé ce tour
     const lapDnfs      = []; // DNFs survenus CE tour — pour expliquer le SC
     const lapIncidents = []; // incidents ce tour pour SC logic
 
@@ -3136,8 +3137,6 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
       // ── Dépassement (le pilote a gagné UNE place) ──────────
       if (movedUp && driver.lastPos === driver.pos + 1) {
-        // Chercher qui occupait cette position AVANT ce tour (via lastPos)
-        // et qui est maintenant derrière le dépassant
         const passed = ranked.find(d =>
           d.lastPos === driver.pos &&
           d.pos > driver.pos &&
@@ -3149,7 +3148,20 @@ const exitNeighborStr = neighborAhead && neighborBehind
         // Gap pré-tour
         const preLapD = preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime;
         const preLapP = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
-        if (Math.abs(preLapP - preLapD) > 3000) continue;
+        const bigGap  = Math.abs(preLapP - preLapD) > 3000;
+
+        // Gap > 3s : pas un dépassement en piste (pit, SC, dégâts...) — narration sobre
+        if (bigGap) {
+          const ovNewPos  = driver.lastPos - 1;
+          const ovLostPos = passed.lastPos + 1;
+          events.push({
+            priority: 3,
+            text: `📊 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** monte **P${driver.lastPos}→P${ovNewPos}**, ${passed.team.emoji}**${passed.pilot.name}** recule **P${passed.lastPos}→P${ovLostPos}** — écart stratégique absorbé.`,
+          });
+          overtakeMentioned.add(String(driver.pilot._id));
+          overtakeMentioned.add(String(passed.pilot._id));
+          continue;
+        }
 
         const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
         const gapStr    = postGapMs < 1000 ? `${postGapMs}ms` : `${(postGapMs/1000).toFixed(3)}s`;
@@ -3168,14 +3180,13 @@ const exitNeighborStr = neighborAhead && neighborBehind
           battle.lastPasser === String(passed.pilot._id) &&
           (lap - battle.lastPasserLap) <= 2;
 
-        // Mettre à jour qui vient de passer
         const updatedBattle = battle
           ? { ...battle, lastPasser: String(driver.pilot._id), lastPasserLap: lap }
           : { lapsClose: 1, lastPasser: String(driver.pilot._id), lastPasserLap: lap };
         battleMap.set(bkey, updatedBattle);
 
-        const ovNewPos  = driver.pos;
-        const ovLostPos = passed.pos;
+        const ovNewPos  = driver.lastPos - 1;
+        const ovLostPos = passed.lastPos + 1;
         const ovForLead = ovNewPos === 1;
         const ovIsTop3  = ovNewPos <= 3 || ovLostPos <= 3;
         const ovHeader  = ovForLead
@@ -3198,59 +3209,67 @@ const exitNeighborStr = neighborAhead && neighborBehind
           text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}`,
           gif: pickGif(gifCat),
         });
+        overtakeMentioned.add(String(driver.pilot._id));
+        overtakeMentioned.add(String(passed.pilot._id));
       }
     }
 
 
-    // ── Dérives de position (pneus usés) et remontées (pneus frais) ──────────────
-    // Tout mouvement >= 2 places non narré comme overtake direct est commenté ici.
+    // ── Mouvements de position non narrés (multi-places, DNF, etc.) ──────────────
+    // Ce bloc couvre les changements >= 2 places que l'overtake 1v1 n'a pas capturés.
+    // IMPORTANT : les pneus usés ne causent PAS directement une perte de place —
+    // ils ralentissent le pilote et les autres le dépassent via le système overtake.
+    // Ici on mentionne juste le MOUVEMENT et son contexte probable.
     if (!scActive && !justRestarted && lap > 2) {
       for (const driver of ranked) {
         if (driver.pittedThisLap) continue;
         if (driver.dnf) continue;
+        if (overtakeMentioned.has(String(driver.pilot._id))) continue;
 
         const posChange = driver.lastPos - driver.pos; // >0 = remonté, <0 = reculé
         if (Math.abs(posChange) < 2) continue;
 
-        const n         = `${driver.team.emoji}**${driver.pilot.name}**`;
-        const worn      = driver.tireWear || 0;
+        const n          = `${driver.team.emoji}**${driver.pilot.name}**`;
+        const worn       = driver.tireWear || 0;
         const wornThresh = wornThresholdFor(driver.tireCompound, driver.team, driver.pilot);
         const isTireWorn  = worn > wornThresh * 0.85;
         const isFreshTire = (driver.warmupLapsLeft || 0) === 0 && (driver.tireAge || 0) < 8 && (driver.pitStops || 0) > 0;
         const tireEmoji   = TIRE[driver.tireCompound]?.emoji || '🏎️';
+        const fromDnf     = lapDnfs.length > 0;
 
         if (posChange < 0) {
-          // Perte de positions
+          // ── Perte de positions ──────────────────────────────
+          // Les pneus usés sont du CONTEXTE (il est lent), pas la CAUSE directe.
+          // La cause : plusieurs adversaires l'ont passé ce même tour.
           const lost     = Math.abs(posChange);
           const severity = lost >= 5 ? '🚨' : '⚠️';
-          if (isTireWorn) {
-            events.push({ priority: 3, text: pick([
-              `${severity} **T${lap}** — ${n} dégringole **P${driver.lastPos}→P${driver.pos}** ! ${tireEmoji} Pneus complètement dépassés — il perd du temps à chaque virage. *L'arrêt devient urgent.*`,
-              `${severity} **T${lap}** — ${n} perd **${lost} place${lost>1?'s':''}** (P${driver.lastPos}→P${driver.pos}). ${tireEmoji} Dégradation critique — il ne peut plus défendre.`,
-              `${severity} **T${lap}** — Décrochage pour ${n} : P${driver.lastPos}→**P${driver.pos}**. ${tireEmoji} Les gommes sont à bout — chaque tour coûte des dixièmes.`,
-            ]) });
-          } else {
-            events.push({ priority: 3, text: pick([
-              `⚠️ **T${lap}** — ${n} recule **P${driver.lastPos}→P${driver.pos}** — rythme en baisse inexpliquée.`,
-              `⚠️ **T${lap}** — ${n} perd **${lost} place${lost>1?'s':''}** (P${driver.lastPos}→P${driver.pos}). *L'écurie analyse.*`,
-            ]) });
-          }
+          const tireCtx  = isTireWorn
+            ? ` ${tireEmoji} *Ses pneus usés lui coûtent du temps — il ne peut pas répondre.*`
+            : '';
+          events.push({ priority: 3, text: pick([
+            `${severity} **T${lap}** — ${n} recule **P${driver.lastPos}→P${driver.pos}** — plusieurs adversaires en profitent dans la même séquence.${tireCtx}`,
+            `${severity} **T${lap}** — ${n} perd **${lost} place${lost>1?'s':''}** (P${driver.lastPos}→P${driver.pos}) en l'espace d'un tour.${tireCtx}`,
+            `${severity} **T${lap}** — Glissade au classement pour ${n} : P${driver.lastPos}→**P${driver.pos}**.${tireCtx}`,
+          ]) });
+
         } else {
-          // Gain de positions
+          // ── Gain de positions ───────────────────────────────
           const gained = posChange;
           if (isFreshTire) {
             events.push({ priority: 4, text: pick([
               `📈 **T${lap}** — ${n} remonte **P${driver.lastPos}→P${driver.pos}** sur pneus frais ${tireEmoji} ! Les gommes neuves font toute la différence.`,
-              `📈 **T${lap}** — ${n} (+${gained} place${gained>1?'s':''}, P${driver.lastPos}→**P${driver.pos}**) — ses pneus frais ${tireEmoji} lui donnent 1-2s d'avance au tour. La stratégie paye.`,
-              `📈 **T${lap}** — La remontée de ${n} est impressionnante : P${driver.lastPos}→**P${driver.pos}** en quelques tours sur gommes neuves ${tireEmoji}.`,
+              `📈 **T${lap}** — ${n} (+${gained} place${gained>1?'s':''}, P${driver.lastPos}→**P${driver.pos}**) — pneus frais ${tireEmoji}, il dévore le classement. La stratégie paye.`,
+              `📈 **T${lap}** — La remontée de ${n} est impressionnante : P${driver.lastPos}→**P${driver.pos}** sur gommes neuves ${tireEmoji}.`,
             ]) });
-          } else if (lapDnfs.length > 0 && gained >= 3) {
-            events.push({ priority: 2, text:
-              `📊 **T${lap}** — ${n} remonte **P${driver.lastPos}→P${driver.pos}** après les abandons.`,
-            });
+          } else if (fromDnf) {
+            // Gains >= 2 places par DNFs (seuil corrigé : était >= 3, manquait les gains de 2)
+            events.push({ priority: 4, text: pick([
+              `📊 **T${lap}** — ${n} remonte **P${driver.lastPos}→P${driver.pos}** suite aux abandons devant lui.`,
+              `📊 **T${lap}** — Les abandons font le travail — ${n} gagne **${gained} place${gained>1?'s':''}** et se retrouve **P${driver.pos}**.`,
+            ]) });
           } else {
             events.push({ priority: 3, text: pick([
-              `📈 **T${lap}** — ${n} progresse **P${driver.lastPos}→P${driver.pos}** — belle régularité.`,
+              `📈 **T${lap}** — ${n} avance **P${driver.lastPos}→P${driver.pos}** — belle régularité.`,
               `📈 **T${lap}** — ${n} grappille **${gained} place${gained>1?'s':''}** (P${driver.lastPos}→P${driver.pos}) sans qu'on l'ait vu venir.`,
             ]) });
           }
