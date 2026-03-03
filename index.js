@@ -5208,6 +5208,19 @@ async function handleInteraction(interaction) {
 
     const seStyle = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
 
+    // ── Trouver le seul prochain événement global (un seul ← prochain sur tout le planning) ──
+    // On parcourt les GPs dans l'ordre et on s'arrête au premier événement non fait.
+    let nextEventRaceId = null;
+    let nextEventType   = null; // 'el' | 'q' | 'r'
+    for (const r of upcoming) {
+      const isDone  = r.status === 'done' || r.status === 'race_computed';
+      const isQDone = isDone || r.status === 'quali_done';
+      const isEDone = isQDone || r.status === 'practice_done';
+      if (!isEDone) { nextEventRaceId = String(r._id); nextEventType = 'el'; break; }
+      if (!isQDone) { nextEventRaceId = String(r._id); nextEventType = 'q';  break; }
+      if (!isDone)  { nextEventRaceId = String(r._id); nextEventType = 'r';  break; }
+    }
+
     const fields = upcoming.map(r => {
       const d        = new Date(r.scheduledDate);
       const dateStr  = d.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long', day: 'numeric', month: 'long' });
@@ -5222,16 +5235,19 @@ async function handleInteraction(interaction) {
       const isQDone = isDone || r.status === 'quali_done';
       const isEDone = isQDone || r.status === 'practice_done';
 
+      // Le marqueur ← prochain n'est posé qu'une seule fois, sur l'événement global suivant
+      const isNext = String(r._id) === nextEventRaceId;
       const next   = ' **← prochain**';
+
       const elLine = isEDone
         ? `~~🔧 Essais Libres — ${elH}~~ ✅`
-        : `🔧 **Essais Libres** — ${elH}${r.status === 'upcoming' ? next : ''}`;
+        : `🔧 **Essais Libres** — ${elH}${isNext && nextEventType === 'el' ? next : ''}`;
       const qLine  = isQDone
         ? `~~⏱️ Qualifications — ${qH}~~ ✅`
-        : `⏱️ **Qualifications** — ${qH}${r.status === 'practice_done' ? next : ''}`;
+        : `⏱️ **Qualifications** — ${qH}${isNext && nextEventType === 'q' ? next : ''}`;
       const rLine  = isDone
         ? `~~🏁 Course — ${rH}~~ ✅`
-        : `🏁 **Course** — ${rH}${r.status === 'quali_done' ? next : ''}`;
+        : `🏁 **Course** — ${rH}${isNext && nextEventType === 'r' ? next : ''}`;
 
       return {
         name : `${r.emoji} ${r.circuit} ${style} · ${slotIcon} ${dateStr}`,
@@ -6803,51 +6819,6 @@ async function runQualifying(override, gpIndex = null) {
   await channel.send({ embeds: [q2EliminEmbed] });
   await sleepMs(4000);
 
-  // ─── DRAMA CLASSEMENT CHAMPIONNAT ─────────────────────────
-  // Si un pilote haut au championnat est mal qualifié → drama
-  try {
-    const season = await getActiveSeason();
-    if (season) {
-      const champStandings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).limit(8);
-      const allPilotsForDrama = await Pilot.find();
-      const pilotMapD = new Map(allPilotsForDrama.map(p => [String(p._id), p]));
-      const allTeamsD = await Team.find();
-      const teamMapD  = new Map(allTeamsD.map(t => [String(t._id), t]));
-
-      const dramaLines = [];
-      champStandings.forEach((s, champPos) => {
-        const pilot = pilotMapD.get(String(s.pilotId));
-        if (!pilot) return;
-        const gridEntry = grid.find(g => String(g.pilotId) === String(s.pilotId));
-        if (!gridEntry) return;
-        const gridPos = grid.indexOf(gridEntry) + 1;
-        const team = teamMapD.get(String(pilot.teamId));
-        const emoji = team?.emoji || '';
-
-        // Drama si un top-5 championnat est qualifié mal (P8+)
-        if (champPos <= 4 && gridPos >= 8) {
-          const gap = ((gridEntry.time - grid[0].time) / 1000).toFixed(3);
-          const severity = gridPos >= 14 ? '🚨' : '⚠️';
-          dramaLines.push(`${severity} **${emoji}${pilot.name}** — P${champPos + 1} au championnat, seulement **P${gridPos}** en grille ! *+${gap}s — session cauchemardesque pour le camp ${team?.name || 'de l\'écurie'}.*`);
-        }
-        // Drama si le leader du championnat est en pole
-        if (champPos === 0 && gridPos === 1) {
-          dramaLines.push(`👑 **${emoji}${pilot.name}** confirme son statut de leader en décrochant la **pole** ! *Le championnat passerait bien par la victoire ici...*`);
-        }
-        // Drama si le P2 du championnat devance le leader en grille
-        if (champPos === 1 && gridPos < (grid.findIndex(g => String(g.pilotId) === String(champStandings[0]?.pilotId)) + 1)) {
-          const leaderPilot = pilotMapD.get(String(champStandings[0]?.pilotId));
-          dramaLines.push(`🔥 **${emoji}${pilot.name}** (P2 championnat) devant **${leaderPilot?.name || 'le leader'}** en grille ! *Retournement de situation possible demain.*`);
-        }
-      });
-
-      if (dramaLines.length > 0) {
-        await channel.send(`📊 **CONTEXT CHAMPIONNAT :**\n${dramaLines.slice(0,3).join('\n')}`);
-        await sleepMs(2500);
-      }
-    }
-  } catch(e) { console.error('Quali drama error:', e.message); }
-
   // ─── Q3 ───────────────────────────────────────────────────
   const q3Names = q3Grid.map(g => `${g.teamEmoji}**${g.pilotName}**`).join(' · ');
   await channel.send(
@@ -6911,6 +6882,97 @@ async function runQualifying(override, gpIndex = null) {
       : `🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** — ${msToLapStr(poleman.time)}` +
         (gap2nd ? ` · **+${gap2nd}s** sur ${q3Grid[1]?.teamEmoji}**${q3Grid[1]?.pilotName}**` : '');
   await channel.send(poleMsg);
+  await sleepMs(2000);
+
+  // ─── DRAMA CLASSEMENT CHAMPIONNAT (après Q3, zéro spoil) ──
+  // Envoyé APRÈS la grille complète → on peut mentionner les positions sans spoiler
+  try {
+    const seasonCtx = await getActiveSeason();
+    if (seasonCtx) {
+      const champStandings = await Standing.find({ seasonId: seasonCtx._id }).sort({ points: -1 }).limit(8);
+      const totalRaces     = await Race.countDocuments({ seasonId: seasonCtx._id });
+      const doneRaces      = await Race.countDocuments({ seasonId: seasonCtx._id, status: 'done' });
+      // Phase de saison : début (<30%), milieu (30-70%), fin (>70%)
+      const seasonProgress = totalRaces > 0 ? doneRaces / totalRaces : 0;
+      const isEarlySeason  = seasonProgress < 0.30;
+      const isLateSeason   = seasonProgress > 0.70;
+
+      const allPilotsForDrama = await Pilot.find();
+      const pilotMapD = new Map(allPilotsForDrama.map(p => [String(p._id), p]));
+      const allTeamsD = await Team.find();
+      const teamMapD  = new Map(allTeamsD.map(t => [String(t._id), t]));
+
+      const dramaLines = [];
+
+      // ── Leader du champ en pole ──────────────────────────────
+      const leaderStanding = champStandings[0];
+      const leaderPilot    = leaderStanding ? pilotMapD.get(String(leaderStanding.pilotId)) : null;
+      const leaderEntry    = leaderPilot ? grid.find(g => String(g.pilotId) === String(leaderStanding.pilotId)) : null;
+      const leaderGridPos  = leaderEntry ? grid.indexOf(leaderEntry) + 1 : null;
+
+      if (leaderPilot && leaderGridPos === 1) {
+        const leaderTeam  = teamMapD.get(String(leaderPilot.teamId));
+        const leaderEmoji = leaderTeam?.emoji || '';
+        if (isLateSeason) {
+          dramaLines.push(`👑 **${leaderEmoji}${leaderPilot.name}** — leader du championnat ET pole position. *Avec ${Math.round((1 - seasonProgress) * totalRaces)} courses restantes, il est en train de verrouiller ce titre...*`);
+        } else if (isEarlySeason) {
+          dramaLines.push(`👑 **${leaderEmoji}${leaderPilot.name}** prend la tête du championnat ET la pole. *C'est un début de saison canon — à surveiller.*`);
+        } else {
+          dramaLines.push(`👑 **${leaderEmoji}${leaderPilot.name}** confirme sa domination : leader au championnat, pole en qualifs. *Le camp adverse doit trouver une réponse.*`);
+        }
+      }
+
+      // ── P2 champ devant le leader en grille ─────────────────
+      const p2Standing = champStandings[1];
+      const p2Pilot    = p2Standing ? pilotMapD.get(String(p2Standing.pilotId)) : null;
+      if (p2Pilot && leaderPilot && leaderGridPos !== null) {
+        const p2Entry   = grid.find(g => String(g.pilotId) === String(p2Standing.pilotId));
+        const p2GridPos = p2Entry ? grid.indexOf(p2Entry) + 1 : null;
+        if (p2GridPos !== null && p2GridPos < leaderGridPos) {
+          const p2Team    = teamMapD.get(String(p2Pilot.teamId));
+          const p2Emoji   = p2Team?.emoji || '';
+          const ptGap     = leaderStanding.points - p2Standing.points;
+          const areRivals = String(p2Pilot.rivalId) === String(leaderStanding.pilotId) ||
+                            String(leaderPilot.rivalId) === String(p2Standing.pilotId);
+          if (areRivals && isLateSeason && ptGap <= 15) {
+            dramaLines.push(`🔥 **${p2Emoji}${p2Pilot.name}** part devant **${leaderPilot.name}** en grille ! *${ptGap} pts d'écart au championnat — la guerre continue entre ces deux-là. Demain peut tout changer.*`);
+          } else if (isLateSeason) {
+            dramaLines.push(`⚡ **${p2Emoji}${p2Pilot.name}** (P2 au championnat, ${ptGap} pts derrière) devant le leader en grille. *La fenêtre est là — il doit en profiter demain.*`);
+          } else {
+            dramaLines.push(`⚡ **${p2Emoji}${p2Pilot.name}** (P2 champ.) devance le leader **${leaderPilot.name}** sur la grille. *Retournement possible en course — attention au départ.*`);
+          }
+        }
+      }
+
+      // ── Top-5 champ mal qualifiés (P8+) — envoyé APRÈS Q3 donc pas de spoil ──
+      champStandings.forEach((s, champPos) => {
+        if (champPos === 0) return; // leader déjà traité
+        const pilot = pilotMapD.get(String(s.pilotId));
+        if (!pilot) return;
+        const gridEntry = grid.find(g => String(g.pilotId) === String(s.pilotId));
+        if (!gridEntry) return;
+        const gridPos = grid.indexOf(gridEntry) + 1;
+        const team    = teamMapD.get(String(pilot.teamId));
+        const emoji   = team?.emoji || '';
+
+        if (champPos <= 4 && gridPos >= 8) {
+          const gap      = ((gridEntry.time - grid[0].time) / 1000).toFixed(3);
+          const severity = gridPos >= 14 ? '🚨' : '⚠️';
+          const teamName = team?.name || 'l\'écurie';
+          if (isLateSeason && champPos <= 2) {
+            dramaLines.push(`${severity} **${emoji}${pilot.name}** — P${champPos + 1} au championnat, **P${gridPos}** en grille ! *+${gap}s. Dans le sprint final du championnat, c'est une galère monumentale pour ${teamName}.*`);
+          } else {
+            dramaLines.push(`${severity} **${emoji}${pilot.name}** — P${champPos + 1} au championnat, seulement **P${gridPos}** en grille ! *+${gap}s — session cauchemardesque pour le camp ${teamName}.*`);
+          }
+        }
+      });
+
+      if (dramaLines.length > 0) {
+        await channel.send(`📊 **CONTEXTE CHAMPIONNAT :**\n${dramaLines.slice(0, 3).join('\n')}`);
+        await sleepMs(2500);
+      }
+    }
+  } catch(e) { console.error('Quali drama error:', e.message); }
 }
 
 // ── Cérémonie de fin de saison ────────────────────────────
