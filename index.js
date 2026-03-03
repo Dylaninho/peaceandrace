@@ -3774,6 +3774,9 @@ async function createNewSeason() {
     const d    = new Date(startDate);
     const slot = i % 2; // 0 = matin, 1 = soir
     d.setDate(d.getDate() + Math.floor(i / 2)); // 2 GP par jour
+    // Heure cohérente avec le slot : slot 0 → 11h, slot 1 → 17h
+    // Permet d'afficher le bon horaire même si le champ slot est absent/corrompu
+    d.setHours(slot === 1 ? 17 : 11, 0, 0, 0);
     await Race.create({ seasonId: season._id, index: i, slot, ...CIRCUITS[i], scheduledDate: d, status: 'upcoming' });
   }
 
@@ -5222,14 +5225,19 @@ async function handleInteraction(interaction) {
     }
 
     const fields = upcoming.map(r => {
-      const d        = new Date(r.scheduledDate);
-      const dateStr  = d.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long', day: 'numeric', month: 'long' });
-      const isSlot1  = r.slot === 1;
+      const d = new Date(r.scheduledDate);
+      // Dériver le slot depuis l'heure de scheduledDate si le champ slot est absent/faux
+      // scheduledDate à 17h+ → soir ; sinon → matin
+      const scheduledHour = parseInt(d.toLocaleString('en-US', { timeZone: 'Europe/Paris', hour: 'numeric', hour12: false }));
+      const isSlot1  = (r.slot === 1) || (r.slot == null && scheduledHour >= 16);
       const elH      = isSlot1 ? '17h00' : '11h00';
       const qH       = isSlot1 ? '18h00' : '13h00';
       const rH       = isSlot1 ? '20h00' : '15h00';
       const slotIcon = isSlot1 ? '🌆' : '🌅';
       const style    = seStyle[r.gpStyle] || '';
+
+      // Date affichée — utiliser le jour sans heure (les deux GPs d'un jour ont la même date)
+      const dateStr = d.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long', day: 'numeric', month: 'long' });
 
       const isDone  = r.status === 'done' || r.status === 'race_computed';
       const isQDone = isDone || r.status === 'quali_done';
@@ -6387,7 +6395,10 @@ async function handleInteraction(interaction) {
         dayRaces.sort((a, b) => a.index - b.index);
         for (let i = 0; i < dayRaces.length; i++) {
           const newSlot = i % 2; // 0 = matin, 1 = soir
-          await Race.findByIdAndUpdate(dayRaces[i]._id, { slot: newSlot });
+          // Corriger aussi les heures de scheduledDate pour coller au slot
+          const fixedDate = new Date(dayRaces[i].scheduledDate);
+          fixedDate.setHours(newSlot === 1 ? 17 : 11, 0, 0, 0);
+          await Race.findByIdAndUpdate(dayRaces[i]._id, { slot: newSlot, scheduledDate: fixedDate });
           updated++;
         }
       }
