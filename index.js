@@ -2337,10 +2337,17 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const overcutTracker  = new Map(); // pilotId → { startLap, rivalId, myPosAtStart }
 
   const send = async (msg) => {
-    if (!channel) return;
+    if (!channel) {
+      console.warn('[simulateRace] channel est null — les messages de course ne peuvent pas être envoyés !');
+      return;
+    }
     if (msg.length > 1950) msg = msg.slice(0, 1947) + '…';
-    try { await channel.send(msg); } catch(e) { console.error('send error:', e.message); }
-    await sleep(9000);
+    try {
+      await channel.send(msg);
+    } catch(e) {
+      console.error('[simulateRace] send error T' + lap + ':', e.message, '— Code:', e.code || 'N/A');
+    }
+    await sleep(9000); // toujours attendre, même en cas d'erreur Discord
   };
 
   const sendEmbed = async (embed) => {
@@ -2406,6 +2413,10 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     const alive    = drivers.filter(d => !d.dnf);
     const dnfCount = drivers.filter(d => d.dnf).length;
 
+    const events       = []; // { priority, text }
+    const lapDnfs      = []; // DNFs survenus CE tour — pour expliquer le SC
+    const lapIncidents = []; // incidents ce tour pour SC logic
+
     // ── Changement de météo dynamique ───────────────────────
     if (lap === nextWeatherChangeLap && lap < totalLaps - 5) {
       const prevWeather = weather;
@@ -2463,10 +2474,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
       }
     }
-
-    const events    = []; // { priority, text }
-    const lapDnfs   = []; // DNFs survenus CE tour — pour expliquer le SC
-    const lapIncidents = []; // incidents ce tour pour SC logic
 
     // Snapshot des positions avant ce tour
     alive.forEach(d => { d.lastPos = d.pos; });
@@ -6154,7 +6161,11 @@ async function handleInteraction(interaction) {
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     const gpIndex = interaction.options.getInteger('gp_index');
     await interaction.reply({ content: `🏁 Course lancée${gpIndex !== null ? ` (GP index ${gpIndex})` : ''} ! Suivez le direct dans le channel de course.`, ephemeral: true });
-    runRace(interaction.channel, gpIndex).catch(e => console.error('admin_force_race error:', e.message));
+    runRace(interaction.channel, gpIndex).catch(e => {
+      console.error('❌ [admin_force_race] CRASH DE COURSE :', e.message);
+      console.error(e.stack);
+    });
+    return;
   }
 
   if (commandName === 'admin_stop_race') {
