@@ -4043,7 +4043,7 @@ const commands = [
   new SlashCommandBuilder().setName('admin_stop_race')
     .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
   new SlashCommandBuilder().setName('admin_fix_slots')
-    .setDescription('[ADMIN] Recalcule les slots (matin/soir) de tous les GP de la saison active — à lancer après passage 2 GP/jour'),
+    .setDescription('[ADMIN] Recalcule les slots matin/soir des GP de la saison active.'),
   new SlashCommandBuilder().setName('admin_skip_gp')
     .setDescription('[ADMIN] Saute le GP en cours sans le simuler (rattraper un retard)')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP à sauter — défaut: GP en cours').setMinValue(0)),
