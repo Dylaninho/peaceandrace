@@ -3201,6 +3201,64 @@ const exitNeighborStr = neighborAhead && neighborBehind
       }
     }
 
+
+    // ── Dérives de position (pneus usés) et remontées (pneus frais) ──────────────
+    // Tout mouvement >= 2 places non narré comme overtake direct est commenté ici.
+    if (!scActive && !justRestarted && lap > 2) {
+      for (const driver of ranked) {
+        if (driver.pittedThisLap) continue;
+        if (driver.dnf) continue;
+
+        const posChange = driver.lastPos - driver.pos; // >0 = remonté, <0 = reculé
+        if (Math.abs(posChange) < 2) continue;
+
+        const n         = `${driver.team.emoji}**${driver.pilot.name}**`;
+        const worn      = driver.tireWear || 0;
+        const wornThresh = wornThresholdFor(driver.tireCompound, driver.team, driver.pilot);
+        const isTireWorn  = worn > wornThresh * 0.85;
+        const isFreshTire = (driver.warmupLapsLeft || 0) === 0 && (driver.tireAge || 0) < 8 && (driver.pitStops || 0) > 0;
+        const tireEmoji   = TIRE[driver.tireCompound]?.emoji || '🏎️';
+
+        if (posChange < 0) {
+          // Perte de positions
+          const lost     = Math.abs(posChange);
+          const severity = lost >= 5 ? '🚨' : '⚠️';
+          if (isTireWorn) {
+            events.push({ priority: 3, text: pick([
+              `${severity} **T${lap}** — ${n} dégringole **P${driver.lastPos}→P${driver.pos}** ! ${tireEmoji} Pneus complètement dépassés — il perd du temps à chaque virage. *L'arrêt devient urgent.*`,
+              `${severity} **T${lap}** — ${n} perd **${lost} place${lost>1?'s':''}** (P${driver.lastPos}→P${driver.pos}). ${tireEmoji} Dégradation critique — il ne peut plus défendre.`,
+              `${severity} **T${lap}** — Décrochage pour ${n} : P${driver.lastPos}→**P${driver.pos}**. ${tireEmoji} Les gommes sont à bout — chaque tour coûte des dixièmes.`,
+            ]) });
+          } else {
+            events.push({ priority: 3, text: pick([
+              `⚠️ **T${lap}** — ${n} recule **P${driver.lastPos}→P${driver.pos}** — rythme en baisse inexpliquée.`,
+              `⚠️ **T${lap}** — ${n} perd **${lost} place${lost>1?'s':''}** (P${driver.lastPos}→P${driver.pos}). *L'écurie analyse.*`,
+            ]) });
+          }
+        } else {
+          // Gain de positions
+          const gained = posChange;
+          if (isFreshTire) {
+            events.push({ priority: 4, text: pick([
+              `📈 **T${lap}** — ${n} remonte **P${driver.lastPos}→P${driver.pos}** sur pneus frais ${tireEmoji} ! Les gommes neuves font toute la différence.`,
+              `📈 **T${lap}** — ${n} (+${gained} place${gained>1?'s':''}, P${driver.lastPos}→**P${driver.pos}**) — ses pneus frais ${tireEmoji} lui donnent 1-2s d'avance au tour. La stratégie paye.`,
+              `📈 **T${lap}** — La remontée de ${n} est impressionnante : P${driver.lastPos}→**P${driver.pos}** en quelques tours sur gommes neuves ${tireEmoji}.`,
+            ]) });
+          } else if (lapDnfs.length > 0 && gained >= 3) {
+            events.push({ priority: 2, text:
+              `📊 **T${lap}** — ${n} remonte **P${driver.lastPos}→P${driver.pos}** après les abandons.`,
+            });
+          } else {
+            events.push({ priority: 3, text: pick([
+              `📈 **T${lap}** — ${n} progresse **P${driver.lastPos}→P${driver.pos}** — belle régularité.`,
+              `📈 **T${lap}** — ${n} grappille **${gained} place${gained>1?'s':''}** (P${driver.lastPos}→P${driver.pos}) sans qu'on l'ait vu venir.`,
+            ]) });
+          }
+        }
+      }
+    }
+
+
     // ── Undercut : confirmation 2-4 tours après ──────────────
     for (const [undId, uc] of undercutTracker.entries()) {
       if (lap < uc.pitLap + 2) continue;
