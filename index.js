@@ -3631,15 +3631,26 @@ async function getActiveSeason() {
 
 async function getCurrentRace(season, slot = null) {
   if (!season) return null;
-  const query = { seasonId: season._id, status: { $ne: 'done' } };
-  if (slot !== null) query.slot = slot;
-  return Race.findOne(query).sort({ index: 1 });
+  // Si les courses ont un champ slot assigné, on l'utilise directement
+  const withSlot = await Race.findOne({ seasonId: season._id, slot: { $exists: true, $ne: null } }).limit(1);
+  if (withSlot) {
+    const query = { seasonId: season._id, status: { $nin: ['done', 'race_computed'] } };
+    if (slot !== null) query.slot = slot;
+    return Race.findOne(query).sort({ index: 1 });
+  }
+  // Fallback : pas de slot en BDD — slot 0 = 1ère course non-done, slot 1 = 2ème course non-done
+  const query = { seasonId: season._id, status: { $nin: ['done', 'race_computed'] } };
+  const races  = await Race.find(query).sort({ index: 1 }).limit(2);
+  if (slot === 1) return races[1] || null;
+  return races[0] || null;
 }
 
 // Détermine le slot actuel selon l'heure (Paris)
+// Slot 0 (matin)  : 11h–15h59 → EL 11h · Q 13h · Course 15h
+// Slot 1 (soir)   : 16h–20h59 → EL 17h · Q 18h · Course 20h
 function getCurrentSlot() {
-  const hour = new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris', hour: 'numeric', hour12: false });
-  return parseInt(hour) >= 16 ? 1 : 0; // avant 16h = slot matin, après = slot soir
+  const hour = parseInt(new Date().toLocaleString('en-US', { timeZone: 'Europe/Paris', hour: 'numeric', hour12: false }));
+  return hour >= 16 ? 1 : 0;
 }
 
 async function getAllPilotsWithTeams() {
@@ -4067,6 +4078,9 @@ const commands = [
 
   new SlashCommandBuilder().setName('calendrier')
     .setDescription('Calendrier de la saison'),
+
+  new SlashCommandBuilder().setName('planning')
+    .setDescription('📅 Prochains GPs avec leurs horaires (EL · Qualifs · Course)'),
 
   new SlashCommandBuilder().setName('resultats')
     .setDescription('Résultats de la dernière course'),
@@ -5167,7 +5181,7 @@ async function handleInteraction(interaction) {
       const d = new Date(r.scheduledDate);
       const dateStr  = `${d.getDate()}/${d.getMonth()+1}`;
       const slotTag  = r.slot === 1 ? '🌆 17h' : '🌅 11h';
-      const status   = r.status === 'done' ? '✅' : r.status === 'practice_done' ? '🔧' : r.status === 'quali_done' ? '⏱️' : '🔜';
+      const status   = (r.status === 'done' || r.status === 'race_computed') ? '✅' : r.status === 'practice_done' ? '🔧' : r.status === 'quali_done' ? '⏱️' : '🔜';
       return `${status} ${r.emoji} **${r.circuit}** — ${dateStr} ${slotTag} ${styleEmojis[r.gpStyle]}`;
     });
 
@@ -5176,6 +5190,67 @@ async function handleInteraction(interaction) {
     const embed = new EmbedBuilder().setTitle(`📅 Calendrier — Saison ${season.year}`).setColor('#0099FF').setDescription(chunks[0]);
     if (chunks[1]) embed.addFields({ name: '\u200B', value: chunks[1] });
     return interaction.editReply({ embeds: [embed] });
+  }
+
+  // ── /planning ─────────────────────────────────────────────
+  if (commandName === 'planning') {
+    const season = await getActiveSeason();
+    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
+
+    // Prochains GPs non terminés (max 6 = ~3 jours)
+    const upcoming = await Race.find({
+      seasonId: season._id,
+      status: { $nin: ['done', 'race_computed'] },
+    }).sort({ index: 1 }).limit(6);
+
+    if (!upcoming.length)
+      return interaction.editReply({ content: '🏁 Tous les GPs de la saison sont terminés !', ephemeral: true });
+
+    const seStyle = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+
+    const fields = upcoming.map(r => {
+      const d        = new Date(r.scheduledDate);
+      const dateStr  = d.toLocaleDateString('fr-FR', { timeZone: 'Europe/Paris', weekday: 'long', day: 'numeric', month: 'long' });
+      const isSlot1  = r.slot === 1;
+      const elH      = isSlot1 ? '17h00' : '11h00';
+      const qH       = isSlot1 ? '18h00' : '13h00';
+      const rH       = isSlot1 ? '20h00' : '15h00';
+      const slotIcon = isSlot1 ? '🌆' : '🌅';
+      const style    = seStyle[r.gpStyle] || '';
+
+      const isDone  = r.status === 'done' || r.status === 'race_computed';
+      const isQDone = isDone || r.status === 'quali_done';
+      const isEDone = isQDone || r.status === 'practice_done';
+
+      const next   = ' **← prochain**';
+      const elLine = isEDone
+        ? `~~🔧 Essais Libres — ${elH}~~ ✅`
+        : `🔧 **Essais Libres** — ${elH}${r.status === 'upcoming' ? next : ''}`;
+      const qLine  = isQDone
+        ? `~~⏱️ Qualifications — ${qH}~~ ✅`
+        : `⏱️ **Qualifications** — ${qH}${r.status === 'practice_done' ? next : ''}`;
+      const rLine  = isDone
+        ? `~~🏁 Course — ${rH}~~ ✅`
+        : `🏁 **Course** — ${rH}${r.status === 'quali_done' ? next : ''}`;
+
+      return {
+        name : `${r.emoji} ${r.circuit} ${style} · ${slotIcon} ${dateStr}`,
+        value: `${elLine}\n${qLine}\n${rLine}`,
+        inline: false,
+      };
+    });
+
+    const planEmbed = new EmbedBuilder()
+      .setTitle('🗓️ Planning des prochains GPs')
+      .setColor('#FF6600')
+      .setDescription(
+        '> 🌅 **GP Matin** : EL **11h** · Qualifs **13h** · Course **15h**\n' +
+        '> 🌆 **GP Soir**  : EL **17h** · Qualifs **18h** · Course **20h**\n\u200B'
+      )
+      .addFields(fields)
+      .setFooter({ text: `Saison ${season.year} · Horaires heure de Paris (CET/CEST)` });
+
+    return interaction.editReply({ embeds: [planEmbed] });
   }
 
   // ── /resultats ────────────────────────────────────────────
@@ -5870,6 +5945,7 @@ async function handleInteraction(interaction) {
           '`/classement` — Championnat pilotes saison en cours',
           '`/classement_constructeurs` — Championnat constructeurs',
           '`/calendrier` — Tous les GP de la saison',
+          '`/planning` — Prochains GPs avec leurs horaires détaillés',
           '`/resultats` — Résultats de la dernière course',
           '`/palmares` — 🏛️ Hall of Fame de toutes les saisons',
         ].join('\n') },
@@ -6541,13 +6617,13 @@ async function getRaceChannel(override) {
 
 async function isRaceDay(race, override) {
   if (override) return true;
-  const today = new Date(); today.setHours(0,0,0,0);
-  const d     = new Date(race.scheduledDate); d.setHours(0,0,0,0);
-  if (d.getTime() !== today.getTime()) return false;
-  // Vérifier aussi que le slot correspond à l'heure actuelle
-  const currentSlot = getCurrentSlot();
-  if (race.slot !== undefined && race.slot !== currentSlot) return false;
-  return true;
+  // Comparaison en timezone Europe/Paris pour éviter les décalages UTC
+  const opts  = { timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit' };
+  const today   = new Date().toLocaleDateString('fr-FR', opts);
+  const raceDay = new Date(race.scheduledDate).toLocaleDateString('fr-FR', opts);
+  // La vérification de slot est gérée en amont dans getCurrentRace()
+  // On ne la recheck pas ici pour ne pas bloquer les lancements automatiques
+  return today === raceDay;
 }
 
 async function runPractice(override, gpIndex = null) {
