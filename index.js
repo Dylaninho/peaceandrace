@@ -5281,6 +5281,8 @@ const commands = [
     .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
   new SlashCommandBuilder().setName('admin_fix_slots')
     .setDescription('[ADMIN] Recalcule les slots matin/soir des GP de la saison active.'),
+  new SlashCommandBuilder().setName('admin_fix_emojis')
+    .setDescription('[ADMIN] Synchronise les emojis des écuries en BDD depuis le code source.'),
   new SlashCommandBuilder().setName('admin_replan')
     .setDescription('[ADMIN] Replanifie tout le calendrier à partir d\'un GP de référence + date')
     .addIntegerOption(o => o.setName('gp_index')
@@ -7546,6 +7548,22 @@ async function handleInteraction(interaction) {
       content: '▶️ **Scheduler réactivé.** Les GPs se lanceront automatiquement aux horaires habituels.\n> 🌅 11h EL · 13h Q · 15h Course\n> 🌆 17h EL · 18h Q · 20h Course',
       ephemeral: false,
     });
+  }
+
+  // ── /admin_fix_emojis ─────────────────────────────────────
+  if (commandName === 'admin_fix_emojis') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
+    try {
+      const lines = [];
+      for (const def of DEFAULT_TEAMS) {
+        const res = await Team.updateOne({ name: def.name }, { $set: { emoji: def.emoji } });
+        if (res.matchedCount > 0) lines.push(`${def.emoji} **${def.name}** ✅`);
+        else lines.push(`⚠️ **${def.name}** — introuvable en BDD`);
+      }
+      return interaction.editReply(`**Synchronisation des emojis :**\n${lines.join('\n')}`);
+    } catch(e) { return interaction.editReply(`❌ Erreur : ${e.message}`); }
   }
 
   if (commandName === 'admin_fix_slots') {
