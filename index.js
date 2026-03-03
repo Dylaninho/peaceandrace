@@ -6523,7 +6523,7 @@ async function isRaceDay(race, override) {
 
 async function runPractice(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
-  const slot   = gpIndex !== null ? null : getCurrentSlot();
+  const slot   = (gpIndex !== null || override) ? null : getCurrentSlot();
   const race   = gpIndex !== null
     ? await Race.findOne({ seasonId: season._id, index: gpIndex })
     : await getCurrentRace(season, slot);
@@ -6581,7 +6581,7 @@ async function runPractice(override, gpIndex = null) {
 
 async function runQualifying(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
-  const slot   = gpIndex !== null ? null : getCurrentSlot();
+  const slot   = (gpIndex !== null || override) ? null : getCurrentSlot();
   const race   = gpIndex !== null
     ? await Race.findOne({ seasonId: season._id, index: gpIndex })
     : await getCurrentRace(season, slot);
@@ -6955,7 +6955,7 @@ async function sendSeasonCeremony(season, channel) {
 
 async function runRace(override, gpIndex = null) {
   const season = await getActiveSeason(); if (!season) return;
-  const slot   = gpIndex !== null ? null : getCurrentSlot();
+  const slot   = (gpIndex !== null || override) ? null : getCurrentSlot();
   const race   = gpIndex !== null
     ? await Race.findOne({ seasonId: season._id, index: gpIndex })
     : await getCurrentRace(season, slot);
