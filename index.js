@@ -2419,11 +2419,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const oddLines  = drivers.filter((_, i) => i % 2 === 0).map((d, i) => makeGridLine(d, i * 2 + 1));
   const evenLines = drivers.filter((_, i) => i % 2 === 1).map((d, i) => makeGridLine(d, i * 2 + 2));
 
-  // Discord embed description limit 4096 — split grid if needed
-  const half      = Math.ceil(drivers.length / 2);
-  const gridLeft  = gridLines.slice(0, half).join('\n');
-  const gridRight = gridLines.slice(half).join('\n');
-
   const gridEmbed = new EmbedBuilder()
     .setTitle(`🏎️ GRILLE DE DÉPART — ${race.emoji} ${race.circuit}`)
     .setColor('#FF1801')
@@ -4556,7 +4551,7 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_replan', 'admin_stop_race'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race'].includes(commandName);
@@ -6429,8 +6424,7 @@ async function handleInteraction(interaction) {
   //   → GP 5 = 3 mars soir, GP 4 = 3 mars matin, GP 3 = 2 mars soir...
   if (commandName === 'admin_replan') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-    await interaction.deferReply({ ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
     try {
       const season = await getActiveSeason();
       if (!season) return interaction.editReply('❌ Pas de saison active.');
