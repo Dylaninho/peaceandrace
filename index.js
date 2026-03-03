@@ -6381,30 +6381,30 @@ async function handleInteraction(interaction) {
       if (!season) return interaction.editReply('❌ Pas de saison active.');
       const races = await Race.find({ seasonId: season._id }).sort({ index: 1 });
       if (!races.length) return interaction.editReply('❌ Aucun GP trouvé.');
-      // Regrouper les races par jour (date sans heure)
-      const byDay = new Map();
-      for (const r of races) {
-        const key = new Date(r.scheduledDate).toDateString();
-        if (!byDay.has(key)) byDay.set(key, []);
-        byDay.get(key).push(r);
-      }
-      // Réassigner les slots en s'assurant qu'il y a exactement 2 GP/jour
+      // ── slot = index % 2, indépendamment de la date ──────────────────────
+      // index pair (0,2,4..)  = slot 0 matin (11h EL · 13h Q · 15h Course)
+      // index impair (1,3,5.) = slot 1 soir  (17h EL · 18h Q · 20h Course)
+      // Grouper par date était faux si chaque GP avait une date différente —
+      // l'index est la seule source de vérité fiable.
+      // On reconstruit aussi la scheduledDate depuis le GP#0 comme ancre.
+      const anchor = new Date(races[0].scheduledDate);
+      anchor.setHours(11, 0, 0, 0);
       let updated = 0;
-      for (const [, dayRaces] of byDay) {
-        // Trier par index pour avoir un ordre stable
-        dayRaces.sort((a, b) => a.index - b.index);
-        for (let i = 0; i < dayRaces.length; i++) {
-          const newSlot = i % 2; // 0 = matin, 1 = soir
-          // Corriger aussi les heures de scheduledDate pour coller au slot
-          const fixedDate = new Date(dayRaces[i].scheduledDate);
-          fixedDate.setHours(newSlot === 1 ? 17 : 11, 0, 0, 0);
-          await Race.findByIdAndUpdate(dayRaces[i]._id, { slot: newSlot, scheduledDate: fixedDate });
-          updated++;
-        }
+      for (const r of races) {
+        const slot      = r.index % 2;
+        const dayOffset = Math.floor(r.index / 2);
+        const fixedDate = new Date(anchor);
+        fixedDate.setDate(anchor.getDate() + dayOffset);
+        fixedDate.setHours(slot === 1 ? 17 : 11, 0, 0, 0);
+        await Race.findByIdAndUpdate(r._id, { slot, scheduledDate: fixedDate });
+        updated++;
       }
-      return interaction.editReply(`✅ **${updated}** GP mis à jour avec slots matin/soir.
-> 🌅 slot 0 : 11h EL · 13h Q · 15h Course
-> 🌆 slot 1 : 17h EL · 18h Q · 20h Course`);
+      return interaction.editReply(
+        `✅ **${updated}** GP recalculés (slot = index % 2).\n` +
+        `> 🌅 index pair  → slot 0 · 11h EL · 13h Q · 15h Course\n` +
+        `> 🌆 index impair → slot 1 · 17h EL · 18h Q · 20h Course\n` +
+        `> 📅 Dates reconstruites depuis le GP #0.`
+      );
     } catch(e) { return interaction.editReply(`❌ Erreur : ${e.message}`); }
   }
 
