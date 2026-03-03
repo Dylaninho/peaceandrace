@@ -613,15 +613,17 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
 
   // Pneus — dégradation linéaire avec légère accélération après 70% de vie utile
   const tireData = TIRE[tireCompound];
-  if (!tireData) return 90_000; // fallback si compound inconnu
+  if (!tireData) return 90_000;
   const carTireBonus   = Math.max(-0.3, Math.min(0.3, (team.conservationPneus - 70) / 70 * 0.3));
   const pilotTireBonus = Math.max(-0.2, Math.min(0.2, (pilot.gestionPneus - 50) / 50 * 0.2));
   const effectiveDeg   = Math.max(0.0001, tireData.deg * (1 - carTireBonus - pilotTireBonus * 0.5));
-  // tireLifeRef = seuil de tour où le cliff commence (SOFT~25, MEDIUM~38, HARD~60)
-  const tireLifeRef  = 0.06 / effectiveDeg;
-  const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 1.8);
-  // Cliff linéaire : au-delà de 70% de vie, dégradation ×2.5 supplémentaire
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 2.5;
+  // tireLifeRef = durée de vie nominale par compound (tours avant cliff)
+  // Cohérent avec wornThresholdFor : SOFT~20, MEDIUM~32, HARD~48
+  const tireLifeBase = tireCompound === 'SOFT' ? 20 : tireCompound === 'HARD' ? 48 : 32;
+  const tireLifeRef  = tireLifeBase * (1 + carTireBonus * 0.5 + pilotTireBonus * 0.5);
+  const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.0);
+  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×3 au-delà
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 3.5;
   const wearPenalty  = tireWear * effectiveDeg * cliffFactor;
   const tireF        = (1 + wearPenalty) / tireData.grip;
 
@@ -685,14 +687,51 @@ function chooseStartCompound(laps, weather) {
   return Math.random() > 0.6 ? 'HARD' : 'MEDIUM';
 }
 
-function shouldPit(driver, lapsRemaining, gapAhead, totalLaps) {
+// ─── Durée de vie des pneus (réaliste F1) ─────────────────
+// SOFT  : ~18-25 tours avant le cliff
+// MEDIUM: ~28-38 tours avant le cliff
+// HARD  : ~40-55 tours avant le cliff
+// Ces valeurs sont des seuils d'usure (tireWear = tours sur ces pneus)
+// Modifiées par la conservationPneus de la voiture et gestionPneus du pilote
+function wornThresholdFor(tireCompound, team, pilot) {
+  const base = tireCompound === 'SOFT' ? 20 : tireCompound === 'HARD' ? 48 : 32; // MEDIUM=32
+  const carBonus   = (team.conservationPneus  - 70) * 0.18;  // ±5 tours max
+  const pilotBonus = (pilot.gestionPneus      - 50) * 0.12;  // ±6 tours max
+  return Math.max(8, base + carBonus + pilotBonus);
+}
+
+function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false) {
   const { tireWear, tireCompound, pilot, team, tireAge, pitStops, pitStrategy, overcutMode } = driver;
+
+  // ── Pit opportuniste sous SC ────────────────────────────────
+  // Si SC actif et qu'on n'a pas encore pité (ou qu'on doit encore piter) :
+  // c'est la fenêtre parfaite — on perd peu de places car tout le monde est groupé.
+  if (scActive && lapsRemaining > 6 && (pitStops || 0) < 2) {
+    const needsPitAnyway = tireWear > wornThresholdFor(tireCompound, team, pilot) * 0.5;
+    // Les pilotes qui ont encore à piter sautent sur l'opportunité SC
+    const stillNeedToStop = (pitStrategy === 'two_stop' && (pitStops || 0) < 2) ||
+                            (pitStops === 0); // pas encore pité du tout
+    if (stillNeedToStop || needsPitAnyway) {
+      // Probabilité plus haute si pneus déjà bien usés ou si pit de toute façon nécessaire
+      const scPitChance = needsPitAnyway ? 0.80 : 0.55;
+      if (Math.random() < scPitChance) return { pit: true, reason: 'sc_opportunity' };
+    }
+  }
 
   // Minimum de tours sur les pneus (sauf réparation forcée via tireAge=99)
   if (tireAge !== 99) {
-    const minLapsOnTire = pitStops === 0 ? 12 : 8;
+    const minLapsOnTire = pitStops === 0 ? 10 : 6;
     if ((tireAge || 0) < minLapsOnTire) return { pit: false, reason: null };
   }
+
+  // ── Dernier recours : fin de course et jamais pité ──────────
+  // Règle F1 : obligation d'utiliser 2 compounds → forcer un pit si jamais arrêté
+  if ((pitStops || 0) === 0 && lapsRemaining <= 12 && lapsRemaining > 5) {
+    const forcedChance = 0.35 + (12 - lapsRemaining) * 0.08; // monte de 35% à ~99% sur les 8 derniers tours
+    if (Math.random() < forcedChance) return { pit: true, reason: 'forced_compound' };
+  }
+  // Ultime filet : si on arrive au tour -5 sans jamais pité, pit systématique
+  if ((pitStops || 0) === 0 && lapsRemaining <= 5) return { pit: true, reason: 'forced_compound' };
 
   // Stratégie 1-stop : attend 38% de la course avant le 1er arrêt
   if (pitStrategy === 'one_stop' && (pitStops || 0) === 0) {
@@ -708,25 +747,17 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps) {
   // Mode overcut : reste dehors intentionnellement
   if (overcutMode && (tireWear || 0) < 30 && lapsRemaining > 12) return { pit: false, reason: null };
 
-  // Seuils en tours (tireWear = nombre de tours sur ces pneus)
-  // MEDIUM: pit autour de lap 38 ± ajustements; SOFT: plus tôt; HARD: plus tard
-  const compoundFactor = tireCompound === 'SOFT' ? 0.65 : tireCompound === 'HARD' ? 1.4 : 1.0;
-  const wornBase = 35 * compoundFactor;
-  const wornThreshold = wornBase - (team.conservationPneus - 70) * 0.2 - (pilot.gestionPneus - 50) * 0.15;
-  const urgentThreshold = wornThreshold * 1.2; // on attend plus longtemps si possible
+  // ── Seuils d'usure ───────────────────────────────────────────
+  const wornThreshold  = wornThresholdFor(tireCompound, team, pilot);
+  const urgentThreshold = wornThreshold * 1.25;
 
-  if (tireWear > urgentThreshold) return { pit: true, reason: 'tires_worn' }; // obligé
-  if (tireWear > wornThreshold && Math.random() < 0.6) return { pit: true, reason: 'tires_worn' }; // progressif
+  if (tireWear > urgentThreshold) return { pit: true, reason: 'tires_worn' };
+  if (tireWear > wornThreshold && Math.random() < 0.65) return { pit: true, reason: 'tires_worn' };
 
-  // Undercut — conditions strictes pour éviter le chaos post-SC
-  // Pas d'undercut dans les X premiers tours de pneus (sinon tout le monde undercut post-SC)
-  if (gapAhead !== null && gapAhead < 1500 && tireWear > 22 && lapsRemaining > 18 && (tireAge || 0) >= 14) {
-    // Cooldown personnel : le pilote ne peut pas undercut 2 fois de suite (lastUndercutLap)
+  // Undercut
+  if (!scActive && gapAhead !== null && gapAhead < 1500 && tireWear > 20 && lapsRemaining > 18 && (tireAge || 0) >= 12) {
     const lastUnd = driver.lastUndercutLap || -99;
-    if (lapsRemaining > (lastUnd - 4)) return { pit: false, reason: null }; // bloque pendant 4 tours après le dernier undercut
-    // Probabilité réduite : ~10% par tour pour un pilote très agressif (depassement=100)
-    // → sur 15 tours : ~79% de chance total (réaliste, pas systématique)
-    // ~12%/tour pilote agressif (d=100), ~8%/tour moyen (d=60), réaliste
+    if (lapsRemaining > (lastUnd - 4)) return { pit: false, reason: null };
     const undChance = (pilot.depassement / 100) * 0.12;
     if (Math.random() < undChance) return { pit: true, reason: 'undercut' };
   }
@@ -1295,15 +1326,17 @@ function defenseDescription(defender, attacker, gpStyle) {
 }
 
 // ─── Descriptions de CONTRE-ATTAQUE (repasse après avoir été passé) ─────────
+// attacker = celui qui REPREND sa place (vient de se faire passer, contre-attaque)
+// defender = celui qui venait de passer (se fait re-passer)
 function counterAttackDescription(attacker, defender, gpStyle) {
   const a = `${attacker.team.emoji}**${attacker.pilot.name}**`;
   const d = `${defender.team.emoji}**${defender.pilot.name}**`;
   return pick([
-    `***⚡ CONTRE-ATTAQUE IMMÉDIATE !*** ${a} avait passé ${d}, mais ${d} retarde son freinage au maximum — ***il REPASSE !*** Incroyable !`,
-    `***🔄 IL REPREND SA PLACE !*** ${d} passe à l'intérieur du prochain virage — ${a} ne s'y attendait pas ! ***INVERSION !***`,
-    `***😤 PAS QUESTION DE LAISSER ÇA !*** ${d} répond dans la foulée — il force son chemin et reprend la position ! ***FANTASTIQUE !***`,
-    `***💥 RÉPONSE IMMÉDIATE !*** ${a} avait cru avoir fait le plus dur, mais ${d} est là — freinage tardif, corde parfaite. ***Il revient !***`,
-    `🔄 ${d} ne se laisse pas faire — il trouve l'ouverture au virage suivant et récupère sa position dans la foulée !`,
+    `***⚡ CONTRE-ATTAQUE IMMÉDIATE !*** ${d} avait cru avoir fait le plus dur, mais ${a} retarde son freinage au maximum — ***il REPASSE !*** Incroyable !`,
+    `***🔄 IL REPREND SA PLACE !*** ${a} passe à l'intérieur du prochain virage — ${d} ne s'y attendait pas ! ***INVERSION !***`,
+    `***😤 PAS QUESTION DE LAISSER ÇA !*** ${a} répond dans la foulée — il force son chemin et reprend la position ! ***FANTASTIQUE !***`,
+    `***💥 RÉPONSE IMMÉDIATE !*** ${d} avait cru avoir fait le plus dur, mais ${a} est là — freinage tardif, corde parfaite. ***Il revient !***`,
+    `🔄 ${a} ne se laisse pas faire — il trouve l'ouverture au virage suivant et récupère sa position dans la foulée !`,
   ]);
 }
 
@@ -2907,7 +2940,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       const gapAhead = myIdx > 0 ? driver.totalTime - aliveNow[myIdx - 1].totalTime : null;
 
       // Sous SC ou dans les 4 tours post-SC : pas d'undercut (tout le monde est groupé)
-      const { pit, reason: rawReason } = shouldPit(driver, lapsRemaining, gapAhead, totalLaps);
+      const { pit, reason: rawReason } = shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive);
       const blockUndercut = scActive || scCooldown > 0;
       const reason = (blockUndercut && rawReason === 'undercut') ? null : rawReason;
       const doPit  = pit && reason !== null;
@@ -2960,7 +2993,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         const posOut = driver.pos;
         const pitDur = (pitTime / 1000).toFixed(1);
 
-        const scPitTag = scActive ? ' 🚨 *sous Safety Car*' : '';
+        const scPitTag = scActive
+          ? (rawReason === 'sc_opportunity'
+              ? ' 🚨 *pit stratégique sous Safety Car — le meilleur moment pour s\'arrêter !*'
+              : ' 🚨 *sous Safety Car*')
+          : '';
         // Position sur la piste vs position en timing
         // Les pilotes qui n'ont pas encore pité et ont moins de totalTime sont "devant" sur la piste
         const carsAheadOnTrack = drivers.filter(d =>
