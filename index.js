@@ -329,7 +329,7 @@ const DEFAULT_TEAMS = [
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
   { name:'Williams',        emoji:'🔵', color:'#00B4D8', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
-  { name:'Haas',            emoji:'⬜', color:'#AAAAAA', budget:100,
+  { name:'Haas',            emoji:'⚪', color:'#AAAAAA', budget:100,
     vitesseMax:75, drs:75, refroidissement:75, dirtyAir:75, conservationPneus:75, vitesseMoyenne:75, devPoints:0 },
 ];
 
@@ -840,32 +840,40 @@ async function simulateQualifying(race, pilots, teams) {
   const q3Size = Math.min(10, Math.max(3, Math.floor(n * 0.5)));
   const q2Size = Math.min(15, Math.max(q3Size + 2, Math.floor(n * 0.75)));
 
+  // ── Forme du jour : bonus/malus unique par pilote (±800ms) ──
+  // Permet de redistribuer ~3-4 positions entre Q1, Q2 et Q3
+  function makeSessionForm() {
+    return new Map(pilots.map(p => [String(p._id), randInt(-600, 600)]));
+  }
+
   // ── Track evolution par segment : les temps s'améliorent au fil des tours ──
   // Chaque segment donne jusqu'à -400ms grâce à l'évolution de la gomme
-  function baseTime(pilot, team, trackEvoBonus = 0) {
+  function baseTime(pilot, team, trackEvoBonus = 0, sessionForm = null) {
     const base = calcQualiTime(pilot, team, weather, race.gpStyle);
-    return base - trackEvoBonus;
+    const form = sessionForm ? (sessionForm.get(String(pilot._id)) || 0) : 0;
+    return base - trackEvoBonus + form;
   }
 
   // ── Tenter un tour rapide ─────────────────────────────────
   // Un pilote peut améliorer ou non selon son niveau et un peu de variance
   // aborted : true si tour annulé (drapeau jaune, trafic, erreur)
-  function tryLap(pilot, team, best, trackEvoBonus = 0, yellowFlag = false) {
+  function tryLap(pilot, team, best, trackEvoBonus = 0, yellowFlag = false, sessionForm = null) {
     if (yellowFlag && Math.random() < 0.55) return { time: Infinity, aborted: true };
-    const raw = baseTime(pilot, team, trackEvoBonus) + randInt(-350, 350);
+    const raw = baseTime(pilot, team, trackEvoBonus, sessionForm) + randInt(-400, 400);
     const aborted = Math.random() < 0.04; // 4% de chance d'annuler son tour (erreur, trafic)
     if (aborted) return { time: Infinity, aborted: true };
     return { time: Math.min(best, raw), aborted: false, improved: raw < best };
   }
 
   // ── Q1 — 2 tentatives + track evo progressive ─────────────
+  const q1Form = makeSessionForm(); // forme unique pour toute la Q1
   let q1State = pilots.map(pilot => {
     const team = teams.find(t => String(t._id) === String(pilot.teamId));
     if (!team) return null;
-    const evo1 = randInt(0, 150);   // 1er run : piste encore froide
-    const evo2 = randInt(100, 300); // 2e run : piste mieux caoutchoutée
-    const r1 = tryLap(pilot, team, Infinity, evo1);
-    const r2 = tryLap(pilot, team, r1.aborted ? Infinity : r1.time, evo2);
+    const evo1 = randInt(0, 150);
+    const evo2 = randInt(100, 300);
+    const r1 = tryLap(pilot, team, Infinity, evo1, false, q1Form);
+    const r2 = tryLap(pilot, team, r1.aborted ? Infinity : r1.time, evo2, false, q1Form);
     const bestTime = Math.min(
       r1.aborted ? Infinity : r1.time,
       r2.aborted ? Infinity : r2.time
@@ -892,7 +900,7 @@ async function simulateQualifying(race, pilots, teams) {
   const firstOut = q1State[q2Size];   // premier éliminé
   if (cutQ1 && firstOut) {
     const gap = (firstOut.time - cutQ1.time) / 1000;
-    if (gap < 0.15) q1Events.push({ type: 'thriller_q1', gap, safe: cutQ1, elim: firstOut });
+    if (gap > 0 && gap < 0.15) q1Events.push({ type: 'thriller_q1', gap, safe: cutQ1, elim: firstOut });
   }
 
   // ── Q2 — 2 tentatives avec plus d'evo ─────────────────────
@@ -903,12 +911,13 @@ async function simulateQualifying(race, pilots, teams) {
   const yellowFlagQ2 = Math.random() < 0.30;
   const yellowFlagPilotQ2 = yellowFlagQ2 ? pick(q2Candidates) : null;
 
+  const q2Form = makeSessionForm(); // nouvelle forme pour Q2 — classement peut changer
   let q2State = q2Candidates.map(s => {
     const evo1 = randInt(150, 300);
     const evo2 = randInt(250, 450);
-    const isYellow = yellowFlagQ2 && (Math.random() < 0.5); // ~50% affectés si drapeau
-    const r1 = tryLap(s.pilot, s.team, s.time, evo1, isYellow);
-    const r2 = tryLap(s.pilot, s.team, r1.aborted ? s.time : Math.min(s.time, r1.time), evo2);
+    const isYellow = yellowFlagQ2 && (Math.random() < 0.5);
+    const r1 = tryLap(s.pilot, s.team, s.time, evo1, isYellow, q2Form);
+    const r2 = tryLap(s.pilot, s.team, r1.aborted ? s.time : Math.min(s.time, r1.time), evo2, false, q2Form);
     const best = Math.min(
       s.time,
       r1.aborted ? Infinity : r1.time,
@@ -929,7 +938,7 @@ async function simulateQualifying(race, pilots, teams) {
   const firstOutQ2 = q2State[q3Size];
   if (cutQ2 && firstOutQ2) {
     const gap = (firstOutQ2.time - cutQ2.time) / 1000;
-    if (gap < 0.12) q2Events.push({ type: 'thriller_q2', gap, safe: cutQ2, elim: firstOutQ2 });
+    if (gap > 0 && gap < 0.12) q2Events.push({ type: 'thriller_q2', gap, safe: cutQ2, elim: firstOutQ2 });
     // Pilote qui perd sa place dans les dernières secondes
     const lastGasp = q2State.find((s, i) => i < q3Size && s.improved && s.time < firstOutQ2.time + 0.3 * 1000);
     if (lastGasp) q2Events.push({ type: 'last_gasp_q2', pilot: lastGasp });
@@ -946,12 +955,13 @@ async function simulateQualifying(race, pilots, teams) {
   const redFlagQ3 = Math.random() < 0.15;
   const redFlagMoment = redFlagQ3 ? randInt(1, q3Size - 1) : -1; // après quel pilote
 
+  const q3Form = makeSessionForm(); // nouvelle forme pour Q3 — encore un classement différent
   let q3State = q3Candidates.map((s, idx) => {
     const evo1 = randInt(300, 500);
-    const evo2 = randInt(400, 600); // deuxième tentative = meilleure piste
+    const evo2 = randInt(400, 600);
     const affectedByRed = redFlagQ3 && idx >= redFlagMoment;
-    const r1 = tryLap(s.pilot, s.team, s.time, evo1, affectedByRed);
-    const r2 = tryLap(s.pilot, s.team, r1.aborted ? s.time : Math.min(s.time, r1.time), evo2);
+    const r1 = tryLap(s.pilot, s.team, s.time, evo1, affectedByRed, q3Form);
+    const r2 = tryLap(s.pilot, s.team, r1.aborted ? s.time : Math.min(s.time, r1.time), evo2, false, q3Form);
     const best = Math.min(
       s.time,
       r1.aborted ? Infinity : r1.time,
@@ -980,7 +990,7 @@ async function simulateQualifying(race, pilots, teams) {
   const secondDriver = q3State[1];
   if (poleDriver && secondDriver) {
     const poleGap = (q3State[1]?.time - poleDriver.time) / 1000;
-    if (poleGap < 0.05) q3Events.push({ type: 'photo_finish_pole', gap: poleGap, pole: poleDriver, second: secondDriver });
+    if (poleGap > 0 && poleGap < 0.05) q3Events.push({ type: 'photo_finish_pole', gap: poleGap, pole: poleDriver, second: secondDriver });
     else if (poleGap > 0.6) q3Events.push({ type: 'dominant_pole', gap: poleGap, pole: poleDriver });
   }
 
