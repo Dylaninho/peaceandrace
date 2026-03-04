@@ -1006,18 +1006,55 @@ async function simulateQualifying(race, pilots, teams) {
   };
 }
 
-// ─── SIMULATION ESSAIS LIBRES ─────────────────────────────
+// ─── SIMULATION ESSAIS LIBRES (E1 / E2 / E3) ─────────────────────────────
+// E1 & E2 : sessions de test — résultats très aléatoires, peu représentatifs
+// E3      : simulation de setup — temps plus proches de la réalité
 async function simulatePractice(race, pilots, teams) {
-  const weather = pick(['DRY','DRY','DRY','WET','INTER']);
-  const results = [];
-  for (const pilot of pilots) {
-    const team = teams.find(t => String(t._id) === String(pilot.teamId));
-    if (!team) continue;
-    const time = calcQualiTime(pilot, team, weather, race.gpStyle) + randInt(-800, 800);
-    results.push({ pilot, team, time });
+  const weather = pick(['DRY','DRY','DRY','DRY','WET','INTER']);
+
+  const compoundPool = weather === 'WET'   ? ['WET','WET','INTER'] :
+                       weather === 'INTER' ? ['INTER','INTER','WET'] :
+                       ['SOFT','SOFT','MEDIUM','HARD'];
+
+  function sessionResults(varianceFactor, setupBonus = 0) {
+    const res = [];
+    for (const pilot of pilots) {
+      const team = teams.find(t => String(t._id) === String(pilot.teamId));
+      if (!team) continue;
+      const compound = weather === 'WET'   ? 'WET'  :
+                       weather === 'INTER' ? 'INTER' :
+                       setupBonus > 0      ? 'SOFT'  : pick(compoundPool);
+      const base      = calcQualiTime(pilot, team, weather, race.gpStyle);
+      const variance  = randInt(-varianceFactor, varianceFactor);
+      const setupGain = setupBonus > 0
+        ? Math.floor((pilot.controle + pilot.freinage) / 2 * setupBonus / 100)
+        : 0;
+      const noTime = Math.random() < 0.08; // 8% : pas de tour chronométré
+      res.push({ pilot, team, time: noTime ? null : base + variance - setupGain, compound, noTime });
+    }
+    res.sort((a, b) => {
+      if (a.time === null && b.time === null) return 0;
+      if (a.time === null) return 1;
+      if (b.time === null) return -1;
+      return a.time - b.time;
+    });
+    return res;
   }
-  results.sort((a,b) => a.time - b.time);
-  return { results, weather };
+
+  const e1 = sessionResults(3500);      // très chaotique
+  const e2 = sessionResults(2800);      // encore aléatoire
+  const e3 = sessionResults(600, 180);  // représentatif, tous en SOFT
+
+  function pickIncidents(results) {
+    return results.filter(r => r.noTime).map(r => ({ type: 'no_time', pilot: r.pilot, team: r.team }));
+  }
+
+  return {
+    weather,
+    e1: { results: e1, incidents: pickIncidents(e1) },
+    e2: { results: e2, incidents: pickIncidents(e2) },
+    e3: { results: e3, incidents: pickIncidents(e3) },
+  };
 }
 
 // ============================================================
@@ -8062,7 +8099,6 @@ async function runPractice(override, gpIndex = null) {
     : await getCurrentRace(season, slot);
   if (!race) return;
   if (!await isRaceDay(race, override)) return;
-  // Garde : ne pas relancer si déjà fait
   if (race.status !== 'upcoming' && !override) {
     console.log(`[runPractice] Déjà fait pour ${race.circuit} slot=${race.slot} (status=${race.status})`);
     return;
@@ -8071,44 +8107,273 @@ async function runPractice(override, gpIndex = null) {
   const { pilots, teams } = await getAllPilotsWithTeams();
   if (!pilots.length) return;
 
-  const { results, weather } = await simulatePractice(race, pilots, teams);
+  const { weather, e1, e2, e3 } = await simulatePractice(race, pilots, teams);
   const channel = await getRaceChannel(override);
   if (!channel) { await Race.findByIdAndUpdate(race._id, { status: 'practice_done' }); return; }
 
+  const W = ms => new Promise(r => setTimeout(r, ms));
   const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
   const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
+  const tireEmoji     = c => TIRE[c]?.emoji || '';
+  const tireLabel     = c => TIRE[c] ? `${TIRE[c].emoji} ${TIRE[c].label}` : c;
 
-  // ~30% des pilotes n'ont pas montré leur vrai rythme
-  const sandbagging = new Set(
-    [...results].sort(() => Math.random() - 0.5)
-      .slice(0, Math.floor(results.length * 0.3))
+  // ── Nombre de GPs dans la saison ──────────────────────────
+  const totalRaces    = await Race.countDocuments({ seasonId: season._id });
+  const gpNumber      = (race.index ?? 0) + 1;
+
+  // ── Classement pilotes actuel ──────────────────────────────
+  const allStandings  = await Standing.find({ seasonId: season._id }).sort({ points: -1 });
+  const allPilots     = await Pilot.find();
+  const pilotStandingsFull = allStandings.map((s, i) => {
+    const p = allPilots.find(p => String(p._id) === String(s.pilotId));
+    return p ? `**${i+1}.** ${p.name} — **${s.points} pts**` : null;
+  }).filter(Boolean).join('\n');
+
+  // ── Classement constructeurs actuel (complet) ─────────────
+  const constrStandings    = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
+  const constrStandingsFull = constrStandings.map((s, i) => {
+    const t = teams.find(t => String(t._id) === String(s.teamId));
+    return t ? `**${i+1}.** ${t.emoji} ${t.name} — **${s.points} pts**` : null;
+  }).filter(Boolean).join('\n');
+
+  // ── 3 derniers vainqueurs sur CE circuit (BDD) ────────────
+  const pastWins = await PilotGPRecord.find({
+    circuit   : race.circuit,
+    finishPos : 1,
+    dnf       : false,
+  }).sort({ seasonYear: -1 }).limit(10);
+
+  // Dédoublonner par saison (prendre le plus récent de chaque année), puis top 3
+  const seenYears = new Set();
+  const top3wins  = [];
+  for (const w of pastWins) {
+    if (!seenYears.has(w.seasonYear)) {
+      seenYears.add(w.seasonYear);
+      top3wins.push(w);
+    }
+    if (top3wins.length === 3) break;
+  }
+
+  // Compter le total de victoires sur ce circuit pour chaque pilote
+  const winCountMap = new Map();
+  for (const w of pastWins) {
+    winCountMap.set(String(w.pilotId), (winCountMap.get(String(w.pilotId)) || 0) + 1);
+  }
+
+  const pastWinsStr = top3wins.length > 0
+    ? top3wins.map((w, i) => {
+        const medal  = ['🥇','🥈','🥉'][i];
+        const wins   = winCountMap.get(String(w.pilotId)) || 1;
+        const winsTag = wins > 1 ? ` *(×${wins} sur ce circuit)*` : '';
+        return `${medal} **${w.pilotName || '?'}** (${w.seasonYear})${winsTag}`;
+      }).join('\n')
+    : '*Aucun historique disponible*';
+
+  // ── Record all-time du circuit ────────────────────────────
+  const circuitRecord = await CircuitRecord.findOne({ circuit: race.circuit });
+  const recordStr = circuitRecord
+    ? `⚡ **${msToLapStr(circuitRecord.bestTimeMs)}** — ${circuitRecord.pilotName || '?'} ${circuitRecord.teamEmoji || ''} *(S${circuitRecord.seasonYear || '?'})*`
+    : '*Aucun record établi*';
+
+  // ══════════════════════════════════════════════════════════
+  // PRÉSENTATION DU GP
+  // ══════════════════════════════════════════════════════════
+  const introEmbed = new EmbedBuilder()
+    .setTitle(`${race.emoji} GRAND PRIX DE ${race.circuit.toUpperCase()} — GP ${gpNumber}/${totalRaces}`)
+    .setColor('#FF1801')
+    .setDescription(
+      `**${styleEmojis[race.gpStyle] || ''} Circuit ${race.gpStyle.toUpperCase()}** · Météo prévue : **${weatherLabels[weather] || weather}**\n\u200B`
+    )
+    .addFields(
+      {
+        name: '🏆 Championnat Pilotes',
+        value: (pilotStandingsFull || '*Aucune donnée*').slice(0, 1024),
+        inline: true,
+      },
+      {
+        name: '🏗️ Championnat Constructeurs',
+        value: (constrStandingsFull || '*Aucune donnée*').slice(0, 1024),
+        inline: true,
+      },
+      {
+        name: '\u200B',
+        value: '\u200B',
+        inline: false,
+      },
+      {
+        name: `🏁 Derniers vainqueurs — ${race.emoji} ${race.circuit}`,
+        value: pastWinsStr,
+        inline: true,
+      },
+      {
+        name: '⏱️ Record du circuit',
+        value: recordStr,
+        inline: true,
+      }
+    )
+    .setFooter({ text: `Saison ${season.year} · Les essais libres commencent dans quelques instants...` });
+
+  await channel.send({ embeds: [introEmbed] });
+  await W(4000);
+
+  // ── Helper : formater une ligne de résultat EL ────────────
+  function formatELLine(r, i) {
+    if (r.noTime) return `**—** ${r.team.emoji} ${r.pilot.name} — *pas de temps* ⚠️`;
+    const gap = i === 0 ? 'REF' : `+${((r.time - e3.results.find(x => !x.noTime)?.time || r.time) / 1000).toFixed(3)}s`;
+    return `**P${i+1}** ${r.team.emoji} ${r.pilot.name} ${tireEmoji(r.compound)} — ${msToLapStr(r.time)}`;
+  }
+  function formatELLineWithGap(r, i, refTime) {
+    if (r.noTime) return `**—** ${r.team.emoji} ${r.pilot.name} — *pas de temps*`;
+    const gap = i === 0 ? '⏱ REF' : `+${((r.time - refTime) / 1000).toFixed(3)}s`;
+    return `**P${i+1}** ${r.team.emoji} ${r.pilot.name} ${tireEmoji(r.compound)} — ${msToLapStr(r.time)} — ${gap}`;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  // EL 1
+  // ══════════════════════════════════════════════════════════
+  await channel.send(
+    `🔧 **ESSAIS LIBRES 1 — ${race.emoji} ${race.circuit}**\n` +
+    `*Les équipes entament leur programme de tests — checks mécaniques, mise en température, longs runs de données. Les temps ne veulent pas grand chose...*`
+  );
+  await W(3000);
+
+  // Incidents E1
+  for (const inc of e1.incidents) {
+    await channel.send(`⚠️ *${inc.team.emoji}**${inc.pilot.name}** n'a pas pu boucler un tour chronométré en EL1 — problème technique probable.*`);
+    await W(1500);
+  }
+
+  // Sandbagging E1 (~40% des pilotes en programme réduit)
+  const sandbag1 = new Set(
+    [...e1.results].sort(() => Math.random() - 0.5)
+      .slice(0, Math.floor(e1.results.length * 0.4))
       .map(r => String(r.pilot._id))
   );
 
-  const lines = results.map((r, i) => {
-    const note = sandbagging.has(String(r.pilot._id))
-      ? pick([' *(programme réduit)*', ' *(pas poussé)*', ' *(essais techniques)*', ' *(longues distances)*'])
+  const e1Lines = e1.results.map((r, i) => {
+    if (r.noTime) return `**—** ${r.team.emoji} ${r.pilot.name} — *pas de temps*`;
+    const note = sandbag1.has(String(r.pilot._id))
+      ? pick([' *(longs runs)*', ' *(programme technique)*', ' *(checks méca)*', ' *(données aéro)*', ' *(pas poussé)*'])
       : '';
-    return `**P${i+1}** ${r.team.emoji} ${r.pilot.name} — ${msToLapStr(r.time)}${note}`;
+    return `**P${i+1}** ${r.team.emoji} ${r.pilot.name} ${tireEmoji(r.compound)} — ${msToLapStr(r.time)}${note}`;
   }).join('\n');
 
-  const chaosNotes = [
-    '⚠️ *Ces temps sont à prendre avec des pincettes — certains n\'ont pas montré leur rythme réel.*',
-    '⚠️ *Programme très varié en piste : peu représentatif de la hiérarchie réelle.*',
-    '⚠️ *Les essais libres brouillent souvent les cartes. La vraie hiérarchie se dessinera en qualifs.*',
-    '⚠️ *Certaines écuries ont clairement caché leur jeu. Les qualifs diront tout.*',
-  ];
+  const el1Embed = new EmbedBuilder()
+    .setTitle(`🔧 EL1 TERMINÉ — ${race.emoji} ${race.circuit}`)
+    .setColor('#555555')
+    .setDescription(
+      `Météo : **${weatherLabels[weather] || weather}**\n\n` +
+      e1Lines + '\n\n' +
+      pick([
+        '⚠️ *Résultats très peu représentatifs — programmes de test variés.*',
+        '⚠️ *Quasi aucune info à tirer de cette session — tout le monde fait autre chose.*',
+        '⚠️ *EL1 = boîte noire. Les vraies intentions se dévoileront plus tard.*',
+      ])
+    )
+    .setFooter({ text: 'EL2 dans quelques instants — programmes de setup à venir.' });
 
-  const embed = new EmbedBuilder()
-    .setTitle(`🔧 Essais Libres — ${race.emoji} ${race.circuit}`)
+  await channel.send({ embeds: [el1Embed] });
+  await W(5000);
+
+  // ══════════════════════════════════════════════════════════
+  // EL 2
+  // ══════════════════════════════════════════════════════════
+  await channel.send(
+    `🔧 **ESSAIS LIBRES 2 — ${race.emoji} ${race.circuit}**\n` +
+    `*Les équipes continuent leurs essais. Quelques runs rapides commencent à apparaître, mais les données de setup restent prioritaires.*`
+  );
+  await W(3000);
+
+  for (const inc of e2.incidents) {
+    await channel.send(`⚠️ *${inc.team.emoji}**${inc.pilot.name}** rentre aux stands prématurément — problème à investiguer.*`);
+    await W(1500);
+  }
+
+  const sandbag2 = new Set(
+    [...e2.results].sort(() => Math.random() - 0.5)
+      .slice(0, Math.floor(e2.results.length * 0.3))
+      .map(r => String(r.pilot._id))
+  );
+
+  const e2Lines = e2.results.map((r, i) => {
+    if (r.noTime) return `**—** ${r.team.emoji} ${r.pilot.name} — *pas de temps*`;
+    const note = sandbag2.has(String(r.pilot._id))
+      ? pick([' *(setup longue distance)*', ' *(test de pneus)*', ' *(comparaison ailerons)*', ' *(simulation de course)*'])
+      : '';
+    return `**P${i+1}** ${r.team.emoji} ${r.pilot.name} ${tireEmoji(r.compound)} — ${msToLapStr(r.time)}${note}`;
+  }).join('\n');
+
+  const el2Embed = new EmbedBuilder()
+    .setTitle(`🔧 EL2 TERMINÉ — ${race.emoji} ${race.circuit}`)
+    .setColor('#666666')
+    .setDescription(
+      `Météo : **${weatherLabels[weather] || weather}**\n\n` +
+      e2Lines + '\n\n' +
+      pick([
+        '⚠️ *Encore beaucoup de programmes mixtes — difficile d\'en tirer des conclusions.*',
+        '⚠️ *Certaines équipes semblent avoir trouvé quelque chose, d\'autres cherchent encore.*',
+        '⚠️ *Les données sont là, mais les interprétations restent floues avant EL3.*',
+      ])
+    )
+    .setFooter({ text: 'EL3 : la session décisive — les équipes sortent leur meilleur setup.' });
+
+  await channel.send({ embeds: [el2Embed] });
+  await W(5000);
+
+  // ══════════════════════════════════════════════════════════
+  // EL 3 — La vraie session
+  // ══════════════════════════════════════════════════════════
+  await channel.send(
+    `🔧 **ESSAIS LIBRES 3 — ${race.emoji} ${race.circuit}**\n` +
+    `*Dernière chance avant les qualifications. Les équipes sortent leur meilleur setup — tous en ${tireLabel('SOFT')} pour simuler un tour de quali. Les temps commencent à parler.*`
+  );
+  await W(3000);
+
+  for (const inc of e3.incidents) {
+    await channel.send(`⚠️ *${inc.team.emoji}**${inc.pilot.name}** ne peut pas prendre la piste en EL3 — les mécaniciens au travail.*`);
+    await W(1500);
+  }
+
+  // Flash mi-session EL3
+  const flashE3 = [...e3.results.filter(r => !r.noTime)].sort(() => Math.random() - 0.5).slice(0, 4);
+  await channel.send(
+    `📻 *EL3 — premier run :* ` +
+    flashE3.map(r => `${r.team.emoji}**${r.pilot.name}** ${tireEmoji(r.compound)} ${msToLapStr(r.time)}`).join(' · ')
+  );
+  await W(2500);
+
+  const e3Timed   = e3.results.filter(r => !r.noTime);
+  const refTime   = e3Timed[0]?.time || 0;
+
+  const e3Lines = e3.results.map((r, i) => {
+    if (r.noTime) return `**—** ${r.team.emoji} ${r.pilot.name} — *pas de temps* ⚠️`;
+    const gap = i === 0 ? '⏱ REF' : `+${((r.time - refTime) / 1000).toFixed(3)}s`;
+    return `**P${i+1}** ${r.team.emoji} ${r.pilot.name} ${tireEmoji(r.compound)} — ${msToLapStr(r.time)} — ${gap}`;
+  }).join('\n');
+
+  // Drapeau rouge possible en EL3 (15%)
+  const redFlagEL3 = Math.random() < 0.15;
+  if (redFlagEL3) {
+    const victim = pick(e3.results.filter(r => !r.noTime));
+    await channel.send(`🚨 *Drapeau rouge ! ${victim.team.emoji}**${victim.pilot.name}** immobilisé en piste — session interrompue brièvement.*`);
+    await W(2000);
+  }
+
+  const el3Embed = new EmbedBuilder()
+    .setTitle(`🔧 EL3 TERMINÉ — ${race.emoji} ${race.circuit}`)
     .setColor('#888888')
     .setDescription(
-      `Météo : **${weatherLabels[weather] || weather}** · Style : **${race.gpStyle.toUpperCase()}** ${styleEmojis[race.gpStyle] || ''}\n\n` +
-      lines + '\n\n' + pick(chaosNotes)
+      `Météo : **${weatherLabels[weather] || weather}** · Tous sur ${tireLabel('SOFT')}\n\n` +
+      e3Lines + '\n\n' +
+      pick([
+        '📊 *Ces temps reflètent mieux la hiérarchie réelle — les qualifs confirmeront.*',
+        '📊 *EL3 parle enfin. La grille se dessine, mais les surprises restent possibles en quali.*',
+        '📊 *Le setup semble trouvé pour certains. D\'autres auront encore du travail ce soir.*',
+      ])
     )
-    .setFooter({ text: race.slot === 1 ? 'Classement complet · Qualifications à 18h 🏎️' : 'Classement complet · Qualifications à 13h 🏎️' });
+    .setFooter({ text: race.slot === 1 ? 'Qualifications à 18h 🏎️' : 'Qualifications à 13h 🏎️' });
 
-  await channel.send({ embeds: [embed] });
+  await channel.send({ embeds: [el3Embed] });
   await Race.findByIdAndUpdate(race._id, { status: 'practice_done' });
 }
 
