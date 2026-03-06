@@ -107,8 +107,9 @@ const PilotSchema = new mongoose.Schema({
   upgradeStreak   : { type: Number, default: 0 },     // 1→2→3 = trigger
   specialization  : { type: String, default: null },  // ex: 'freinage' (unique par pilote)
   // ── Rivalités ───────────────────────────────────────────────
-  rivalId      : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
-  rivalContacts: { type: Number, default: 0 },        // contacts en course cette saison vs rivalId
+  rivalId          : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
+  rivalContacts    : { type: Number, default: 0 },   // contacts en course cette saison vs rivalId
+  rivalDeclaredAt  : { type: Number, default: null }, // index du GP où la rivalité a été déclarée (évite la répétition)
   // ── Statut coéquipier ────────────────────────────────────────
   teamStatus        : { type: String, enum: ['numero1', 'numero2', null], default: null },
   teammateDuelWins  : { type: Number, default: 0 },   // victoires internes cette saison vs coéquipier
@@ -401,11 +402,11 @@ const NATIONALITIES = [
 // ============================================================
 
 const TIRE = {
-  SOFT  : { grip: 1.00, deg: 0.0024, emoji: '🔴', label: 'Soft'   }, // cliff ~lap 25
-  MEDIUM: { grip: 0.99, deg: 0.0016, emoji: '🟡', label: 'Medium' }, // cliff ~lap 38
-  HARD  : { grip: 0.98, deg: 0.0010, emoji: '⚪', label: 'Hard'   }, // cliff ~lap 60
-  INTER : { grip: 0.99, deg: 0.0013, emoji: '🟢', label: 'Inter'  },
-  WET   : { grip: 0.99, deg: 0.0008, emoji: '🔵', label: 'Wet'    },
+  SOFT  : { grip: 1.00, deg: 0.0024, emoji: '`S`🔴', label: 'Soft'   }, // cliff ~lap 25
+  MEDIUM: { grip: 0.99, deg: 0.0016, emoji: '`M`🟡', label: 'Medium' }, // cliff ~lap 38
+  HARD  : { grip: 0.98, deg: 0.0010, emoji: '`H`⚪', label: 'Hard'   }, // cliff ~lap 60
+  INTER : { grip: 0.99, deg: 0.0013, emoji: '`I`🟢', label: 'Inter'  },
+  WET   : { grip: 0.99, deg: 0.0008, emoji: '`W`🔵', label: 'Wet'    },
 };
 
 // ─── Poids des stats selon le style de GP ─────────────────
@@ -1344,29 +1345,34 @@ function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justR
 
   const lines = [];
 
-          // ── Tour de relance SC/VSC : commentaire neutre uniquement ──
+  // ── Tour de relance SC/VSC : commentaire neutre uniquement ──
   if (justRestarted) {
     return pick([
       `🟢 **T${lap}** — Les pilotes chauffent leurs pneus après la relance. Le rythme revient progressivement.`,
-      `🟢 **T${lap}** — Course relancée. Tout le monde cherche son rythme — l'attaque viendra dans quelques tours.`,
+      `🟢 **T${lap}** — Course relancée ! Tout le monde cherche son rythme — l'attaque viendra dans quelques tours.`,
       `🟢 **T${lap}** — Relance propre. Les ingénieurs transmettent les consignes — qui va attaquer en premier ?`,
+      `🟢 **T${lap}** — Le peloton s'étire à nouveau. Les pilotes poussent progressivement — la vraie course reprend.`,
+      `🟢 **T${lap}** — Zones de DRS réactivées. Les stratèges soufflent... pour l'instant.`,
     ]);
   }
 
   // ── Sous SC/VSC : commentaire spécifique ───────────────
   if (scState.state === 'SC') {
-    const pit4 = ranked.slice(0,6).map(d => `${d.team.emoji}**${d.pilot.name}**`).join(' · ');
+    const top4 = ranked.slice(0,5).map(d => `${d.team.emoji}**${d.pilot.name}**`).join(' · ');
     lines.push(pick([
-      `🚨 Le peloton roule en file derrière la voiture de sécurité... ${pit4} — les équipes analysent les stratégies. Qui va rentrer ?`,
-      `🚨 La course est gelée. Les mécaniciens sont en alerte dans les stands — l'arrêt sous SC peut tout changer !`,
-      `🚨 Le Safety Car maintient le rythme... Les pilotes gardent leurs pneus au chaud. Le restart va être explosif.`,
+      `🚨 Le peloton roule en file derrière la Safety Car... ${top4} — les écuries calculent la fenêtre de pit stop.`,
+      `🚨 La course est gelée. Les stands s'activent — arrêter maintenant ou attendre la reprise ?`,
+      `🚨 Safety Car en piste. Les gaps se réduisent — au restart, ce sera une autre course.`,
+      `🚨 Tout le monde derrière la Safety Car. Les pilotes gardent leurs pneus au chaud et attendent.`,
+      `🚨 SC toujours en piste. ${ranked[0].team.emoji}**${ranked[0].pilot.name}** conserve la tête, mais tout peut changer à la relance.`,
     ]));
     return pick(lines);
   }
   if (scState.state === 'VSC') {
     lines.push(pick([
-      `🟡 VSC en cours — tout le monde roule au delta. Personne ne peut attaquer, personne ne peut défendre.`,
-      `🟡 Virtual Safety Car toujours actif. La course reprendra bientôt — les gaps se figent.`,
+      `🟡 VSC en cours — tout le monde roule au delta. Impossible d'attaquer ou de défendre.`,
+      `🟡 Virtual Safety Car actif. Les gaps se figent — les ingénieurs préparent la stratégie pour la reprise.`,
+      `🟡 Drapeaux jaunes partout — les pilotes lèvent le pied. Reprise imminente.`,
     ]));
     return pick(lines);
   }
@@ -1378,27 +1384,41 @@ function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justR
       lines.push(pick([
         `***👀 ${second.team.emoji}${second.pilot.name} DANS LE DRS !!! ${gapTop.toFixed(3)}s — LA BOMBE VA EXPLOSER !!!***`,
         `***🔥 ${gapTop.toFixed(3)}s !!! ${second.team.emoji}${second.pilot.name} colle aux roues de ${leader.team.emoji}${leader.pilot.name} — ÇA VA PASSER OU ÇA VA CASSER !!!***`,
+        `***⚡ INCROYABLE !*** ${second.team.emoji}**${second.pilot.name}** est à **${gapTop.toFixed(3)}s** — il est dans les roues. Le DRS est activé !`,
+        `***😱 T${lap} — ${gapTop.toFixed(3)}s !*** Le gap est ridicule. ${leader.team.emoji}**${leader.pilot.name}** est sous pression extrême !`,
       ]));
     } else if (gapTop < 1.0) {
       lines.push(pick([
         `***⚡ T${lap} — ${second.team.emoji}${second.pilot.name} est à **${gapTop.toFixed(3)}s** de ${leader.team.emoji}${leader.pilot.name}*** — la pression est maximale !`,
-        `😤 **${second.team.emoji}${second.pilot.name}** fond sur **${leader.team.emoji}${leader.pilot.name}** — ${gapTop.toFixed(3)}s seulement. Ça chauffait déjà, ça brûle maintenant.`,
+        `😤 **${second.team.emoji}${second.pilot.name}** fond sur **${leader.team.emoji}${leader.pilot.name}** — ${gapTop.toFixed(3)}s seulement. Ça chauffait, ça brûle maintenant.`,
+        `🎯 T${lap} — **${gapTop.toFixed(3)}s** entre P1 et P2. ${leader.team.emoji}**${leader.pilot.name}** sent la pression monter dans l'habitacle.`,
+        `📻 Ingénieur radio : *"Attention, ${second.pilot.name} revient."* ${leader.team.emoji}**${leader.pilot.name}** sait ce qu'il a à faire.`,
       ]));
     } else if (gapTop < 2.5 && third) {
       const gap3 = (third.totalTime - second.totalTime) / 1000;
-      if (gap3 < 1.0) lines.push(`🏎️ **Bagarre à trois !** ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tous dans le même mouchoir !`);
-      else lines.push(`🏎️ ${leader.team.emoji}**${leader.pilot.name}** devant — **${gapTop.toFixed(1)}s** sur ${second.team.emoji}**${second.pilot.name}**. La pression monte.`);
+      if (gap3 < 1.0) lines.push(pick([
+        `🏎️ **Bagarre à trois !** ${leader.team.emoji}**${leader.pilot.name}** · ${second.team.emoji}**${second.pilot.name}** · ${third.team.emoji}**${third.pilot.name}** — tous dans le même mouchoir !`,
+        `🎯 **T${lap}** — Trio serré en tête ! ${leader.team.emoji}**${leader.pilot.name}** devant, mais P2 et P3 dans la seconde. Situation explosive.`,
+      ]));
+      else lines.push(pick([
+        `🏎️ ${leader.team.emoji}**${leader.pilot.name}** devant — **${gapTop.toFixed(1)}s** sur ${second.team.emoji}**${second.pilot.name}**. La pression monte.`,
+        `📡 T${lap} — L'écart P1/P2 est de **${gapTop.toFixed(1)}s**. ${second.team.emoji}**${second.pilot.name}** surveille ses pneus avant d'attaquer.`,
+      ]));
     } else if (gapTop > 20) {
       lines.push(pick([
         `🏃 ${leader.team.emoji}**${leader.pilot.name}** file seul en tête — **${gapTop.toFixed(1)}s** d'avance. On dirait une autre course là-devant.`,
         `💨 ${leader.team.emoji}**${leader.pilot.name}** maîtrise parfaitement son Grand Prix. **+${gapTop.toFixed(1)}s** — c'est impressionnant.`,
+        `🧘 ${leader.team.emoji}**${leader.pilot.name}** gère. **+${gapTop.toFixed(1)}s** — il roule au rythme de croisière. La victoire lui tend les bras.`,
+        `📻 *"C'est under control."* ${leader.team.emoji}**${leader.pilot.name}** économise ses pneus depuis plusieurs tours. Mission accomplie si rien ne change.`,
       ]));
     } else {
-      // Gap moyen — commentaire générique sur la course
       lines.push(pick([
-        `🏎️ T${lap}/${totalLaps} — ${leader.team.emoji}**${leader.pilot.name}** en tête avec **+${gapTop.toFixed(1)}s** sur ${second.team.emoji}**${second.pilot.name}**. La course suit son cours.`,
+        `🏎️ T${lap}/${totalLaps} — ${leader.team.emoji}**${leader.pilot.name}** en tête (+${gapTop.toFixed(1)}s) devant ${second.team.emoji}**${second.pilot.name}**. La course suit son cours.`,
         `⏱ T${lap} — Ordre stable en tête. ${leader.team.emoji}**${leader.pilot.name}** administre son avantage.`,
-        `🎙 T${lap} — ${leader.team.emoji}**${leader.pilot.name}** reste au commandement. ${second.team.emoji}**${second.pilot.name}** surveille ses pneus.`,
+        `🎙 T${lap} — ${leader.team.emoji}**${leader.pilot.name}** devant, **${second.team.emoji}${second.pilot.name}** en embuscade à ${gapTop.toFixed(1)}s.`,
+        `📊 T${lap}/${totalLaps} — **${gapTop.toFixed(1)}s** entre P1 et P2. ${leader.team.emoji}**${leader.pilot.name}** contrôle, ${second.team.emoji}**${second.pilot.name}** attend son heure.`,
+        `🔍 T${lap} — ${leader.team.emoji}**${leader.pilot.name}** gère bien. ${second.team.emoji}**${second.pilot.name}** maintient la pression — +${gapTop.toFixed(1)}s en ce moment.`,
+        `📻 Cockpit de ${leader.pilot.name} : les données sont bonnes. Le rythme est là. **+${gapTop.toFixed(1)}s** sur ${second.pilot.name}.`,
       ]));
     }
   } else {
@@ -1409,68 +1429,126 @@ function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justR
   const hardPushers = ranked.filter(d => d.tireWear > 30 && d.pos <= 8);
   if (hardPushers.length > 0) {
     const p = hardPushers[0];
-    lines.push(pick([
-      `🔥 **${p.team.emoji}${p.pilot.name}** (P${p.pos}) est en train de griller ses ${TIRE[p.tireCompound].emoji}**${TIRE[p.tireCompound].label}** — il va devoir s'arrêter bientôt.`,
-      `⚠️ Usure critique sur la voiture de **${p.team.emoji}${p.pilot.name}** — les pneus ${TIRE[p.tireCompound].emoji} sont en limite. La stratégie va être décisive.`,
-    ]));
+    const tireData = TIRE[p.tireCompound];
+    if (tireData) {
+      lines.push(pick([
+        `🔥 **${p.team.emoji}${p.pilot.name}** (P${p.pos}) grille ses ${tireData.emoji}${tireData.label} — il va devoir s'arrêter bientôt.`,
+        `⚠️ Usure critique sur la voiture de **${p.team.emoji}${p.pilot.name}** — les pneus ${tireData.emoji} sont en limite. La stratégie va être décisive.`,
+        `📻 Ingénieur radio : *"Pneus en fin de vie."* ${p.team.emoji}**${p.pilot.name}** (P${p.pos}) ne pourra pas tenir encore longtemps.`,
+        `🩺 Les capteurs de **${p.team.emoji}${p.pilot.name}** (P${p.pos}) sonnent l'alarme — dégradation accélérée sur les ${tireData.emoji}${tireData.label}. Pit stop imminent.`,
+      ]));
+    }
   }
 
   // ── Météo ────────────────────────────────────────────────
-  if (weather === 'WET')   lines.push(pick([
+  if (weather === 'WET') lines.push(pick([
     `🌧️ Pluie battante — la piste est traîtresse. Chaque virage demande une concentration maximale.`,
-    `🌧️ Les spray derrière les voitures réduisent la visibilité. Difficile de dépasser dans ces conditions.`,
+    `🌧️ Les embruns derrière les voitures réduisent la visibilité. Dépasser dans ces conditions est un défi.`,
+    `🌧️ Aquaplaning guette. Les pilotes doivent gérer l'adhérence — une fraction de seconde d'inattention et c'est le tête-à-queue.`,
+    `🌧️ Piste glissante, visibilité réduite. Mais certains pilotes semblent à l'aise — ça se voit dans les chronos.`,
   ]));
-  if (weather === 'HOT')   lines.push(`🔥 La chaleur est intense — **${Math.floor(50 + Math.random()*10)}°C** en piste. Les pneus souffrent énormément aujourd'hui.`);
+  if (weather === 'HOT') lines.push(pick([
+    `🔥 La chaleur est intense — **${Math.floor(50 + Math.random()*10)}°C** en piste. Les pneus souffrent énormément aujourd'hui.`,
+    `🔥 Conditions de canicule. Les voitures surchauffent, les pilotes transpirent. Gestion thermique critique.`,
+    `🔥 Asphalt brûlant — chaque tour grignote les pneus. La stratégie une arrêt ou deux devient un casse-tête pour les ingénieurs.`,
+  ]));
   if (weather === 'INTER') lines.push(pick([
     `🌦️ Piste mixte — ni sec, ni mouillé. La fenêtre des slicks pourrait s'ouvrir dans quelques tours.`,
-    `🌦️ Conditions délicates. Un pilote sur intermédiaires peut perdre des secondes par tour si la piste sèche.`,
+    `🌦️ Conditions délicates. Un pilote sur intermédiaires peut perdre des secondes par tour si la piste sèche trop vite.`,
+    `🌦️ Pari stratégique en cours : certains restent aux inter', d'autres poussent pour basculer sur slicks.`,
   ]));
 
   // ── Étapes clés de la course ─────────────────────────────
   if (pct > 0.24 && pct < 0.28) {
-    lines.push(`📊 **Premier quart de course** passé — les stratèges commencent à calculer les fenêtres de pit stop.`);
+    lines.push(pick([
+      `📊 **Premier quart de course** passé — les stratèges commencent à calculer les fenêtres de pit stop.`,
+      `📊 T${lap}/${totalLaps} — **25% de la course écoulée.** Les pneus de départ donnent leurs premiers signaux. Le vrai GP commence.`,
+    ]));
   }
   if (pct > 0.48 && pct < 0.52) {
-    lines.push(`⏱ **Mi-course !** T${lap}/${totalLaps} — qui va jouer la stratégie, qui va rester dehors ?`);
+    lines.push(pick([
+      `⏱ **Mi-course !** T${lap}/${totalLaps} — qui va jouer la stratégie, qui va rester dehors ?`,
+      `⏱ **50% !** T${lap}/${totalLaps} — la seconde moitié s'ouvre. Les décisions stratégiques vont tout changer.`,
+      `⏱ T${lap}/${totalLaps} — mi-course. Les pit stops vont décider du résultat. Les équipes le savent.`,
+    ]));
   }
   if (pct > 0.74 && pct < 0.78) {
     lines.push(pick([
       `🏁 **Dernier quart de course.** Les positions se cristallisent — ou pas. Tout peut encore arriver.`,
-      `🏁 Plus que ${totalLaps - lap} tours ! Les mécaniciens croisent les doigts. Les pilotes donnent tout.`,
+      `🏁 Plus que **${totalLaps - lap} tours** ! Les mécaniciens croisent les doigts. Les pilotes donnent tout.`,
+      `🏁 T${lap}/${totalLaps} — dernier quart. Les pneus qui tiennent auront le dernier mot.`,
+    ]));
+  }
+  if (totalLaps - lap === 5) {
+    lines.push(pick([
+      `🏁 **5 TOURS RESTANTS !** Tout peut encore basculer — ou se confirmer. On retient son souffle.`,
+      `🏁 **Cinq tours !** Le chrono tourne. Les pilotes puisent dans leurs dernières réserves.`,
+    ]));
+  }
+  if (totalLaps - lap === 3) {
+    lines.push(pick([
+      `🏁 **3 TOURS !** Les positions actuelles sont potentiellement les finales. Sauf imprévu.`,
+      `🏁 Trois tours pour l'histoire. ${leader.team.emoji}**${leader.pilot.name}** sent la victoire — mais rien n'est acquis.`,
     ]));
   }
 
   // ── Battle dans le peloton ───────────────────────────────
-  for (let i = 1; i < Math.min(ranked.length, 12); i++) {
+  for (let i = 1; i < Math.min(ranked.length, 15); i++) {
     const behind = ranked[i];
     const ahead  = ranked[i-1];
     const gap = (behind.totalTime - ahead.totalTime) / 1000;
     if (gap < 1.5 && gap > 0.3) {
       lines.push(pick([
-        `👁 **Surveillance !** ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) est à **${gap.toFixed(3)}s** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). Ça fume derrière !`,
-        `🔭 **P${i} vs P${i+1} —** ${ahead.team.emoji}**${ahead.pilot.name}** sous pression de ${behind.team.emoji}**${behind.pilot.name}** · **+${gap.toFixed(3)}s** entre eux.`,
+        `👁 **Surveillance !** ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) est à **${gap.toFixed(3)}s** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). Ça fume !`,
+        `🔭 **P${i} vs P${i+1}** — ${ahead.team.emoji}**${ahead.pilot.name}** sous pression de ${behind.team.emoji}**${behind.pilot.name}** · **${gap.toFixed(3)}s** entre eux.`,
+        `📡 T${lap} — Bataille P${i}/P${i+1} : ${ahead.team.emoji}**${ahead.pilot.name}** vs ${behind.team.emoji}**${behind.pilot.name}** · écart : **${gap.toFixed(3)}s**. Situation à surveiller.`,
+        `⚔️ ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) colle à **${gap.toFixed(3)}s** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). La tension monte dans ce duel.`,
       ]));
       break;
     }
   }
 
   // ── Style de circuit ────────────────────────────────────
-  if (gpStyle === 'urbain' && Math.random() < 0.25) {
+  if (gpStyle === 'urbain' && Math.random() < 0.2) {
     lines.push(pick([
       `🏙️ Sur ce circuit urbain, les murs sont partout — la concentration doit être totale.`,
-      `🏙️ Les virages à angle droit du tracé urbain rendent les dépassements très difficiles. La qualif' était cruciale.`,
+      `🏙️ Tracé urbain — les dépassements sont rares. Chaque erreur se paie cash.`,
+      `🏙️ Pas de gravier, que du béton. Les sorties de piste ne pardonnent pas ici.`,
     ]));
   }
-  if (gpStyle === 'rapide' && Math.random() < 0.25) {
+  if (gpStyle === 'rapide' && Math.random() < 0.2) {
     lines.push(pick([
-      `💨 Circuit rapide — les voitures passent à plus de 300 km/h dans les lignes droites. Impressionnant.`,
+      `💨 Circuit rapide — les voitures passent à plus de **300 km/h** dans les lignes droites. Spectaculaire.`,
       `💨 À ces vitesses, le moindre écart de trajectoire se paie cash. La précision est reine.`,
+      `💨 Appuis aérodynamiques poussés à l'extrême. Le roulage en DRS offre des opportunités de dépassement uniques.`,
+    ]));
+  }
+  if (gpStyle === 'technique' && Math.random() < 0.2) {
+    lines.push(pick([
+      `⚙️ Circuit technique — les pilotes aux bons réflexes et à la régularité font la différence.`,
+      `⚙️ Les secteurs lents soulèvent les pneus arrière. La gestion de l'adhérence est capitale ici.`,
+    ]));
+  }
+  if (gpStyle === 'endurance' && Math.random() < 0.2) {
+    lines.push(pick([
+      `🔋 Long GP d'endurance — la gestion des ressources prime sur la vitesse pure.`,
+      `🔋 Circuit d'usure — qui a mieux géré ses pneus sera récompensé dans les 20 derniers tours.`,
+    ]));
+  }
+
+  // ── Commentaires sur la hiérarchie en milieu de peloton ──
+  if (ranked.length >= 8 && Math.random() < 0.25) {
+    const midIdx = Math.floor(ranked.length / 2);
+    const mid = ranked[midIdx];
+    const midGap = ((mid.totalTime - leader.totalTime) / 1000).toFixed(1);
+    lines.push(pick([
+      `📊 Plus loin dans le peloton, ${mid.team.emoji}**${mid.pilot.name}** (P${midIdx+1}) est à **+${midGap}s** du leader.`,
+      `🏎️ En milieu de grille : ${mid.team.emoji}**${mid.pilot.name}** se bat pour sa position à P${midIdx+1}.`,
     ]));
   }
 
   if (!lines.length) {
-    // Fallback universel
-    lines.push(`🎙 T${lap}/${totalLaps} — La course continue. ${ranked[0]?.team.emoji}**${ranked[0]?.pilot.name}** reste en tête.`);
+    lines.push(`🎙 T${lap}/${totalLaps} — La course continue. ${leader.team.emoji}**${leader.pilot.name}** reste en tête.`);
   }
   return pick(lines);
 }
@@ -1626,9 +1704,11 @@ if (finishedSorted[0]) {
       teammate   : teammate?.name,
       teammatePos: teammateResult?.pos,
       teammateDnf: teammateResult?.dnf,
+      teamStatus : pilot.teamStatus || null,
       rival      : rival?.name,
       rivalPos   : rivalResult?.pos,
       rivalDnf   : rivalResult?.dnf,
+      rivalContacts : pilot.rivalContacts || 0,
       seasonPhase,
     };
 
@@ -1644,7 +1724,7 @@ function buildPressBlock(ctx, angle) {
   const { name, emoji, teamName, pos, dnf, dnfReason, circuit, gpStyle,
           gpPhase, wins, podiums, pts, champPos, cPos,
           champLeaderName, champLeaderPts, teammate, teammatePos,
-          rival, rivalPos, rivalDnf, seasonPhase } = ctx;
+          teamStatus, rival, rivalPos, rivalDnf, rivalContacts, seasonPhase } = ctx;
 
   // Formule courte du bilan saison
   const bilanStr = wins > 0
@@ -1671,37 +1751,59 @@ function buildPressBlock(ctx, angle) {
       ])
     : '';
 
-  // Réaction coéquipier
+  // Réaction coéquipier — enrichie selon la situation et le statut interne
   const teammateStr = teammate && teammatePos
     ? teammatePos < pos && !dnf
+      // Coéquipier devant — défaite interne, à nuancer
       ? pick([
-          `Mon coéquipier ${teammate} était devant aujourd'hui — il faut l'accepter.`,
+          `${teammate} était devant aujourd'hui — il faut l'accepter.`,
           `${teammate} a été plus fort ce week-end. Je dois analyser pourquoi.`,
           `On ne se rend pas service dans la même écurie. Ça mérite une discussion.`,
+          `${teammate} m'a pris des points aujourd'hui. Ce n'est pas idéal pour le moral.`,
+          `Je suis derrière mon coéquipier ${teammate}. C'est comme ça — on repart de zéro au prochain.`,
+          `${teammate} a eu le dessus cette fois. Ça arrive. Mais ça ne doit pas devenir une habitude.`,
+          `Il faut être honnête : ${teammate} a fait un meilleur travail que moi aujourd'hui. Point.`,
+          teamStatus === 'numero1'
+            ? `C'est inhabituel de finir derrière ${teammate}. Il s'est bien battu — mais ça ne change pas la dynamique sur la saison.`
+            : `${teammate} est devant. C'est un signal que je dois progresser si je veux renverser ça.`,
         ])
       : pos < (teammatePos || 99) && !dnf
+        // Pilote devant son coéquipier — victoire interne
         ? pick([
             `${teammate} était là aussi — mais j'avais le rythme aujourd'hui.`,
-            `Bonne course pour l'équipe dans l'ensemble. Moi devant ${teammate}, c'est bien.`,
+            `Devant ${teammate}. C'est ce qu'on veut dans les duels internes.`,
+            `Bonne journée pour l'équipe — et pour moi personnellement vis-à-vis de ${teammate}.`,
+            `On travaille ensemble, mais sur la piste on se bat. Aujourd'hui j'avais le dessus.`,
+            `${teammate} a tout donné, mais j'ai réussi à rester devant. C'est l'essentiel.`,
+            `Ça compte dans la hiérarchie interne. Devant ${teammate}, un point de pris.`,
+            teamStatus === 'numero1'
+              ? `${teammate} était là, mais j'ai maintenu ma position dans l'équipe. Conforté.`
+              : `Je prends chaque duel gagné contre ${teammate} comme un pas vers la reconnaissance.`,
           ])
         : ''
     : '';
 
-  // Réaction rival
+
+  // Réaction rival — ton selon le niveau de contacts et le résultat
   const rivalStr = rival && rivalPos
     ? rivalDnf
       ? pick([
           `${rival} n'a pas terminé — ces choses arrivent. Je reste focus sur ma course.`,
           `L'abandon de ${rival} ne change rien à mon approche. Je gère ma course.`,
+          rivalContacts >= 5 ? `${rival} a abandonné. Je ne vais pas commenter ça.` : `Dommage pour ${rival}. Mais la course continue.`,
         ])
       : rivalPos > pos
         ? pick([
             `${rival} était derrière moi aujourd'hui. C'est ce qu'on voulait.`,
             `On a fait le travail face à ${rival} ce week-end.`,
+            rivalContacts >= 4 ? `Devant ${rival} — après tous ces incidents, c'est une satisfaction particulière.` : `${rival} était là, j'étais devant. Rien de plus à dire.`,
+            `Cette fois ${rival} n'a pas trouvé la faille. J'ai géré.`,
           ])
         : pick([
             `${rival} était devant — ça pique, mais il a été meilleur aujourd'hui.`,
             `Pas satisfait de finir derrière ${rival}. On doit retravailler ça.`,
+            rivalContacts >= 5 ? `${rival} devant. Encore. On aura d'autres occasions de régler ça sur la piste.` : `${rival} a eu le dessus cette fois.`,
+            `Il faut regarder pourquoi ${rival} avait ce rythme-là. Ce n'est pas normal.`,
           ])
     : '';
 
@@ -1731,23 +1833,31 @@ function buildPressBlock(ctx, angle) {
           `"${styleStr}. On a tout contrôlé aujourd'hui."`,
           `"On a géré la course du début à la fin. La voiture était là, le rythme était là."`,
           `"Depuis les qualifications, on savait qu'on avait le package. Il fallait l'exécuter."`,
+          `"Circuit parfait pour nous aujourd'hui. On a maximisé chaque opportunité."`,
+          `"Victoire propre. Le team a été irréprochable ce week-end — en qualif', au pit stop, partout."`,
         ]);
         const middle = wins >= 3
           ? pick([
               `"${wins} victoires en ${gpPhase}. On ne s'attendait pas à ça forcément, mais on le prend."`,
               `"C'est notre ${wins}ème victoire cette saison. L'élan est là. ${endPressure}"`,
+              `"${wins} victoires — ça commence à compter sérieusement au championnat."`,
             ])
           : wins === 1
-            ? `"Première victoire de la saison — ça fait un bien fou. Maintenant on continue."`
+            ? pick([
+                `"Première victoire de la saison — ça fait un bien fou. Maintenant on continue."`,
+                `"On attendait ça depuis le début de saison. C'est libérateur."`,
+              ])
             : `"Belle victoire pour le moral. ${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. On avance."`;
         const closer = champPos === 1
           ? pick([
               `"${champStr} — mais rien n'est joué. ${endPressure || 'On reste humbles.'}"`,
               `"En tête du championnat, c'est là où on veut être. ${constrStr}"`,
+              `"P1 au général avec ${pts} points. On ne regarde pas derrière — on regarde devant."`,
             ])
           : pick([
               `"On remonte au classement. P${champPos} maintenant — ${champLeaderName} est dans le viseur."`,
               `"${champLeaderName} a toujours des points d'avance, mais on réduit. ${endPressure}"`,
+              `"Victoire importante pour le championnat. On se rapproche de ${champLeaderName}."`,
             ]);
         return `${opener}\n${middle}\n${closer}${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
       },
@@ -1757,6 +1867,8 @@ function buildPressBlock(ctx, angle) {
           `"Honnêtement, ça n'était pas la course la plus simple. Mais on a tenu."`,
           `"Il y a eu des moments de doute — mais l'équipe m'a donné un bon pit stop et j'ai pu gérer."`,
           `"Je ne vais pas mentir, j'ai eu de la chance à un moment. Mais il faut la provoquer."`,
+          `"La stratégie a été parfaite. Je suis fier du travail de tout le monde en dehors de la piste."`,
+          `"C'était serré. P${second ? ranked?.find(r=>r?.pilot?.name===name)?.pos||1 : 1} au final — mais une victoire est une victoire."`,
         ]);
         const middle = `"${styleStr}. Ça nous a bien convenu aujourd'hui."`;
         const closer = champPos === 1
@@ -1769,6 +1881,8 @@ function buildPressBlock(ctx, angle) {
         const opener = pick([
           `"Le travail de l'équipe cette semaine a été remarquable. On a trouvé le bon setup."`,
           `"On avait identifié les points faibles depuis les essais. On a corrigé. Ça s'est vu en course."`,
+          `"La clé aujourd'hui c'était la gestion des pneus. On a suivi le plan à la lettre."`,
+          `"Chaque détail a compté ce week-end. Setup, stratégie, départ — tout était aligné."`,
         ]);
         const middle = seasonPhase === 'début'
           ? `"En ${gpPhase}, chaque résultat construit quelque chose. Ce résultat confirme notre direction."`
@@ -1777,6 +1891,20 @@ function buildPressBlock(ctx, angle) {
             : `"Mi-saison, on fait le point. ${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. La tendance est bonne."`;
         const closer = `"${constrStr || 'L\'équipe mérite ce résultat.'} Prochain GP, même état d'esprit."`;
         return `${opener}\n${middle}\n${closer}${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
+      },
+      // Émotionnel / personnel
+      () => {
+        const opener = pick([
+          `"Il y a des victoires qui ont une saveur particulière. Celle-là en fait partie."`,
+          `"Je pense à tous ceux qui ont cru en moi. Ce résultat, c'est pour eux aussi."`,
+          `"Ça fait longtemps qu'on travaille pour ça. Chaque sacrifice trouve son sens aujourd'hui."`,
+        ]);
+        const champContext = champPos === 1
+          ? `"Leader du championnat avec ${pts} points — je mesure la chance que j'ai."`
+          : wins >= 2
+            ? `"${wins} victoires cette saison. Je vis un rêve."`
+            : `"Première victoire, ou pas — peu importe. On est au sommet aujourd'hui."`;
+        return `${opener}\n${champContext}${constrStr ? '\n"' + constrStr + '"' : ''}`;
       },
     ];
     const quote = pick(tones)();
@@ -1790,14 +1918,18 @@ function buildPressBlock(ctx, angle) {
           ? pick([
               `"P2, c'est bien — mais P1 était l'objectif. On manquait un peu de rythme en fin de course."`,
               `"Deuxième. La voiture était là, mais pas suffisamment pour inquiéter le leader."`,
+              `"Deuxième place. Frustrant et satisfaisant à la fois. On prend les points."`,
             ])
           : pick([
               `"Un podium, c'est toujours une bonne journée. Surtout vu le ${gpPhase}."`,
               `"P3. On prend les points, on reste dans la course au championnat."`,
+              `"Podium. L'équipe méritait ça — on a tout donné aujourd'hui."`,
             ]);
         const middle = champPos && champPos <= 5
           ? `"On est ${champStr} avec ${pts} points. ${endPressure || 'Le championnat est ouvert.'}"`
-          : `"${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. Un podium de plus dans la besace."`;
+          : champPos && champPos <= 10
+            ? `"P${champPos} au général. On se bat pour chaque position — c'est ça notre objectif cette saison."`
+            : `"${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. Un podium de plus dans la besace."`;
         return `${opener}\n${middle}${rivalStr ? '\n*Sur ' + rival + ' :* "' + rivalStr.replace(/^.*?"/, '"') : ''}`;
       },
       () => {
@@ -1805,10 +1937,22 @@ function buildPressBlock(ctx, angle) {
           ? pick([
               `"${champLeaderName} s'échappe un peu, mais rien n'est joué. ${endPressure || 'On reste là.'}"`,
               `"Le gap avec ${champLeaderName} n'est pas catastrophique. On va le chercher."`,
+              `"${champLeaderName} prend du large, mais une course peut tout renverser. On sait ça."`,
             ])
           : `"P${pos} aujourd'hui. ${styleStr} — notre voiture a bien répondu."`;
-        const closer = constrStr || `"L'équipe a fait du bon travail ce week-end."`;
-        return `${opener}\n"${closer}"${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
+        const closer = constrStr ? `"${constrStr}"` : `"L'équipe a fait du bon travail ce week-end."`;
+        return `${opener}\n${closer}${teammateStr ? '\n*Sur son coéquipier :* "' + teammateStr + '"' : ''}`;
+      },
+      () => {
+        const opener = pick([
+          `"La stratégie a été bonne. On a pris les bonnes décisions au bon moment."`,
+          `"Podium sur ce circuit, c'est une satisfaction. ${styleStr}."`,
+          `"Beau résultat. On n'était pas forcément favoris ici — ça rend ça encore meilleur."`,
+        ]);
+        const context = wins > 0
+          ? `"${wins} victoire(s) et ${podiums} podiums cette saison. La régularité, c'est notre force."`
+          : `"${podiums} podiums. Pas encore la victoire, mais on est là."`;
+        return `${opener}\n${context}${constrStr ? '\n"' + constrStr + '"' : ''}`;
       },
     ];
     return `🎤 **${emoji} ${name} — P${pos}, ${circuit}**\n${pick(tones)()}`;
@@ -1822,16 +1966,38 @@ function buildPressBlock(ctx, angle) {
           `"Je n'ai pas grand chose à dire sur ${dnfLabel}. Ces choses arrivent en course. Ça fait mal."`,
           `"On était bien placés. ${dnfLabel.charAt(0).toUpperCase() + dnfLabel.slice(1)} a tout gâché. C'est cruel."`,
           `"Ça fait partie du sport. Mais là, aujourd'hui, c'est dur à avaler."`,
+          `"Pas de mots. On avait le rythme, on avait la place — et ${dnfLabel} nous a pris ça."`,
         ]);
         const middle = champPos && champPos <= 6
-          ? `"On était ${champStr}. Là on perd des points précieux. ${endPressure || 'Il faut rebondir.'}"` 
+          ? pick([
+              `"On était ${champStr}. Là on perd des points précieux. ${endPressure || 'Il faut rebondir.'}"`,
+              `"Ces zéros au championnat font mal. P${champPos} au général — ça va être compliqué de rattraper ça."`,
+            ])
           : `"Il faut regarder devant. ${seasonPhase === 'fin' ? 'En fin de saison, chaque point perdu est difficile à récupérer.' : 'On a encore des courses pour se rattraper.'}"`;
         const closer = pick([
           `"Le week-end prochain, on revient. Plus fort."`,
           `"L'équipe ne méritait pas ça. On se relèvera."`,
           `"La course, c'est ça aussi. On encaisse et on repart."`,
+          `"C'est le sport. Parfois tout va bien, parfois tout part à rien en quelques secondes."`,
         ]);
         return `${opener}\n${middle}\n"${closer}"`;
+      },
+      () => {
+        const opener = dnfReason === 'CRASH'
+          ? pick([
+              `"Il faut regarder les images. Je ne pense pas avoir fait une erreur — mais c'est à la FIA de décider."`,
+              `"Course terminée trop tôt. L'accident, c'est quelques fractions de seconde qui changent tout."`,
+            ])
+          : dnfReason === 'MECHANICAL'
+            ? pick([
+                `"La voiture m'a lâché. C'est frustrant parce qu'on avait le rythme pour être dans le top."`,
+                `"Panne mécanique. On analyse avec les ingénieurs — ça ne doit plus arriver."`,
+              ])
+            : pick([
+                `"Crevaison. Rien à faire. La course s'est arrêtée là."`,
+                `"Un pneu à plat. Dur à accepter quand tout se passait bien."`,
+              ]);
+        return `${opener}\n"${seasonPhase === 'fin' ? endPressure || 'On garde la tête froide.' : 'On ne lâche pas.'}"`;
       },
     ];
     return `🎤 **${emoji} ${name} — ❌ DNF, ${circuit}**\n${pick(tones)()}`;
@@ -1844,17 +2010,33 @@ function buildPressBlock(ctx, angle) {
           ? pick([
               `"P${pos} aujourd'hui. Pas parfait, mais on marque des points. C'est ça l'essentiel."`,
               `"Ce n'est pas le résultat voulu, mais on reste ${champStr}. La régularité, c'est notre force."`,
+              `"P${pos}. On voulait plus — mais on est toujours leaders. Le travail continue."`,
             ])
           : dnf
-            ? `"Terrible journée. Mais on reste leaders. Ce n'est pas ce GP qui définit la saison."`
+            ? pick([
+                `"Terrible journée. Mais on reste leaders. Ce n'est pas ce GP qui définit la saison."`,
+                `"DNF douloureux. Mais le championship lead est toujours là — on gère ça."`,
+              ])
             : `"P${pos}. On a vécu mieux, mais la situation au général reste correcte."`;
         const closer = seasonPhase === 'fin'
           ? `"${endPressure} On garde la tête froide."`
           : `"En ${gpPhase}, on est ${champStr} avec ${pts} points. L'objectif reste le même."`;
         return `${opener}\n${closer}`;
       },
+      () => {
+        const gapToSecond = ctx?.champGapToSecond;
+        const opener = pick([
+          `"On ne regarde pas le classement — on regarde la prochaine course."`,
+          `"Leader, ça n'a de valeur que si ça l'est à la fin de la saison."`,
+          `"${pts} points, ${wins} victoires. ${seasonPhase === 'fin' ? 'La course au titre est ouverte.' : 'Saison solide jusqu\'ici.'}"`,
+        ]);
+        const closer = wins >= 3
+          ? `"${wins} victoires, c'est notre meilleur bilan depuis longtemps. L'équipe est en feu."`
+          : `"Régularité avant tout. Chaque point compte dans un championnat comme celui-là."`;
+        return `${opener}\n"${closer}"`;
+      },
     ];
-    return `🎤 **${emoji} ${name} — Leader du championnat (P${pos}), ${circuit}**\n${pick(tones)()}`;
+    return `🎤 **${emoji} ${name} — 🏆 Leader du champ. (P${pos}), ${circuit}**\n${pick(tones)()}`;
   }
 
   if (angle === 'radio_moment') {
@@ -1932,39 +2114,89 @@ async function publishNews(article, channel) {
 // ── Générateurs par type ──────────────────────────────────
 
 function genRivalryArticle(pA, pB, teamA, teamB, contacts, circuit, seasonYear) {
-  const sources = ['pitlane_insider', 'paddock_whispers'];
+  const sources = ['pitlane_insider', 'paddock_whispers', 'pl_racing_news'];
   const source  = pick(sources);
 
-  const headlines = [
-    `${pA.name} vs ${pB.name} : la guerre froide du paddock`,
-    `Encore un accrochage — ${pA.name} et ${pB.name} au bord du clash`,
-    `"Ça va finir mal" — la rivalité ${pA.name}/${pB.name} inquiète le paddock`,
-    `${teamA.emoji}${pA.name} et ${teamB.emoji}${pB.name} : la tension monte d'un cran`,
-    `La FIA surveille — ${contacts} incidents entre ${pA.name} et ${pB.name} cette saison`,
-  ];
+  // Palier selon le nombre de contacts : déclaration / escalade / guerre installée
+  const tier = contacts <= 2 ? 'fresh' : contacts <= 4 ? 'escalade' : 'war';
 
-  const bodies = [
-    `${contacts} contacts en course cette saison entre les deux pilotes — le dernier en date à ${circuit} n'a pas arrangé les choses.\n\n` +
-    pick([
-      `Selon nos sources, ${pA.name} aurait demandé à la direction de course d'examiner les manœuvres de ${pB.name}. "Il prend trop de risques", aurait-il déclaré en privé.`,
-      `${pB.name} a refusé de commenter après la course. Ce silence en dit parfois plus long qu'un discours.`,
-      `Dans les couloirs du paddock, on murmure que les deux camps ne se saluent plus. Ambiance.`,
-    ]),
+  const headlines = {
+    fresh: [
+      `${pA.name} et ${pB.name} : les premiers signes d'une rivalité naissante`,
+      `Incident à ${circuit} — ${pA.name} et ${pB.name} se frôlent déjà`,
+      `${teamA.emoji}${pA.name} / ${teamB.emoji}${pB.name} : premier accrochage, premier froid`,
+      `${contacts} contact(s) entre ${pA.name} et ${pB.name} — coïncidence ou tendance ?`,
+    ],
+    escalade: [
+      `${pA.name} vs ${pB.name} : la guerre froide du paddock`,
+      `Encore un accrochage — ${pA.name} et ${pB.name} au bord du clash`,
+      `${teamA.emoji}${pA.name} et ${teamB.emoji}${pB.name} : la tension monte d'un cran`,
+      `La FIA surveille — ${contacts} incidents entre ${pA.name} et ${pB.name} cette saison`,
+      `"Ça ne peut pas continuer comme ça" — le paddock s'inquiète pour ${pA.name}/${pB.name}`,
+    ],
+    war: [
+      `"Ça va finir mal" — la rivalité ${pA.name}/${pB.name} hors de contrôle`,
+      `${contacts} contacts cette saison — ${pA.name} et ${pB.name} : jusqu'où ça va aller ?`,
+      `${pA.name}/${pB.name} : le dossier brûlant que la FIA ne peut plus ignorer`,
+      `Guerre ouverte sur la piste — ${teamA.emoji}${pA.name} et ${teamB.emoji}${pB.name} au bout du rouleau`,
+      `Exclusif : ce que ${pA.name} pense vraiment de ${pB.name}`,
+    ],
+  }[tier];
 
-    `À ${circuit}, la ligne entre racing et provocation a une nouvelle fois été franchie.\n\n` +
-    pick([
-      `"C'était délibéré ou stupide — dans les deux cas c'est inacceptable." Une source proche de ${teamA.name} n'a pas mâché ses mots.`,
-      `${pA.name} a regardé droit dans les yeux ${pB.name} lors de la pesée. Aucun mot échangé. Tout était dit.`,
-      `La FIA a officiellement "pris note" de l'incident. En langage FIA, ça veut dire qu'ils regardent de très près.`,
-    ]),
-
-    `${pA.name} et ${pB.name} partagent la piste depuis le début de saison. ${contacts} contacts plus tard, on se demande comment ça n'a pas encore explosé.\n\n` +
-    pick([
-      `Les équipes ont tenté de calmer le jeu en interne. Sans succès apparent.`,
-      `"Ils se respectent mais ne s'apprécient pas" — une formule qu'on entend souvent dans ce paddock.`,
-      `Le prochain GP va être à surveiller de très près. L'un des deux va craquer.`,
-    ]),
-  ];
+  const bodies = {
+    fresh: [
+      `À ${circuit}, les deux pilotes se sont retrouvés en bagarre directe — et les choses ont failli mal tourner.\n\n` +
+      pick([
+        `Rien d'officiel pour l'instant. Mais dans le paddock, on a commencé à observer les regards. Premiers signaux.`,
+        `${pA.name} s'est montré discret après la course. ${pB.name} aussi. Ce silence peut tout vouloir dire.`,
+        `Deux incidents, c'est déjà un motif. Les ingénieurs des deux camps ont sorti les caméras embarquées.`,
+      ]),
+      `${pA.name} et ${pB.name} se sont retrouvés en contact à ${circuit}. Pas grand-chose à raconter encore — mais ce genre de début mérite d'être noté.\n\n` +
+      pick([
+        `Dans ce paddock, les rivalités ne s'annoncent pas. Elles se construisent, GP après GP.`,
+        `${pB.name} a écarté l'incident d'un revers de main. ${pA.name} n'a pas commenté. La saison est longue.`,
+        `Première accroche, première tension. On verra si ça s'arrête là ou si ça grandit.`,
+      ]),
+    ],
+    escalade: [
+      `${contacts} contacts en course cette saison entre les deux pilotes — le dernier en date à ${circuit} n'a pas arrangé les choses.\n\n` +
+      pick([
+        `Selon nos sources, ${pA.name} aurait demandé à la direction de course d'examiner les manœuvres de ${pB.name}. *"Il prend trop de risques"*, aurait-il déclaré en privé.`,
+        `${pB.name} a refusé de commenter après la course. Ce silence en dit parfois plus long qu'un discours.`,
+        `Dans les couloirs du paddock, on murmure que les deux camps ne se saluent plus. Ambiance glaciale.`,
+        `L'incident de ${circuit} a ajouté une couche à une relation déjà tendue. Personne ne semble vouloir faire le premier pas.`,
+      ]),
+      `À ${circuit}, la ligne entre racing et provocation a une nouvelle fois été franchie.\n\n` +
+      pick([
+        `*"C'était délibéré ou stupide — dans les deux cas c'est inacceptable."* Une source proche de ${teamA.name} n'a pas mâché ses mots.`,
+        `${pA.name} a regardé droit dans les yeux ${pB.name} lors de la pesée. Aucun mot échangé. Tout était dit.`,
+        `La FIA a officiellement "pris note" des incidents répétés. En langage FIA, ça veut dire qu'ils regardent de très près.`,
+        `${pB.name} a un peu haussé les épaules en conférence de presse. ${pA.name} n'était pas dans la même salle.`,
+      ]),
+    ],
+    war: [
+      `${pA.name} et ${pB.name} partagent la piste depuis le début de saison. ${contacts} contacts plus tard, on se demande comment ça n'a pas encore explosé.\n\n` +
+      pick([
+        `Les équipes ont tenté de calmer le jeu en interne. Sans succès apparent.`,
+        `*"Ils se respectent mais ne s'apprécient pas"* — une formule qu'on entend souvent dans ce paddock.`,
+        `Le prochain GP va être à surveiller de très près. L'un des deux va craquer.`,
+        `La FIA a convoqué les deux pilotes. L'objet de la réunion : les "tensions répétées sur la piste".`,
+      ]),
+      `Rarement une rivalité dans ce paddock a atteint ce niveau d'intensité aussi vite. ${contacts} incidents, ${contacts} fois où ça aurait pu très mal finir.\n\n` +
+      pick([
+        `Notre source dans le paddock : *"Il y a une haine froide entre eux. Pas de clash verbal, juste... du silence. Et ça fait peur."*`,
+        `${pA.name} a dit en conférence que *"chaque pilote doit respecter l'espace de l'autre"*. Son regard en disant ça ne laissait aucun doute sur à qui il s'adressait.`,
+        `${teamB.name} a refusé de commenter les incidents. ${teamA.name} non plus. Mais les données internes circulant dans le paddock racontent une autre histoire.`,
+        `GP après GP, les deux se retrouvent. Et GP après GP, ça frotte. La question n'est plus de savoir si ça va exploser — mais quand.`,
+      ]),
+      `${contacts} contacts entre ${pA.name} et ${pB.name} cette saison. Un chiffre que la FIA ne peut plus ignorer — et une rivalité que le paddock suit désormais comme le feuilleton de la saison.\n\n` +
+      pick([
+        `Leurs équipes ont eu des discussions en coulisses. Les pilotes continuent de sourire en public. Mais les données parlent d'elles-mêmes.`,
+        `À ce stade, même les commissaires de piste anticipent leurs duels. *"On sait que quand ils sont proches, il va se passer quelque chose."*`,
+        `${pB.name} a déclaré qu'il *"fait juste son travail"*. ${pA.name} a répondu qu'il *"espère que tout le monde le fait dans les règles"*. Traduction : la guerre est déclarée.`,
+      ]),
+    ],
+  }[tier];
 
   return {
     type: 'rivalry', source,
@@ -2531,6 +2763,7 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   const totalRaces = await Race.countDocuments({ seasonId: season._id });
   const doneRaces  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
   const gpLeft     = totalRaces - doneRaces;
+  const raceDoc    = await Race.findById(race._id).lean();
 
   // ── Phase de saison ────────────────────────────────────────
   const progress = totalRaces > 0 ? doneRaces / totalRaces : 0;
@@ -2544,6 +2777,7 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   const articlesToPost = [];
 
   // 1. RIVALITÉ — impossible début, rare milieu, fréquent fin
+  // Éviter de republier la même rivalité à chaque GP : vérifier les articles récents
   const rivalChance = isEarly ? 0 : isMid ? 0.4 : isLate ? 0.75 : 0.9;
   if (Math.random() < rivalChance) {
     const rivalPairs = new Map();
@@ -2556,7 +2790,27 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
         if (pB && p.rivalContacts >= minContacts) rivalPairs.set(key, { pA: p, pB });
       }
     }
-    for (const { pA, pB } of rivalPairs.values()) {
+    // Récupérer les articles de rivalité déjà publiés cette saison pour éviter la répétition
+    const recentRivalArticles = await NewsArticle.find({
+      seasonYear: season.year,
+      type: 'rivalry',
+    }).sort({ publishedAt: -1 }).lean();
+    // Indice du GP actuel pour espacer les publications (max 1 article par rivalité par phase)
+    const currentGPIndex = raceDoc ? raceDoc.index : 0;
+    const postedRivalKeys = new Set();
+    for (const art of recentRivalArticles) {
+      if (!art.pilotIds || art.pilotIds.length < 2) continue;
+      const artKey = art.pilotIds.map(String).sort().join('_');
+      // Cooldown : ne pas re-publier la même rivalité si < 3 GPs d'écart
+      const artGP = art.raceId
+        ? await Race.findById(art.raceId).select('index').lean()
+        : null;
+      if (artGP && (currentGPIndex - artGP.index) < 3) {
+        postedRivalKeys.add(artKey);
+      }
+    }
+    for (const [key, { pA, pB }] of rivalPairs.entries()) {
+      if (postedRivalKeys.has(key)) continue; // déjà annoncé récemment
       const tA = teamMap.get(String(pA.teamId));
       const tB = teamMap.get(String(pB.teamId));
       if (tA && tB) articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year));
@@ -3615,6 +3869,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const battleMap      = new Map();
   const undercutTracker = new Map(); // pilotId → { pitLap, pilotAheadPos }
   const overcutTracker  = new Map(); // pilotId → { startLap, rivalId, myPosAtStart }
+  const racePenalties   = []; // { pilotId, seconds, reason, lap } — pénalités cumulées
+  const pendingInvestigations = []; // { attackerId, victimId, lap } — décision post-GP
 
   const send = async (msg) => {
     if (!channel) {
@@ -4539,19 +4795,23 @@ const exitNeighborStr = neighborAhead && neighborBehind
         if (attacker) {
           const roll = Math.random();
           if (roll < 0.5) {
-            const penalty = randInt(2000, 4000);
-            attacker.totalTime += penalty;
+            const penSec = randInt(2, 5); // 2s à 5s
+            const penMs  = penSec * 1000;
+            attacker.totalTime += penMs;
+            attacker.totalPenalties = (attacker.totalPenalties || 0) + penSec;
             drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+            racePenalties.push({ pilotId: String(attacker.pilot._id), seconds: penSec, reason: 'contact', lap });
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id) });
             events.push({ priority: 5, text: pick([
-              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** accroche légèrement ${victim.team.emoji}**${victim.pilot.name}** — pénalité **+${(penalty/1000).toFixed(0)}s** pour ${attacker.pilot.name}.`,
-              `⚠️ **T${lap}** — Petit contact ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. Pénalité **+${(penalty/1000).toFixed(0)}s** pour ${attacker.team.emoji}**${attacker.pilot.name}**.`,
+              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** percute légèrement ${victim.team.emoji}**${victim.pilot.name}** — **+${penSec}s** de pénalité. Total : ${attacker.totalPenalties}s ce GP.`,
+              `⚠️ **T${lap}** — Contact ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. La FIA décide : **+${penSec}s** pour ${attacker.pilot.name}${(attacker.totalPenalties || 0) > penSec ? ` (${attacker.totalPenalties}s au total)` : ''}.`,
             ]) });
           } else {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id) });
+            pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap });
             events.push({ priority: 3, text: pick([
-              `🔍 **T${lap}** — Contact discutable ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Sous investigation — aucune pénalité pour l'instant.*`,
-              `🔍 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}**. *La FIA surveille mais ne pénalise pas.*`,
+              `🔍 **T${lap}** — Contact discutable ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Sous investigation — décision post-course.*`,
+              `🔍 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}**. *La FIA regarde les images — sentence possible après le GP.*`,
             ]) });
           }
         }
@@ -4568,19 +4828,47 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
         const battle = battleMap.get(bkey);
         if (battle && battle.lapsClose >= 3 && gap < 1.2) {
+          // ── Bataille très longue (8+ tours) → risque d'incident ──
+          if (battle.lapsClose >= 8 && Math.random() < 0.22 && !scActive) {
+            const penSec  = pick([5, 10]);
+            const penMs   = penSec * 1000;
+            const aggr    = behind; // l'attaquant prend en général la pénalité
+            aggr.totalTime += penMs;
+            aggr.totalPenalties = (aggr.totalPenalties || 0) + penSec;
+            racePenalties.push({ pilotId: String(aggr.pilot._id), seconds: penSec, reason: 'battle_contact', lap });
+            raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id) });
+            drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i2) => d.pos = i2+1);
+            battleMap.delete(bkey);
+            events.push({ priority: 7, text: pick([
+              `💥 **T${lap} — CONTACT APRÈS ${battle.lapsClose} TOURS DE BATAILLE !** ${aggr.team.emoji}**${aggr.pilot.name}** percute ${ahead.team.emoji}**${ahead.pilot.name}** — **+${penSec}s** de pénalité. *La frustration a parlé.*`,
+              `🚨 **T${lap}** — Après ${battle.lapsClose} tours au coude à coude, ça dérape ! ${aggr.team.emoji}**${aggr.pilot.name}** accroche ${ahead.team.emoji}**${ahead.pilot.name}**. **+${penSec}s** pour ${aggr.pilot.name}.`,
+            ]) });
+            break;
+          }
           let defText = defenseDescription(ahead, behind, gpStyle);
           // Mentionner l'usure pneus si défense longue
           if (battle.lapsClose >= 5 && (ahead.defendExtraWear || 0) > 1.5) {
             const wornNote = (ahead.defendExtraWear || 0) > 3
-              ? `
-  › *Les pneus de **${ahead.pilot.name}** paient le prix — ils s'effondreront bientôt.*`
-              : `
-  › *La défense coûte des pneus à **${ahead.pilot.name}** — fenêtre stratégique qui se resserre.*`;
+              ? `\n› *Les pneus de **${ahead.pilot.name}** paient le prix — ils s'effondreront bientôt.*`
+              : `\n› *La défense coûte des pneus à **${ahead.pilot.name}** — fenêtre stratégique qui se resserre.*`;
             defText += wornNote;
           }
           events.push({ priority: 4, text: defText });
           break;
         }
+      }
+    }
+
+    // ── Cap dépassements : max 3 narrations de dépassement par tour ──
+    // (déjà géré via overtakeMentioned, mais on ajoute un compteur pour limiter les events overtake)
+    const overtakeEvents = events.filter(e => e.text && (e.text.includes('DÉPASSEMENT') || e.text.includes('CONTRE-ATTAQUE') || e.text.includes('CHANGEMENT EN TÊTE')));
+    if (overtakeEvents.length > 3) {
+      // Garder seulement les 3 de plus haute priorité
+      const sorted = [...events].sort((a,b) => b.priority - a.priority);
+      const ovToRemove = overtakeEvents.slice(3);
+      for (const ev of ovToRemove) {
+        const idx = events.indexOf(ev);
+        if (idx >= 0) events.splice(idx, 1);
       }
     }
 
@@ -4598,17 +4886,16 @@ const exitNeighborStr = neighborAhead && neighborBehind
     const showTop5          = (lap % 5 === 0 && !showFullStandings) || (scActive && prevScState !== 'NONE');
 
     // Helper: état d'usure pneu
+    // Format : `S`🔴 🟢 = Soft compound, pneus frais
     const tireWearLabel = (d) => {
       const td  = TIRE[d.tireCompound];
       if (!td) return '⬜';
       const worn = d.tireWear || 0;
       const deg  = td.deg || 0.0016;
-      // tireLifeRef = seuil de tours avant cliff (SOFT~25, MEDIUM~38, HARD~60)
       const thr  = deg > 0 ? Math.round(0.06 / deg) : 38;
-      const wup  = (d.warmupLapsLeft || 0) > 0 ? ' 🌡️' : '';
-      if (worn >= thr * 1.0) return `${td.emoji} 🔴${wup}`; // au-delà du seuil
-      if (worn >= thr * 0.65) return `${td.emoji} 🟡${wup}`; // 65-100% du seuil
-      return `${td.emoji} 🟢${wup}`; // < 65% du seuil
+      const wup  = (d.warmupLapsLeft || 0) > 0 ? '🌡️' : '';
+      const wearDot = worn >= thr * 1.0 ? '🔴' : worn >= thr * 0.65 ? '🟠' : '🟢';
+      return `${td.emoji}${wup ? wup : ''}${wearDot}`;
     };
 
     let standingsText = '';
@@ -4646,6 +4933,41 @@ const exitNeighborStr = neighborAhead && neighborBehind
   global.activeRaces?.delete(raceKey);
   if (raceAborted) return { results: [], collisions: [] };
 
+  // ── Résolution des investigations post-course ─────────────
+  // Pour chaque contact "sous investigation", décider maintenant si pénalité
+  const postRacePenaltyMsgs = [];
+  for (const inv of pendingInvestigations) {
+    if (Math.random() < 0.55) { // 55% de chance de pénalité post-course
+      const penSec = pick([5, 5, 10, 10, 10]);
+      const penMs  = penSec * 1000;
+      const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
+      const vic = drivers.find(d => String(d.pilot._id) === inv.victimId);
+      if (atk && !atk.dnf) {
+        atk.totalTime += penMs;
+        atk.totalPenalties = (atk.totalPenalties || 0) + penSec;
+        racePenalties.push({ pilotId: inv.attackerId, seconds: penSec, reason: 'investigation_post', lap: inv.lap });
+        if (vic) postRacePenaltyMsgs.push(
+          `🔍 **DÉCISION FIA** — Contact T${inv.lap} ${atk.team.emoji}**${atk.pilot.name}** / ${vic.team.emoji}**${vic.pilot.name}** → **+${penSec}s** pour ${atk.pilot.name}.`
+        );
+      }
+    } else {
+      const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
+      const vic = drivers.find(d => String(d.pilot._id) === inv.victimId);
+      if (atk && vic) postRacePenaltyMsgs.push(
+        `🔍 **DÉCISION FIA** — Contact T${inv.lap} ${atk.team.emoji}**${atk.pilot.name}** / ${vic.team.emoji}**${vic.pilot.name}** → *Aucune pénalité. Incident de course.*`
+      );
+    }
+  }
+  // Recalcul positions après pénalités post-course
+  if (pendingInvestigations.length > 0) {
+    drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+  }
+  // Annoncer les décisions FIA
+  if (postRacePenaltyMsgs.length && channel) {
+    await sleep(3000);
+    await send(`📋 **Décisions de la FIA — Post-course**\n${postRacePenaltyMsgs.join('\n')}`);
+  }
+
   // ══════════════════════════════════════════════════════════
   // RÉSULTATS FINAUX
   // ══════════════════════════════════════════════════════════
@@ -4682,6 +5004,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       dnf       : driver.dnf,
       dnfReason : driver.dnfReason,
       coins, fastestLap: fl,
+      penaltySec: driver.totalPenalties || 0,
     });
   }
 
@@ -4838,7 +5161,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
     } catch(e) { console.error('Post-race news erreur:', e); }
   }, 150_000 + Math.random() * 30_000); // 2min30 à 3min après la fin
 
-  return { results, collisions: raceCollisions };
+  return { results, collisions: raceCollisions, penalties: racePenalties };
 }
 
 // ─── Fixtures de test (pilotes/équipes fictifs réutilisés par admin_test_*) ──
@@ -5071,7 +5394,8 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
   }
   for (const [key, count] of contactMap) {
     const [idA, idB] = key.split('_');
-    // Mettre à jour les contacts des deux pilotes l'un envers l'autre
+    const raceDoc2 = await Race.findById(raceId).select('index').lean();
+    const gpIndex  = raceDoc2?.index ?? 0;
     for (const [myId, theirId] of [[idA, idB], [idB, idA]]) {
       const me = await Pilot.findById(myId);
       if (!me) continue;
@@ -5083,7 +5407,11 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
         // Pas encore de rival — si 2+ contacts cette course avec ce pilote, déclarer la rivalité
         const newTotal = (me.rivalContacts || 0) + count;
         if (count >= 2 || newTotal >= 2) {
-          await Pilot.findByIdAndUpdate(myId, { rivalId: theirId, rivalContacts: count });
+          await Pilot.findByIdAndUpdate(myId, {
+            rivalId         : theirId,
+            rivalContacts   : count,
+            rivalDeclaredAt : gpIndex, // on enregistre le GP de déclaration
+          });
         }
       }
       // Si rivalité différente déjà active, on ne change pas (on garde la plus vieille)
@@ -5125,7 +5453,7 @@ async function createNewSeason() {
   for (const p of pilots) await Standing.create({ seasonId: season._id, pilotId: p._id });
 
   // Réinitialiser rivalités et streak upgrade en début de saison
-  await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0, upgradeStreak: 0, lastUpgradeStat: null } });
+  await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0, rivalDeclaredAt: null, upgradeStreak: 0, lastUpgradeStat: null } });
 
   return season;
 }
@@ -8847,36 +9175,54 @@ async function runRace(override, gpIndex = null) {
   }
 
   const channel = await getRaceChannel(override);
-  const { results, collisions } = await simulateRace(race, grid, pilots, teams, contracts, channel, season);
+
+  // ── Snapshot avant la course pour montrer les changements ─
+  const standingsBefore = await Standing.find({ seasonId: season._id }).lean();
+  const constrBefore    = await ConstructorStanding.find({ seasonId: season._id }).lean();
+  const standBeforeMap  = new Map(standingsBefore.map((s,i) => [String(s.pilotId), i + 1]));
+  const constrBeforeMap = new Map(constrBefore.map((s,i) => [String(s.teamId), i + 1]));
+  // Re-sort avant course pour les rangs corrects
+  standingsBefore.sort((a,b) => b.points - a.points).forEach((s,i) => standBeforeMap.set(String(s.pilotId), i+1));
+  constrBefore.sort((a,b) => b.points - a.points).forEach((s,i) => constrBeforeMap.set(String(s.teamId), i+1));
+
+  const { results, collisions, penalties } = await simulateRace(race, grid, pilots, teams, contracts, channel, season);
   await applyRaceResults(results, race._id, season, collisions);
 
   // ── Annonce rivalités nouvellement déclarées ─────────────
+  // On n'annonce que si la rivalité vient d'être créée CE GP (rivalDeclaredAt === race.index)
   if (channel && collisions.length) {
-    // Recharger les pilotes pour voir les rivalités mises à jour
     const updatedPilots = await Pilot.find({ _id: { $in: pilots.map(p => p._id) } });
-    const rivalAnnounces = [];
+    const announcedPairs = new Set();
     for (const p of updatedPilots) {
-      if (!p.rivalId) continue;
+      if (!p.rivalId || p.rivalDeclaredAt !== race.index) continue;
       const rival = updatedPilots.find(r => String(r._id) === String(p.rivalId));
       if (!rival) continue;
-      // Annoncer seulement si la rivalité a été confirmée (2+ contacts) et pas encore annoncée
-      if ((p.rivalContacts || 0) === 2) {
-        const pTeam = pilots.find(pi => String(pi._id) === String(p._id));
-        const rTeam = pilots.find(pi => String(pi._id) === String(rival._id));
-        // Éviter les doublons (A-B et B-A)
-        const pairKey = [String(p._id), String(rival._id)].sort().join('_');
-        if (!rivalAnnounces.includes(pairKey)) {
-          rivalAnnounces.push(pairKey);
-          const ptTeam = teams.find(t => String(t._id) === String(p.teamId));
-          const rvTeam = teams.find(t => String(t._id) === String(rival.teamId));
-          await channel.send(
-            `⚔️ **RIVALITÉ DÉCLARÉE !**\n` +
-            `${ptTeam?.emoji || ''}**${p.name}** vs ${rvTeam?.emoji || ''}**${rival.name}** — ` +
-            `2 contacts en course cette saison. *Ces deux-là ne s'aiment pas...*\n` +
-            `*La narration prendra note de leurs prochaines confrontations !*`
-          );
-        }
-      }
+      const pairKey = [String(p._id), String(rival._id)].sort().join('_');
+      if (announcedPairs.has(pairKey)) continue;
+      announcedPairs.add(pairKey);
+
+      const ptTeam = teams.find(t => String(t._id) === String(p.teamId));
+      const rvTeam = teams.find(t => String(t._id) === String(rival.teamId));
+      const isSameTeam = String(p.teamId) === String(rival.teamId);
+      await channel.send(pick([
+        `⚔️ **RIVALITÉ DÉCLARÉE — GP ${race.index + 1}**\n${ptTeam?.emoji || ''}**${p.name}** vs ${rvTeam?.emoji || ''}**${rival.name}** — 2 contacts cette saison${isSameTeam ? ' *entre coéquipiers*' : ''}. *Ces deux-là ne s'aiment pas...*\n*Leurs prochains face-à-face seront narrés différemment.*`,
+        `⚔️ **RIVALITÉ EN FORMATION !**\n${ptTeam?.emoji || ''}**${p.name}** et ${rvTeam?.emoji || ''}**${rival.name}** : 2 incidents ensemble. *Le paddock a pris note.*\nCette rivalité sera suivie tout au long de la saison.`,
+      ]));
+    }
+
+    // Escalade : si contacts atteignent 5 CE GP (exactement), c'est une intensification
+    for (const p of updatedPilots) {
+      if (!p.rivalId || (p.rivalContacts || 0) !== 5) continue;
+      const rival = updatedPilots.find(r => String(r._id) === String(p.rivalId));
+      if (!rival) continue;
+      const pairKey = [String(p._id), String(rival._id)].sort().join('_') + '_esc';
+      if (announcedPairs.has(pairKey)) continue;
+      announcedPairs.add(pairKey);
+      const ptTeam = teams.find(t => String(t._id) === String(p.teamId));
+      const rvTeam = teams.find(t => String(t._id) === String(rival.teamId));
+      await channel.send(
+        `🔥 **RIVALITÉ QUI S'EMBRASE !**\n${ptTeam?.emoji || ''}**${p.name}** / ${rvTeam?.emoji || ''}**${rival.name}** — **5 contacts** au compteur cette saison. *Le paddock commence vraiment à s'inquiéter.*`
+      );
     }
   }
 
@@ -8888,25 +9234,42 @@ async function runRace(override, gpIndex = null) {
     const pilot = pilots.find(p => String(p._id) === String(r.pilotId));
     const team  = teams.find(t => String(t._id) === String(r.teamId));
     const pts   = F1_POINTS[r.pos-1] || 0;
-    desc += `${medals[r.pos-1]||`P${r.pos}`} ${team?.emoji||''} **${pilot?.name||'?'}**`;
+    desc += `${medals[r.pos-1]||`\`P${r.pos}\``} ${team?.emoji||''} **${pilot?.name||'?'}**`;
     if (r.dnf) desc += ` ❌ DNF`;
     else       desc += ` — ${pts} pts · +${r.coins} 🪙`;
     if (r.fastestLap) desc += ' ⚡';
+    if (r.penaltySec) desc += ` *(+${r.penaltySec}s pén.)*`;
     desc += '\n';
+  }
+  // Récap des pénalités si il y en a
+  if (penalties && penalties.length > 0) {
+    const penMap = new Map();
+    for (const p of penalties) {
+      penMap.set(p.pilotId, (penMap.get(p.pilotId) || 0) + p.seconds);
+    }
+    const penLines = [...penMap.entries()].map(([id, sec]) => {
+      const pilot = pilots.find(p => String(p._id) === id);
+      const team  = teams.find(t => String(t._id) === String(pilot?.teamId));
+      return `${team?.emoji||''}**${pilot?.name||'?'}** +${sec}s`;
+    });
+    if (penLines.length) desc += `\n⚠️ *Pénalités : ${penLines.join(' · ')}*`;
   }
   embed.setDescription(desc);
   if (channel) await channel.send({ embeds: [embed] });
 
-  // Classement constructeurs rapide en fin de course
+  // Classement constructeurs avec changements
   if (channel) {
     const constrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
-    const constrTeamIds   = constrStandings.map(s => s.teamId);
-    const constrTeams     = await Team.find({ _id: { $in: constrTeamIds } });
+    const constrTeams     = await Team.find();
     const constrTeamMap   = new Map(constrTeams.map(t => [String(t._id), t]));
     let constrDesc = '';
     for (let i = 0; i < constrStandings.length; i++) {
-      const t = constrTeamMap.get(String(constrStandings[i].teamId));
-      constrDesc += `**${i+1}.** ${t?.emoji||''} **${t?.name||'?'}** — ${constrStandings[i].points} pts\n`;
+      const s   = constrStandings[i];
+      const t   = constrTeamMap.get(String(s.teamId));
+      const oldPos = constrBeforeMap.get(String(s.teamId));
+      const delta  = oldPos !== undefined ? oldPos - (i + 1) : 0;
+      const arrow  = delta > 0 ? `⬆️+${delta}` : delta < 0 ? `⬇️${delta}` : `▶️`;
+      constrDesc += `**${i+1}.** ${t?.emoji||''} **${t?.name||'?'}** — ${s.points} pts ${arrow}\n`;
     }
     const constrEmbed = new EmbedBuilder()
       .setTitle('🏗️ Classement Constructeurs — Après cette course')
@@ -8914,7 +9277,7 @@ async function runRace(override, gpIndex = null) {
       .setDescription(constrDesc || 'Aucune donnée');
     await channel.send({ embeds: [constrEmbed] });
 
-    // Classement pilotes
+    // Classement pilotes avec changements
     const pilotStandings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).limit(20);
     const pilotIds2      = pilotStandings.map(s => s.pilotId);
     const allPilots2     = await Pilot.find({ _id: { $in: pilotIds2 } });
@@ -8924,10 +9287,15 @@ async function runRace(override, gpIndex = null) {
     const medals2        = ['🥇','🥈','🥉'];
     let pilotDesc = '';
     for (let i = 0; i < pilotStandings.length; i++) {
-      const s = pilotStandings[i];
-      const p = pilotMap2.get(String(s.pilotId));
-      const t = p?.teamId ? teamMap2b.get(String(p.teamId)) : null;
-      pilotDesc += `${medals2[i] || `**${i+1}.**`} ${t?.emoji||''} **${p?.name||'?'}** — ${s.points} pts (${s.wins}V ${s.podiums}P)\n`;
+      const s      = pilotStandings[i];
+      const p      = pilotMap2.get(String(s.pilotId));
+      const t      = p?.teamId ? teamMap2b.get(String(p.teamId)) : null;
+      const oldPos = standBeforeMap.get(String(s.pilotId));
+      const delta  = oldPos !== undefined ? oldPos - (i + 1) : 0;
+      const arrow  = delta > 0 ? `⬆️+${delta}` : delta < 0 ? `⬇️${delta}` : `▶️`;
+      const pts    = s.points;
+      const gap    = i > 0 ? ` (−${pilotStandings[0].points - pts}pts)` : '';
+      pilotDesc += `${medals2[i] || `**${i+1}.**`} ${t?.emoji||''} **${p?.name||'?'}** — ${pts} pts ${arrow}${gap}\n`;
     }
     const pilotEmbed = new EmbedBuilder()
       .setTitle(`🏆 Classement Pilotes — Saison ${season.year}`)
