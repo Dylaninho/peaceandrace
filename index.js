@@ -29,6 +29,14 @@ const GUILD_ID     = process.env.GUILD_ID;
 const MONGO_URI    = process.env.MONGODB_URI || 'mongodb://localhost:27017/f1bot';
 const RACE_CHANNEL = process.env.RACE_CHANNEL_ID;
 const PORT         = process.env.PORT || 3000;
+// ── Intro vidéo GP ───────────────────────────────────────────
+// INTRO_VIDEO_URL  : URL directe vers un MP4 (Discord CDN, hébergement perso...)
+//                    Discord intègre et joue la vidéo automatiquement inline.
+// INTRO_VIDEO_PATH : chemin local vers le fichier MP4 (ex: ./intro.mp4)
+//                    Utilisé si INTRO_VIDEO_URL n'est pas défini.
+// L'URL peut aussi être changée en live avec /admin_set_intro sans redémarrer le bot.
+let raceIntroUrl  = process.env.INTRO_VIDEO_URL  || null;
+let raceIntroPath = process.env.INTRO_VIDEO_PATH || null;
 // Ping URL : utilise l'URL publique si disponible (localhost echoue sur Render/Railway)
 const PING_URL     = process.env.APP_URL
   ? `${process.env.APP_URL}/ping`
@@ -4275,6 +4283,91 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   };
 
   // ══════════════════════════════════════════════════════════
+  // 🎬  INTRO VIDÉO + PRÉSENTATION TV
+  // ══════════════════════════════════════════════════════════
+  if (channel && (raceIntroUrl || raceIntroPath)) {
+    try {
+      // ── Envoi de la vidéo comme fichier (player Discord click-to-play, pas d'autoplay) ──
+      if (raceIntroUrl) {
+        // URL Discord CDN → re-envoyée comme pièce jointe pour avoir le player "click to play"
+        // (pas une simple URL inline qui s'auto-jouerait)
+        const { AttachmentBuilder } = require('discord.js');
+        const attachment = new AttachmentBuilder(raceIntroUrl, { name: 'intro_f1.mp4' });
+        await channel.send({ files: [attachment] });
+      } else if (raceIntroPath) {
+        const { AttachmentBuilder } = require('discord.js');
+        const attachment = new AttachmentBuilder(raceIntroPath, { name: 'intro_f1.mp4' });
+        await channel.send({ files: [attachment] });
+      }
+
+      // ── Présentation TV réaliste juste en dessous de la vidéo ──
+      const now      = new Date();
+      const hh       = String(now.getHours()).padStart(2, '0');
+      const mm       = String(now.getMinutes()).padStart(2, '0');
+      const heureStr = `${hh}h${mm}`;
+
+      // Diffuseurs F1 selon la langue/région — liste réaliste
+      const BROADCASTERS = [
+        { name: 'Canal+',        flag: '🇫🇷', desc: 'Formule 1® en exclusivité' },
+        { name: 'Sky Sports F1', flag: '🇬🇧', desc: 'Live & Exclusive Coverage' },
+        { name: 'F1 TV Pro',     flag: '🌍', desc: 'Streaming mondial' },
+        { name: 'RTL',           flag: '🇩🇪', desc: 'Formel 1 live' },
+        { name: 'DAZN',          flag: '🇪🇸', desc: 'Fórmula 1 en vivo' },
+        { name: 'ServusTV',      flag: '🇦🇹', desc: 'Formel 1 live' },
+      ];
+      // Canal+ en premier, puis 2 autres aléatoires
+      const mainBroad = BROADCASTERS[0];
+      const otherBroads = BROADCASTERS.slice(1).sort(() => Math.random() - 0.5).slice(0, 2);
+      const broadcastField = [mainBroad, ...otherBroads]
+        .map(b => `${b.flag} **${b.name}** — *${b.desc}*`)
+        .join('\n');
+
+      const weatherLabelTV = {
+        DRY  : '☀️ Conditions sèches',
+        HOT  : '🔥 Canicule — piste très chaude',
+        INTER: '🌦️ Piste mixte',
+        WET  : '🌧️ Pluie — piste humide',
+      }[weather] || '☀️ Conditions sèches';
+
+      const circuitName = race.circuit.replace(' GP', '');
+
+      const tvEmbed = new EmbedBuilder()
+        .setColor('#E4000F')
+        .setTitle(`🔴  EN DIRECT — ${race.emoji} FORMULA 1® ${circuitName.toUpperCase()} GRAND PRIX`)
+        .setDescription(
+          `**${heureStr} · Direct depuis ${race.country}**\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
+        )
+        .addFields(
+          {
+            name: '📡 Diffusion',
+            value: broadcastField,
+            inline: false,
+          },
+          {
+            name: '🏁 Circuit',
+            value: `${race.emoji} **${race.circuit}** — ${race.country}\n${weatherLabelTV} · **${totalLaps} tours**`,
+            inline: true,
+          },
+          {
+            name: '🕐 Heure locale',
+            value: `**${heureStr}** (Paris)`,
+            inline: true,
+          },
+        )
+        .setFooter({ text: '🏎️ Formula 1® — Tous droits réservés · Diffusion officielle' })
+        .setTimestamp();
+
+      await channel.send({ embeds: [tvEmbed] });
+
+      // ── Pause ~60s pour regarder la vidéo avant la grille ──
+      await sleep(60_000);
+    } catch (e) {
+      console.warn('[simulateRace] Impossible d\'envoyer l\'intro vidéo :', e.message);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════
   // PRE-RACE — Grille de départ (format F1 : P1 gauche · P2 droite · P3 gauche · P4 droite...)
   // ══════════════════════════════════════════════════════════
   const makeGridLine = (d, pos) => {
@@ -6391,6 +6484,19 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_scheduler_resume')
     .setDescription('[ADMIN] ▶️ Réactive le lancement automatique des GPs'),
+
+  new SlashCommandBuilder().setName('admin_set_intro')
+    .setDescription('[ADMIN] 🎬 Définit la vidéo d\'intro GP — fichier MP4 ou URL externe permanente')
+    .addAttachmentOption(o => o
+      .setName('video')
+      .setDescription('Fichier MP4 (glisse-dépose). Prioritaire sur l\'URL si les deux sont fournis.')
+      .setRequired(false)
+    )
+    .addStringOption(o => o
+      .setName('url')
+      .setDescription('URL directe permanente vers le MP4 (GitHub raw, Cloudflare R2...). Laisser vide = désactiver.')
+      .setRequired(false)
+    ),
 
   new SlashCommandBuilder().setName('admin_set_race_results')
     .setDescription(`[ADMIN] Saisit manuellement le classement d'un GP (si la simulation a planté)`)
@@ -8645,6 +8751,84 @@ async function handleInteraction(interaction) {
     });
   }
 
+  // ── /admin_set_intro ─────────────────────────────────────────
+  if (commandName === 'admin_set_intro') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const attachment = interaction.options.getAttachment('video');
+    const urlInput   = interaction.options.getString('url');
+
+    // Aucun des deux → désactivation
+    if (!attachment && !urlInput) {
+      raceIntroUrl  = null;
+      raceIntroPath = null;
+      return interaction.reply({
+        content:
+          '🎬 **Intro vidéo désactivée.**\n' +
+          'Aucune vidéo ne sera envoyée avant les prochains GPs.\n\n' +
+          '> *Pour réactiver : refais `/admin_set_intro` en attachant un fichier ou en collant une URL.*',
+        ephemeral: true,
+      });
+    }
+
+    // ── Priorité 1 : fichier attaché ─────────────────────────
+    if (attachment) {
+      const isVideo = attachment.contentType && attachment.contentType.startsWith('video/');
+      if (!isVideo) {
+        return interaction.reply({
+          content:
+            '❌ **Le fichier doit être une vidéo** (MP4, MOV, WebM...).\n' +
+            `> Type reçu : \`${attachment.contentType || 'inconnu'}\``,
+          ephemeral: true,
+        });
+      }
+      raceIntroUrl  = attachment.url;
+      raceIntroPath = null;
+      const sizeMb  = (attachment.size / 1_048_576).toFixed(1);
+      return interaction.reply({
+        content:
+          `🎬 **Intro configurée via pièce jointe** (${sizeMb} Mo)\n\n` +
+          `> ⚠️ *Lien CDN Discord — peut expirer après quelques jours.*\n` +
+          `> *Pour une URL permanente, héberge le fichier sur GitHub (raw) ou Cloudflare R2 et utilise le champ \`url\`.*\n` +
+          `> *Pour désactiver : \`/admin_set_intro\` sans rien remplir.*`,
+        ephemeral: true,
+      });
+    }
+
+    // ── Priorité 2 : URL externe ──────────────────────────────
+    const isValidUrl = urlInput.startsWith('http://') || urlInput.startsWith('https://');
+    if (!isValidUrl) {
+      return interaction.reply({
+        content:
+          '❌ URL invalide — elle doit commencer par `https://`.\n\n' +
+          '**Exemples d\'URLs permanentes :**\n' +
+          '> 🐙 GitHub Raw : `https://raw.githubusercontent.com/pseudo/repo/main/intro.mp4`\n' +
+          '> ☁️ Cloudflare R2 : `https://pub-xxx.r2.dev/intro.mp4`',
+        ephemeral: true,
+      });
+    }
+
+    raceIntroUrl  = urlInput;
+    raceIntroPath = null;
+
+    // Détecter le type d'hébergement pour rassurer sur la pérennité
+    const hostHint = urlInput.includes('raw.githubusercontent.com') ? '🐙 GitHub Raw — URL permanente ✅'
+                   : urlInput.includes('r2.dev')                    ? '☁️ Cloudflare R2 — URL permanente ✅'
+                   : urlInput.includes('cdn.discordapp.com')         ? '⚠️ Discord CDN — peut expirer'
+                   : '🔗 Hébergement externe';
+
+    return interaction.reply({
+      content:
+        `🎬 **Intro vidéo configurée !**\n` +
+        `Elle sera envoyée avant chaque GP.\n\n` +
+        `${hostHint}\n` +
+        `\`${urlInput.length > 80 ? urlInput.slice(0, 77) + '…' : urlInput}\`\n\n` +
+        `> *Pour désactiver : \`/admin_set_intro\` sans rien remplir.*`,
+      ephemeral: true,
+    });
+  }
+
   // ── /admin_fix_emojis ─────────────────────────────────────
   if (commandName === 'admin_fix_emojis') {
     if (!interaction.member.permissions.has('Administrator'))
@@ -10173,6 +10357,7 @@ npm install discord.js mongoose node-cron dotenv
   RACE_CHANNEL_ID=...
   PORT=3000
   APP_URL=https://ton-app.onrender.com   ← IMPORTANT pour le keep-alive sur Render/Railway
+  INTRO_VIDEO_URL=https://...            ← (optionnel) URL directe vers ton MP4 d'intro GP
 
 node index.js
 
