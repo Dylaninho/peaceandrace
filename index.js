@@ -113,6 +113,17 @@ const PilotSchema = new mongoose.Schema({
   // ── Statut coéquipier ────────────────────────────────────────
   teamStatus        : { type: String, enum: ['numero1', 'numero2', null], default: null },
   teammateDuelWins  : { type: Number, default: 0 },   // victoires internes cette saison vs coéquipier
+  // ── Personnalité ─────────────────────────────────────────
+  personality : {
+    archetype    : { type: String, default: null },
+    tone         : { type: String, default: null },
+    ego          : { type: Number, default: 50 },
+    rivalryStyle : { type: String, default: null },
+    pressStyle   : { type: String, default: null },
+    teamChemistry: { type: Number, default: 50 },
+    pressureLevel: { type: Number, default: 0 },
+    archetypeEvo : { type: Number, default: 0 },
+  },
   // État
   teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
   createdAt    : { type: Date, default: Date.now },
@@ -233,6 +244,18 @@ const ContractSchema = new mongoose.Schema({
   signedAt         : { type: Date, default: Date.now },
 });
 const Contract = mongoose.model('Contract', ContractSchema);
+
+// ── PilotRelation — Affinités inter-pilotes ───────────────
+const PilotRelationSchema = new mongoose.Schema({
+  pilotA   : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', required: true },
+  pilotB   : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', required: true },
+  affinity : { type: Number, default: 0 },
+  type     : { type: String, default: 'neutre' },
+  history  : [{ event: String, delta: Number, date: Date }],
+  updatedAt: { type: Date, default: Date.now },
+});
+PilotRelationSchema.index({ pilotA: 1, pilotB: 1 }, { unique: true });
+const PilotRelation = mongoose.model('PilotRelation', PilotRelationSchema);
 
 // ── TransferOffer ──────────────────────────────────────────
 const TransferOfferSchema = new mongoose.Schema({
@@ -458,6 +481,225 @@ function ratingTier(r) {
   if (r >= 72) return { badge: '🟦', label: 'CONFIRMÉ',       color: '#0099FF' };
   if (r >= 64) return { badge: '🟥', label: 'INTERMÉDIAIRE',  color: '#CC4444' };
   return              { badge: '⬜', label: 'ROOKIE',          color: '#888888' };
+}
+
+// ============================================================
+// 🎭  MOTEUR DE PERSONNALITES
+// ============================================================
+const ARCHETYPES = {
+  guerrier        : { tone:'agressif',     ego:75, rivalryStyle:'hot_blooded',   pressStyle:'spontane',      teamChemistry:45 },
+  icone           : { tone:'diplomatique', ego:85, rivalryStyle:'cold_war',       pressStyle:'mediatraining', teamChemistry:65 },
+  rookie_ambitieux: { tone:'humble',       ego:40, rivalryStyle:'respect_mutuel', pressStyle:'spontane',      teamChemistry:70 },
+  calculateur     : { tone:'froid',        ego:60, rivalryStyle:'indifference',   pressStyle:'mediatraining', teamChemistry:55 },
+  bad_boy         : { tone:'sarcastique',  ego:70, rivalryStyle:'hot_blooded',    pressStyle:'spontane',      teamChemistry:35 },
+  vieux_sage      : { tone:'ironique',     ego:55, rivalryStyle:'cold_war',       pressStyle:'fuyant',        teamChemistry:60 },
+};
+
+function assignRandomPersonality() {
+  const keys = Object.keys(ARCHETYPES);
+  const arch = keys[Math.floor(Math.random() * keys.length)];
+  const a = ARCHETYPES[arch];
+  return {
+    archetype    : arch,
+    tone         : a.tone,
+    ego          : Math.max(10, Math.min(95, a.ego + Math.floor((Math.random()-0.5)*20))),
+    rivalryStyle : a.rivalryStyle,
+    pressStyle   : a.pressStyle,
+    teamChemistry: Math.max(10, Math.min(90, a.teamChemistry + Math.floor((Math.random()-0.5)*20))),
+    pressureLevel: 0,
+    archetypeEvo : 0,
+  };
+}
+
+function getRadioQuote(pilot, event) {
+  const tone = pilot?.personality?.tone;
+  if (!tone) return null;
+  const Q = {
+    overtake_success: {
+      agressif    : ['HA ! C\'est MON tour !','Rien a faire contre ca.','Je LE SAVAIS.'],
+      sarcastique  : ['Il est passe ou lui ?','Facile.','Ah. Sympa.'],
+      froid        : ['Position acquise. Gap ?','Depassement confirme.','Bien. Rythme ?'],
+      humble       : ['Incroyable ! On peut tenir ?','C\'etait chaud !','Je l\'ai eu !'],
+      diplomatique : ['Parfait. Je gere.','Bien joue.','Propre. Merci.'],
+      ironique     : ['Apres toutes ces annees...','Ca marche encore.','Je note ca.'],
+    },
+    dnf: {
+      agressif    : ['C\'EST QUOI CA ?! NON !','Je vais TOUT CASSER.','CA FAIT MAL !'],
+      sarcastique  : ['Parfait. Absolument parfait.','Je rentre. Bonne journee.'],
+      froid        : ['Abandon confirme.','Dommage. On analyse.','Panne. Fin de course.'],
+      humble       : ['Desole les gars, vraiment.','Je suis frustre pour l\'equipe.','On fera mieux.'],
+      diplomatique : ['C\'est decevant. On verra ca ensemble.','Restons soudes.'],
+      ironique     : ['C\'etait trop beau.','Je m\'y attendais.','La voiture a decide avant moi.'],
+    },
+    safety_car: {
+      agressif    : ['SC ! ON PITE MAINTENANT !','Ne me laissez pas dehors !'],
+      sarcastique  : ['SC. Comme prevu.','Quelle surprise.'],
+      froid        : ['Safety Car. Decision undercut ?','SC deploye. Analyse ?'],
+      humble       : ['SC ! On pit ?','Qu\'est-ce qu\'on fait ?'],
+      diplomatique : ['SC. Je suis a vos ordres.','Votre appel.'],
+      ironique     : ['SC. Qui a fait quoi cette fois ?','On refait la meme erreur ?'],
+    },
+    defending: {
+      agressif    : ['Il ne passera PAS.','Il peut essayer tant qu\'il veut.'],
+      sarcastique  : ['Il croit pouvoir passer la ?','Bonne chance.'],
+      froid        : ['Defense optimale. Gap stable.','Je le controle.'],
+      humble       : ['Il est rapide... je tiens ?','J\'essaie de le bloquer !'],
+      diplomatique : ['Position maintenue.','Defense propre.'],
+      ironique     : ['Il peut attendre 3 tours.','Je me repose.'],
+    },
+    win: {
+      agressif    : ['C\'EST MOI !!! OUUUIIII !!!','INCROYABLE !!!'],
+      sarcastique  : ['Bien sur.','Logique.','Ce n\'etait pas complique.'],
+      froid        : ['Victoire. Merci a tous.','Course maitrisee.'],
+      humble       : ['Oh mon dieu... MERCI !!!','Je n\'y crois pas !!'],
+      diplomatique : ['Belle victoire d\'equipe. Merci.','Superbe travail collectif.'],
+      ironique     : ['...Ah. C\'est fait.','Une de plus.'],
+    },
+  };
+  const pool = Q[event]?.[tone];
+  if (!pool?.length) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// ── genSocialMediaPost — adaptatif selon rang constructeur ──
+// P10 pour l'écurie P15 constructeur = exploit. DNF pour le leader = catastrophe.
+function genSocialMediaPost(pilot, team, result, allPilots, allTeams, constrStandings, seasonYear, ctx = {}) {
+  const tone     = pilot?.personality?.tone     || 'diplomatique';
+  const arch     = pilot?.personality?.archetype || 'guerrier';
+  const pressure = pilot?.personality?.pressureLevel || 0;
+  const source   = pick(['grid_social','speed_gossip','turbo_people','pl_celebrity']);
+  const { pos, dnf, circuit, rival, rivalPos, champPos } = ctx;
+  const isDnf    = dnf === true;
+  const isWin    = pos === 1 && !isDnf;
+  const isPodium = pos <= 3 && !isDnf;
+  const cStandSorted  = [...(constrStandings||[])].sort((a,b) => b.points - a.points);
+  const totalTeams    = cStandSorted.length || 10;
+  const teamConstrIdx = team ? cStandSorted.findIndex(s => String(s.teamId) === String(team._id)) : -1;
+  const teamConstrPos = teamConstrIdx >= 0 ? teamConstrIdx + 1 : null;
+  const expectedPos   = teamConstrPos ? Math.min(15, Math.max(1, Math.round(teamConstrPos * 15 / totalTeams))) : 8;
+  const isOverperform  = !isDnf && pos && teamConstrPos && pos < expectedPos - 2 && teamConstrPos > Math.ceil(totalTeams/2);
+  const isUnderperform = !isDnf && pos && teamConstrPos && pos > expectedPos + 3 && teamConstrPos <= Math.ceil(totalTeams/2);
+  const isChampDnf     = champPos === 1 && isDnf;
+  const isChampOOPts   = champPos === 1 && !isDnf && pos > 10;
+  const isBadResult    = isDnf || (pos && pos > 12 && !isOverperform);
+  const rivalLost = rival && rivalPos != null && rivalPos > pos && !isDnf;
+  const rivalWon  = rival && rivalPos != null && rivalPos < pos;
+  const rivStyle  = pilot?.personality?.rivalryStyle;
+  const POSTS = {
+    win        : { guerrier:['Victoire. C\'est tout.','Pour ceux qui ont doute. #P1'], icone:['Une victoire de plus. L\'equipe a ete parfaite.','Resultat merite. #Champion'], rookie_ambitieux:['JE N\'Y CROIS PAS !! MERCI !!','P1 !! Incroyable weekend !!'], calculateur:['Victoire. Strategie parfaite.','Resultat conforme.'], bad_boy:['Lol. #next','Desole pas desole.'], vieux_sage:['Encore une. On finit jamais d\'apprendre.'] },
+    dnf        : { guerrier:['NON. On revient. PLUS FORT.','C\'est la course. Mais ca fait MAL.'], icone:['Abandon decevant. Prochain GP.','Ce n\'est pas notre journee.'], rookie_ambitieux:['Tres frustrant... On s\'ameliore encore.','DNF dur. Mais on apprend.'], calculateur:['DNF. Donnees recueillies. Prochain.'], bad_boy:['Parfait. Juste parfait.','La voiture a decide. Moi j\'avais le rythme.'], vieux_sage:['Ca arrive.','Dommage.'] },
+    podium     : { guerrier:[`P${pos}. On prend. Mais c\'est P1 qu\'il me faut.`], icone:[`P${pos}. Belle journee pour l\'equipe.`], rookie_ambitieux:[`PODIUM !!! P${pos} !!`,'Top 3 !!'], calculateur:[`P${pos}. Points importants.`], bad_boy:[`P${pos}. On sait qu\'on avait plus.`,'Top 3. Malgre tout.'], vieux_sage:[`P${pos}. Ce circuit est genereux parfois.`] },
+    overperform: { guerrier:[`P${pos} et c\'est BIEN pour nous ! On grimpe.`], rookie_ambitieux:[`P${pos} !! Pour l\'ecurie c\'est enorme !!`], bad_boy:[`P${pos}. Surpris ?`,'On n\'etait pas censes etre la. Et pourtant.'], vieux_sage:[`P${pos}. Parfois la machine repond.`], calculateur:[`P${pos}. Bien au-dessus des projections.`], icone:[`P${pos}. L\'equipe a tout donne.`] },
+    underperform:{ guerrier:['Ce n\'est pas acceptable. On se remet au travail.'], icone:[], bad_boy:['No comment.','Vous voulez mon avis ? Non ? Tant mieux.'], vieux_sage:[], calculateur:[], rookie_ambitieux:['Week-end difficile. Mais on apprend.'] },
+    champ_dis  : { guerrier:['Pas de commentaire. On reviendra.'], icone:[], bad_boy:['Sympa. Vraiment.'], calculateur:[], vieux_sage:[], rookie_ambitieux:['C\'est ecrasant mais on se bat.'] },
+    bad        : { guerrier:['C\'est pas ce resultat qui definit qui je suis.'], rookie_ambitieux:['Mauvais weekend. On revient.'], bad_boy:['Aucun commentaire.'], icone:[], calculateur:[], vieux_sage:[] },
+  };
+  let posts = [];
+  if (isChampDnf||isChampOOPts) posts=POSTS.champ_dis[arch]||[];
+  else if (isWin)           posts=POSTS.win[arch]||[];
+  else if (isDnf)           posts=POSTS.dnf[arch]||[];
+  else if (isPodium)        posts=POSTS.podium[arch]||[];
+  else if (isOverperform)   posts=POSTS.overperform[arch]||[];
+  else if (isUnderperform)  posts=POSTS.underperform[arch]||[];
+  else if (isBadResult)     posts=POSTS.bad[arch]||[];
+  if (isOverperform&&!isPodium&&!isWin) posts=[...posts,'Personne ne nous attendait la.'];
+  if (pressure>=60&&(tone==='agressif'||tone==='sarcastique')&&Math.random()<0.3) posts=[...posts,'Le paddock parle. Moi je conduis.'];
+  if (rival&&!isDnf) {
+    if (rivalLost&&rivStyle==='hot_blooded'&&Math.random()<0.5) posts=posts.map(p=>p+' @'+rival.toLowerCase().replace(/\s+/g,'_')+' 👀');
+    if (rivalWon&&rivStyle==='hot_blooded'&&Math.random()<0.4) posts=[...posts,'Bien joue aujourd\'hui. On verra la prochaine fois. 👀'];
+    if (rivalWon&&rivStyle==='cold_war') posts=[...posts,'Il y a des jours comme ca.'];
+  }
+  if (!posts.length) return null;
+  const text  = posts[Math.floor(Math.random()*posts.length)];
+  const likes = Math.floor(Math.random()*2000)+100;
+  const comms = Math.floor(Math.random()*400)+20;
+  const handle = `@${pilot.name.toLowerCase().replace(/\s+/g,'_')}`;
+  const headline = isWin ? `${handle} celebre sa victoire a ${circuit||'ce circuit'}`
+    : isDnf ? `${handle} reagit a son abandon`
+    : isPodium ? `${handle} sur le podium — la reaction`
+    : isOverperform ? `${handle} apres une belle surprise a ${circuit||'ce circuit'}`
+    : isUnderperform||isChampDnf||isChampOOPts ? `${handle} apres un resultat decevant`
+    : `${handle} sort du silence apres ce GP`;
+  const body = `📱 **${handle}**\n\n*"${text}"*\n\n❤️ ${likes.toLocaleString('fr-FR')} · 💬 ${comms.toLocaleString('fr-FR')} commentaires`
+    + (pressure>=70?'\n\n*Le post a suscite une forte reaction dans le paddock.*':'');
+  return { type:'social_media', source, headline, body, pilotIds:[pilot._id], teamIds:team?[team._id]:[], seasonYear };
+}
+
+async function updateAffinities(collisions, finalResults, allPilots) {
+  async function adj(idA,idB,delta,event) {
+    const [sA,sB]=[String(idA),String(idB)].sort();
+    try {
+      let rel=await PilotRelation.findOne({pilotA:sA,pilotB:sB});
+      if(!rel) rel=new PilotRelation({pilotA:sA,pilotB:sB,affinity:0,type:'neutre',history:[]});
+      rel.affinity=Math.max(-100,Math.min(100,rel.affinity+delta));
+      rel.type=rel.affinity>=60?'amis':rel.affinity>=20?'respect':rel.affinity>=-20?'neutre':rel.affinity>=-60?'tension':'ennemis';
+      rel.updatedAt=new Date(); rel.history.push({event,delta,date:new Date()});
+      if(rel.history.length>30) rel.history=rel.history.slice(-30);
+      await rel.save();
+    }catch(e){console.error('[affinity]',e.message);}
+  }
+  for(const col of(collisions||[])) await adj(col.attackerId,col.victimId,-(Math.floor(Math.random()*8)+8),'contact_course');
+  const pod=(finalResults||[]).filter(r=>!r.dnf&&r.pos<=3);
+  for(let i=0;i<pod.length;i++) for(let j=i+1;j<pod.length;j++) await adj(pod[i].pilotId,pod[j].pilotId,5,'podium_partage');
+  const tm=new Map();
+  for(const r of(finalResults||[])){const p=allPilots.find(x=>String(x._id)===String(r.pilotId));if(!p?.teamId)continue;const tid=String(p.teamId);if(!tm.has(tid))tm.set(tid,[]);tm.get(tid).push({...r,pilot:p});}
+  for(const[,mb]of tm){if(mb.length<2)continue;mb.sort((a,b)=>(a.dnf?99:a.pos)-(b.dnf?99:b.pos));if(!mb[0].dnf)await adj(mb[0].pilotId,mb[1].pilotId,-5,'duel_interne');}
+}
+
+async function evolvePersonalityDiscreetly(pilot,standing,racesPlayed){
+  if(!pilot?.personality?.archetype)return;
+  const p=pilot.personality;
+  const wins=standing?.wins||0,dnfs=standing?.dnfs||0,pts=standing?.points||0;
+  const upd={};
+  let pd=0;
+  if(dnfs>=3)pd+=15;if(wins>=3)pd-=15;
+  if(pts<5&&racesPlayed>=4)pd+=10;if(wins>=1)pd-=8;
+  const np=Math.max(0,Math.min(100,(p.pressureLevel||0)+pd));
+  if(np!==(p.pressureLevel||0))upd['personality.pressureLevel']=np;
+  let evo=p.archetypeEvo||0;
+  if(p.archetype==='rookie_ambitieux'&&wins>=3){evo++;if(evo>=5){const na=Math.random()<0.5?'guerrier':'icone';const nd=ARCHETYPES[na];Object.assign(upd,{'personality.archetype':na,'personality.tone':nd.tone,'personality.rivalryStyle':nd.rivalryStyle,'personality.pressStyle':nd.pressStyle,'personality.archetypeEvo':0});}else upd['personality.archetypeEvo']=evo;}
+  if(p.archetype==='guerrier'&&dnfs>=5){evo++;if(evo>=4)Object.assign(upd,{'personality.archetype':'vieux_sage','personality.tone':'ironique','personality.archetypeEvo':0});else upd['personality.archetypeEvo']=evo;}
+  if(p.archetype==='bad_boy'&&wins>=5){evo++;if(evo>=6)Object.assign(upd,{'personality.tone':'diplomatique','personality.pressStyle':'mediatraining','personality.archetypeEvo':0});else upd['personality.archetypeEvo']=evo;}
+  if(Object.keys(upd).length>0)try{await Pilot.findByIdAndUpdate(pilot._id,{$set:upd});}catch(e){}
+}
+
+async function postRacePersonalityHooks(race,finalResults,raceCollisions,allPilots,allTeams,allConstrStandings,season,channel){
+  try{
+    await updateAffinities(raceCollisions,finalResults,allPilots);
+    if(channel){
+      const top3=[...finalResults].filter(r=>!r.dnf).sort((a,b)=>a.pos-b.pos).slice(0,3);
+      for(const r of top3){
+        const pilot=allPilots.find(p=>String(p._id)===String(r.pilotId));
+        if(!pilot?.personality)continue;
+        const q=getRadioQuote(pilot,r.pos===1?'win':'defending');
+        if(q&&Math.random()<0.65){await sleep(2000);try{await channel.send(`📻 *Radio ${pilot.name} :* ***"${q}"***`);}catch(e){}}
+      }
+    }
+    const standingsSeason=await Standing.find({seasonId:season._id});
+    const doneRaces=await Race.countDocuments({seasonId:season._id,status:'done'});
+    for(const pilot of allPilots){const standing=standingsSeason.find(s=>String(s.pilotId)===String(pilot._id));try{await evolvePersonalityDiscreetly(pilot,standing,doneRaces);}catch(e){}}
+    const constrS=allConstrStandings||await ConstructorStanding.find({seasonId:season._id});
+    const cands=[...finalResults].sort(()=>Math.random()-0.5).slice(0,5);
+    let posted=0;
+    for(const r of cands){
+      if(posted>=2)break;
+      const pilot=allPilots.find(p=>String(p._id)===String(r.pilotId));
+      const team=allTeams.find(t=>String(t._id)===String(pilot?.teamId));
+      if(!pilot?.personality)continue;
+      if(Math.random()<0.55){
+        const rival=pilot.rivalId?allPilots.find(p=>String(p._id)===String(pilot.rivalId)):null;
+        const rivRes=rival?finalResults.find(rr=>String(rr.pilotId)===String(rival._id)):null;
+        const allStSorted=[...standingsSeason].sort((a,b)=>b.points-a.points);
+        const champPos=allStSorted.findIndex(s=>String(s.pilotId)===String(pilot._id))+1||null;
+        const ctx={pos:r.pos,dnf:r.dnf,circuit:race.circuit,rival:rival?.name,rivalPos:rivRes?.pos,champPos};
+        const ad=genSocialMediaPost(pilot,team,r,allPilots,allTeams,constrS,season.year,ctx);
+        if(ad&&channel){
+          await sleep(randInt(15000,45000));
+          try{const art=await NewsArticle.create({...ad,triggered:'post_race',publishedAt:new Date()});await publishNews(art,channel);posted++;}catch(e){console.error('Social post:',e.message);}
+        }
+      }
+    }
+  }catch(e){console.error('[postRacePersonalityHooks]',e.message);}
 }
 
 // Snake draft : quel teamId pick à l'index donné ?
@@ -1784,9 +2026,10 @@ if (finishedSorted[0]) {
       rivalDnf   : rivalResult?.dnf,
       rivalContacts : pilot.rivalContacts || 0,
       seasonPhase,
+      totalTeams    : allTeams?.length || 10,
     };
 
-    const block = buildPressBlock(ctx, angle);
+    const block = buildPressBlockWithPersonality(ctx, angle, pilot);
     if (block) blocks.push({ block, photoUrl: pilot.photoUrl || null });
   }
 
@@ -2144,6 +2387,34 @@ function buildPressBlock(ctx, angle) {
   return null;
 }
 
+
+// ── buildPressBlockWithPersonality ────────────────────────────
+function buildPressBlockWithPersonality(ctx, angle, pilot) {
+  let base = buildPressBlock(ctx, angle);
+  if (!base) return null;
+  if (!pilot?.personality) return base;
+  const { tone, pressStyle, archetype: arch, pressureLevel: pressure } = pilot.personality;
+  const { pos, dnf, cPos, champPos, totalTeams } = ctx;
+  const expectedPos    = cPos ? Math.min(15, Math.max(1, Math.round(cPos*15/(totalTeams||10)))) : 8;
+  const isOverperform  = !dnf && pos && cPos && pos < expectedPos-2 && cPos > Math.ceil((totalTeams||10)/2);
+  const isUnderperform = !dnf && pos && cPos && pos > expectedPos+3 && cPos <= Math.ceil((totalTeams||10)/2);
+  const isChampDnf = champPos===1 && dnf;
+  const isChampOOPts = champPos===1 && !dnf && pos>10;
+  const filters = {
+    agressif   : [[/C'est d\u00e9cevant/g,"C'est inacceptable"],[/on avance\b/g,"on AVANCE \u2014 quoi qu'il arrive"]],
+    sarcastique : [[/belle journ\u00e9e/g,'journ\u00e9e... int\u00e9ressante'],[/c'est l.essentiel/g,"c'est toujours \u00e7a de pris"]],
+    froid       : [[/c'est lib\u00e9rateur/g,"c'est le r\u00e9sultat attendu"],[/je suis fier/g,'r\u00e9sultat satisfaisant']],
+    ironique    : [[/on le prend\b/g,"on le prend. Pour l'instant."],[/saison difficile/g,'saison... caract\u00e8re']],
+  };
+  for (const [re,rep] of (filters[tone]||[])) base=base.replace(re,rep);
+  if (isOverperform) { const bo={guerrier:'\n*Ce r\u00e9sultat, personne ne l\'attendait.*',rookie_ambitieux:'\n*On a tout donn\u00e9 \u2014 et \u00e7a a pay\u00e9.*',bad_boy:'\n*Surpris ? Moi non.*',calculateur:'\n*Strat\u00e9gie parfaite.*',icone:'\n*Ce r\u00e9sultat rappelle pourquoi on est l\u00e0.*',vieux_sage:'\n*Parfois tout s\'aligne.*'};base+=bo[arch]||''; }
+  if (isChampDnf||isChampOOPts) { const di={guerrier:'\n*Il quitte la salle les dents serr\u00e9es.*',icone:'\n*Sourire de fa\u00e7ade.*',calculateur:'\n*Il note \u00e7a comme une variable.*',bad_boy:'\n*Il sort sans se retourner.*',vieux_sage:'\n*Il s\'en est toujours relev\u00e9.*',rookie_ambitieux:'\n*La voix tremble.*'};base+=di[arch]||'\n*Journ\u00e9e noire pour le leader du championnat.*'; }
+  if (isUnderperform) base+=pick(['\n\n*Chaque mot est pes\u00e9.*','\n\n*Le ton est plus d\u00e9fensif.*','\n\n*Ce r\u00e9sultat laissera des traces.*']);
+  if ((pressure||0)>=70&&pressStyle==='spontane'&&Math.random()<0.45){const ob={agressif:'\n\n*"Il va falloir que \u00e7a change."*',sarcastique:'\n\n*"Rien n\'\u00e9tait dr\u00f4le."*',humble:'\n\n*"J\'essaie vraiment."*'};base+=ob[tone]||'';}
+  if ((pressure||0)>=60&&pressStyle==='fuyant'&&Math.random()<0.4) base+='\n\n*Il coupe court.*';
+  const pre={spontane:pick(['Encore dans le casque, ','Avant m\u00eame d\'enlever son casque, ']),mediatraining:pick(['Face aux m\u00e9dias, ','']),fuyant:pick(['Attrap\u00e9 dans le couloir, ','']),show_off:pick(['Sous les projecteurs, ',''])};
+  return (pre[pressStyle]||'')+base;
+}
 // ─── MOTEUR DE NEWS — Tabloïd de paddock ─────────────────
 
 const NEWS_SOURCES = {
@@ -4181,6 +4452,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     for (const driver of alive) {
       const incident = checkIncident(driver.pilot, driver.team);
       if (!incident) continue;
+      if (scActive && (incident.type === 'CRASH' || incident.type === 'PUNCTURE')) continue;
 
       let incidentText = '';
 
@@ -4239,7 +4511,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           lapDnfs.push({ driver, reason: 'CRASH' });
           lapIncidents.push({ type: 'CRASH' });
           incidentText = crashSoloDescription(driver, lap, gpStyle);
-          if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('crash_solo') });
+          if (incidentText) {
+            events.push({ priority: 10, text: incidentText, gif: pickGif('crash_solo') });
+            if (driver.pilot?.personality && Math.random() < 0.4) {
+              const rq = getRadioQuote(driver.pilot, 'dnf');
+              if (rq) events.push({ priority: 2, text: `📻 *Radio ${driver.pilot.name} :* *"${rq}"*` });
+            }
+          }
         }
 
       } else if (incident.type === 'MECHANICAL') {
@@ -4345,6 +4623,12 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           `🚨 **SC IN !**${causeStr}. La voiture de sécurité prend la tête — qui va rentrer aux stands pour gratter une stratégie ?`,
           `🚨 **SAFETY CAR !** T${lap}${causeStr}. Les commissaires nettoient la piste — ça va redonner du piment à cette course !`,
         ]) });
+        // Quote radio SC
+        const scLeader = drivers.filter(d=>!d.dnf).sort((a,b)=>a.pos-b.pos)[0];
+        if (scLeader?.pilot?.personality && Math.random() < 0.45) {
+          const rq = getRadioQuote(scLeader.pilot, 'safety_car');
+          if (rq) events.push({ priority: 2, text: `📻 *Radio ${scLeader.pilot.name} :* *"${rq}"*` });
+        }
       } else {
         events.push({ priority: 9, gif: pickGif('vsc'), text: pick([
           `🟡 **VIRTUAL SAFETY CAR**${causeStr}. Tout le monde maintient le delta — la course se met en pause.`,
@@ -4845,6 +5129,11 @@ const exitNeighborStr = neighborAhead && neighborBehind
           text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}${teammateTag}`,
           gif: pickGif(gifCat),
         });
+        // Radio quote dépasseur
+        if (driver.pilot?.personality && Math.random() < 0.28) {
+          const rq = getRadioQuote(driver.pilot, 'overtake_success');
+          if (rq) events.push({ priority: 2, text: `📻 *Radio ${driver.pilot.name} :* *"${rq}"*` });
+        }
         overtakeMentioned.add(String(driver.pilot._id));
         overtakeMentioned.add(String(passed.pilot._id));
       }
@@ -5382,6 +5671,16 @@ const exitNeighborStr = neighborAhead && neighborBehind
       if (seasonForNews) await generatePostRaceNews(race, results, seasonForNews, channel);
     } catch(e) { console.error('Post-race news erreur:', e); }
   }, 150_000 + Math.random() * 30_000); // 2min30 à 3min après la fin
+
+  // ── Personality hooks post-course
+  setImmediate(async () => {
+    try {
+      const allPilotsSnap = await Pilot.find();
+      const allTeamsSnap  = await Team.find();
+      const allConstrS    = await ConstructorStanding.find({ seasonId: season._id });
+      await postRacePersonalityHooks(race, results, raceCollisions, allPilotsSnap, allTeamsSnap, allConstrS, season, channel);
+    } catch(e){ console.error('[personality hooks]', e.message); }
+  });
 
   return { results, collisions: raceCollisions, penalties: racePenalties };
 }
@@ -6019,6 +6318,11 @@ const commands = [
   new SlashCommandBuilder().setName('admin_inject_results')
     .setDescription('[ADMIN] Injecte manuellement les résultats d\'un GP terminé sans points')
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP — défaut: dernier GP done').setMinValue(0)),
+  new SlashCommandBuilder().setName('admin_set_personalities')
+    .setDescription('[ADMIN] Assigne une personnalité à tous les pilotes qui n\'en ont pas'),
+  new SlashCommandBuilder().setName('affinites')
+    .setDescription('Voir la personnalité et les relations d\'un pilote')
+    .addStringOption(o => o.setName('pilote').setDescription('Nom du pilote').setRequired(true)),
   new SlashCommandBuilder().setName('admin_stop_race')
     .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
   new SlashCommandBuilder().setName('admin_fix_slots')
@@ -6263,6 +6567,43 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// ── Commandes Personnalité ────────────────────────────────────────────
+async function handleAdminSetPersonalities(interaction) {
+  const pilots = await Pilot.find();
+  let count = 0;
+  for (const p of pilots) {
+    if (!p.personality?.archetype) { p.personality = assignRandomPersonality(); await p.save(); count++; }
+  }
+  const bd = {};
+  for (const p of await Pilot.find()) { const a=p.personality?.archetype||'inconnu'; bd[a]=(bd[a]||0)+1; }
+  const lines = Object.entries(bd).map(([k,v])=>`• **${k}** : ${v}`).join('\n');
+  await interaction.editReply(`✅ **${count}** pilote(s) ont reçu une personnalité.\n\n**Répartition :**\n${lines}`);
+}
+
+async function handleAffinites(interaction) {
+  const name = interaction.options.getString('pilote');
+  const pilot = await Pilot.findOne({ name: { $regex: name, $options: 'i' } });
+  if (!pilot) return interaction.editReply(`❌ Pilote introuvable : \`${name}\``);
+  const arch = pilot.personality?.archetype || '?';
+  const tone = pilot.personality?.tone || '?';
+  const pres = pilot.personality?.pressureLevel || 0;
+  const pressBar = '🔴'.repeat(Math.round(pres/20)) + '⚪'.repeat(5-Math.round(pres/20));
+  const rels = await PilotRelation.find({$or:[{pilotA:String(pilot._id)},{pilotB:String(pilot._id)}]}).sort({affinity:-1}).limit(8);
+  const lines = [];
+  for (const r of rels) {
+    const otherId = String(r.pilotA)===String(pilot._id) ? r.pilotB : r.pilotA;
+    const other = await Pilot.findById(otherId); if (!other) continue;
+    const n = Math.min(4,Math.round(Math.abs(r.affinity)/25));
+    const bar = (r.affinity>=0?'💚':'🔴').repeat(n) + '⚪'.repeat(4-n);
+    const last = r.history?.slice(-1)[0];
+    lines.push(`${bar} **${other.name}** (${r.affinity>0?'+':''}${r.affinity}) · *${r.type}*${last?' · '+last.event:''}`);
+  }
+  await interaction.editReply({ embeds: [new EmbedBuilder()
+    .setTitle(`🎭 ${pilot.name} — Personnalité & Relations`)
+    .setColor('#FF6B35')
+    .setDescription(`**Archétype :** ${arch}  |  **Tone :** ${tone}\n**Pression :** ${pressBar} (${pres}/100)\n\n`+(lines.length?`**Relations :**\n${lines.join('\n')}`:'*Aucune relation enregistrée.*'))] });
+}
+
 async function handleInteraction(interaction) {
   // ── Handler boutons (offres de transfert) ─────────────────
   // ── Handler select menu (draft) ──────────────────────────
@@ -6458,7 +6799,7 @@ async function handleInteraction(interaction) {
     'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
-    'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis',
+    'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
@@ -6583,6 +6924,9 @@ async function handleInteraction(interaction) {
       gestionPneus: BASE_STAT_VALUE + finalBonuses.gestionPneus,
       plcoins     : 500,
     });
+
+    pilot.personality = assignRandomPersonality();
+    await pilot.save();
 
     const bar      = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10 - Math.round(v/10));
     const ovCreate = overallRating(pilot);
@@ -8228,6 +8572,8 @@ async function handleInteraction(interaction) {
     return;
   }
 
+  if (commandName === 'admin_set_personalities') return handleAdminSetPersonalities(interaction);
+  if (commandName === 'affinites') return handleAffinites(interaction);
   if (commandName === 'admin_stop_race') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
@@ -9498,17 +9844,15 @@ async function runRace(override, gpIndex = null) {
     const totalRaces  = await Race.countDocuments({ seasonId: season._id });
     const gpNum       = (race.index ?? 0) + 1;
 
-    const preRaceEmbed = new EmbedBuilder()
-      .setTitle(`🏎️ GRILLE DE DÉPART — ${race.emoji} ${race.circuit} · GP ${gpNum}/${totalRaces}`)
-      .setColor('#FF1801')
-      .addFields(
-        { name: `P1–P${half}`, value: gridLines.slice(0, half).join('\n') || '—', inline: true },
-        { name: `P${half+1}–P${grid.length}`, value: gridLines.slice(half).join('\n') || '—', inline: true },
-      )
-      .setDescription(`${styleEmojis[race.gpStyle]||''} **${race.gpStyle.toUpperCase()}**${duelsStr}`)
-      .setFooter({ text: `Les feux s'éteignent dans quelques instants... ${race.emoji}` });
-
-    await channel.send({ embeds: [preRaceEmbed] });
+    // La grille détaillée est publiée dans simulateRace — on envoie ici uniquement les enjeux
+    if (duelsStr) {
+      const preRaceEmbed = new EmbedBuilder()
+        .setTitle(`🏎️ ${race.emoji} ${race.circuit} · GP ${gpNum}/${totalRaces} — Enjeux`)
+        .setColor('#FF1801')
+        .setDescription(`${styleEmojis[race.gpStyle]||''} **${race.gpStyle.toUpperCase()}**${duelsStr}`)
+        .setFooter({ text: `Les feux s'éteignent dans quelques instants... ${race.emoji}` });
+      await channel.send({ embeds: [preRaceEmbed] });
+    }
     await W(4000);
     await channel.send(pick([
       `🚦 **FEU ROUGE...** Tout le monde est en position. Le silence avant la tempête.`,
