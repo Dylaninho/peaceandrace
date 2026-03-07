@@ -7072,9 +7072,9 @@ client.on('interactionCreate', async (interaction) => {
   try {
     await handleInteraction(interaction);
   } catch (err) {
+    // Token expiré après 15min (normal pour les commandes longues) — ignorer silencieusement
+    if (err.code === 10062) return;
     console.error('❌ interactionCreate error:', err.message);
-    // Interaction expirée (10062) ou autre erreur Discord — on ne re-crash pas
-    if (err.code === 10062) return; // Unknown interaction — token expiré, rien à faire
     // Tenter de répondre à l'utilisateur si possible
     const reply = { content: '❌ Une erreur interne est survenue.', ephemeral: true };
     try {
