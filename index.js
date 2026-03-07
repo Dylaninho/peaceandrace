@@ -349,6 +349,10 @@ const SeasonSchema = new mongoose.Schema({
   status           : { type: String, enum: ['upcoming','active','transfer','finished'], default: 'upcoming' },
   regulationSet    : { type: Number, default: 1 },
   currentRaceIndex : { type: Number, default: 0 },
+  // Mercato — timestamps persistants pour survivre aux redémarrages bot
+  transferStartedAt : { type: Date, default: null },
+  secondWaveSentAt  : { type: Date, default: null },
+  gridRevealedAt    : { type: Date, default: null },
 });
 const Season = mongoose.model('Season', SeasonSchema);
 
@@ -3007,7 +3011,14 @@ function genDriverInterviewArticle(pilot, team, standing, contract, teammate, te
   else if (dnfs >= 1) mood -= 1;
   if (status === 'numero1') mood += 1;
   if (status === 'numero2') mood -= 1;
-  if (seasonPhase === 'fin' && pts < 20) mood -= 1;
+  // Seuil "mauvaise saison" relatif au rang constructeur de l'équipe :
+  // Top écurie (rank ≤ 3) : 50 pts mini pour éviter le malus d'humeur
+  // Milieu de grille (rank 4-6) : 25 pts, petite équipe (rank 7+) : 10 pts
+  const teamRankForMood = constrStandingsFull
+    ? (constrStandingsFull.findIndex(s => String(s.teamId) === String(team._id)) + 1) || 5
+    : 5;
+  const moodPtThreshold = teamRankForMood <= 3 ? 50 : teamRankForMood <= 6 ? 25 : 10;
+  if (seasonPhase === 'fin' && pts < moodPtThreshold) mood -= 1;
   if (isLastYear) mood -= 1; // contrat qui se termine = pression
   const moodLabel = mood >= 2 ? 'heureux' : mood >= 0 ? 'neutre' : mood === -1 ? 'tendu' : 'en crise';
 
@@ -4511,7 +4522,9 @@ async function runScheduledNews(discordClient, slotName = 'soir') {
   // ── Nombre d'articles pour ce slot ──────────────────────────
   const baseCount  = (SLOT_COUNTS[slotName] || SLOT_COUNTS.soir)[phaseIdx];
   // ±1 aléatoire pour varier, borné à [1, 3]
-  const count      = Math.max(1, Math.min(3, baseCount + (Math.random() < 0.35 ? 1 : 0)));
+  const count      = season.status === 'transfer'
+    ? Math.max(2, Math.min(4, baseCount + 1 + (Math.random() < 0.4 ? 1 : 0))) // mercato = plus d'articles
+    : Math.max(1, Math.min(3, baseCount + (Math.random() < 0.35 ? 1 : 0)));
 
   // ── Poids de ce slot modifiés par la phase ───────────────────
   const rawWeights = { ...(SLOT_WEIGHTS[slotName] || SLOT_WEIGHTS.soir) };
@@ -4527,6 +4540,23 @@ async function runScheduledNews(discordClient, slotName = 'soir') {
     if (rawWeights.lifestyle) rawWeights.lifestyle += 5;
     if (rawWeights.brand_deal) rawWeights.brand_deal += 4;
     if (rawWeights.transfer_rumor) rawWeights.transfer_rumor = Math.max(0, (rawWeights.transfer_rumor||0) - 8);
+  }
+
+  // ── MERCATO : boost massif des rumeurs de transfert ──────────
+  // Pendant la période de transfert, le paddock ne parle que de ça.
+  // Toutes les autres thématiques reculent au profit du mercato.
+  if (season.status === 'transfer') {
+    // transfer_rumor prend la moitié des poids du slot : poids fixé à 60
+    rawWeights.transfer_rumor = 60;
+    rawWeights.drama          = Math.max(2, (rawWeights.drama          || 0) - 5);
+    rawWeights.lifestyle      = Math.max(2, (rawWeights.lifestyle      || 0) - 6);
+    rawWeights.brand_deal     = Math.max(2, (rawWeights.brand_deal     || 0) - 4);
+    rawWeights.charity        = Math.max(1, (rawWeights.charity        || 0) - 4);
+    rawWeights.tv_show        = Math.max(1, (rawWeights.tv_show        || 0) - 4);
+    rawWeights.friendship     = Math.max(1, (rawWeights.friendship     || 0) - 4);
+    rawWeights.scandal_offtrack = Math.max(4, (rawWeights.scandal_offtrack || 0));
+    // Article supplémentaire garanti pendant le mercato
+    // count sera re-calculé après mais on le monte d'1 minimum
   }
 
   // ── Anti-répétition : articles des 24h ───────────────────────
@@ -6437,8 +6467,22 @@ async function evolveCarStats(raceResults, teams) {
     // Formule : points de course × 1.5 + bonus budget + gain de base garanti
     // Le gain de base (3 pts) assure que même les équipes sans points progressent
     // Le budget amplifie légèrement l'avantage des grosses structures
-    const devGained = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3);
-    const newDevPts = team.devPoints + devGained;
+    // ── Coût salarial des pilotes ─────────────────────────────
+    // Les gros salaires réduisent les ressources de développement voiture.
+    // Logique : chaque PLcoin de salaire/course = moins d'argent pour l'usine.
+    // Impact calibré pour rester subtil : 1 pilote à 300 sal ≈ -3 devPts/course
+    // = 1 upgrade de moins toutes les ~13 courses. Un trade-off perceptible sur la saison.
+    const teamContracts = await Contract.find({ teamId: team._id, active: true }).lean();
+    const totalSalaire  = teamContracts.reduce((sum, c) => sum + (c.salaireBase || 0), 0);
+    // Pénalité : chaque 100 PLcoins de masse salariale = -1 devPt (cap à -8 pour éviter l'écrasement)
+    const salaryPenalty = Math.min(8, Math.floor(totalSalaire / 100));
+
+    // Bonus voiture si l'équipe a misé sur une voiture plutôt que des pilotes :
+    // Masse salariale très basse (< 150 total) → bonus de développement +3
+    const lowWageBonusDev = totalSalaire < 150 ? 3 : 0;
+
+    const devGained = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3 - salaryPenalty + lowWageBonusDev);
+    const newDevPts = team.devPoints + Math.max(1, devGained); // toujours au moins 1 devPt gagné
 
     // ── Seuil abaissé : 30 devPts = 1 point de stat ─────────
     // Avant : 50 → le bas de grille ne progressait presque jamais
@@ -6677,18 +6721,85 @@ async function createNewSeason() {
   return season;
 }
 
+// Prétextes réalistes de nouvelles réglementations F1 (tournant par index)
+const REGULATION_PRETEXTS = [
+  {
+    title : '🔧 Nouveau règlement aérodynamique',
+    body  : 'La FIA PL impose de nouvelles restrictions sur les planchers et les déflecteurs latéraux. ' +
+            'Les équipes doivent refaire leurs simulations CFD de zéro. Les rapports de force sont redistribués.',
+    // Impacte surtout vitesseMax et dirtyAir
+    focus : { vitesseMax: 1.5, dirtyAir: 1.5, drs: 1.2, refroidissement: 0.8, conservationPneus: 0.8, vitesseMoyenne: 1.0 },
+  },
+  {
+    title : '⛽ Régulation des carburants et de la gestion thermique',
+    body  : 'Nouvelle réglementation sur la composition des carburants et les limites thermiques moteur. ' +
+            'Certaines écuries habituées à exploiter la chaleur moteur à leur avantage perdent un avantage clé.',
+    focus : { refroidissement: 1.8, vitesseMax: 1.2, drs: 0.9, dirtyAir: 0.9, conservationPneus: 1.0, vitesseMoyenne: 1.0 },
+  },
+  {
+    title : '🛞 Changement de fournisseur de pneus & composés 2025',
+    body  : 'Nouveaux composés pneumatiques pour toute la saison. Les voitures très efficaces sur les anciens pneus ' +
+            'pourraient souffrir, tandis que d'autres trouveront une fenêtre de fonctionnement plus large.',
+    focus : { conservationPneus: 1.8, gestionPneus: 1.0, vitesseMoyenne: 1.2, refroidissement: 1.0, vitesseMax: 0.8, drs: 0.8, dirtyAir: 1.0 },
+  },
+  {
+    title : '🏎️ Révolution châssis — Voitures à effet de sol renforcé',
+    body  : 'Retour aux tunnels Venturi complets. Les équipes qui maîtrisaient l'aéro traditionnelle repartent presque ' +
+            'de zéro, tandis que certains outsiders pourraient surprendre dès les premiers tests.',
+    focus : { vitesseMoyenne: 1.8, dirtyAir: 1.5, vitesseMax: 1.0, drs: 0.7, refroidissement: 1.0, conservationPneus: 1.2 },
+  },
+  {
+    title : '📡 Restrictions DRS & systèmes de recharge',
+    body  : 'La FIA PL réduit la durée d'activation du DRS et impose de nouveaux plafonds sur les systèmes ERS. ' +
+            'Les circuits rapides vont changer de visage. Les spécialistes de la gestion thermique sont avantagés.',
+    focus : { drs: 1.8, vitesseMax: 1.5, refroidissement: 1.3, dirtyAir: 0.9, conservationPneus: 1.0, vitesseMoyenne: 0.8 },
+  },
+];
+
 async function applyRegulationChange(season) {
-  const teams = await Team.find();
+  const teams    = await Team.find();
   const statKeys = ['vitesseMax','drs','refroidissement','dirtyAir','conservationPneus','vitesseMoyenne'];
+
+  // Choisir le prétexte selon le numéro de regulationSet (cyclique)
+  const pretext = REGULATION_PRETEXTS[(season.regulationSet - 2) % REGULATION_PRETEXTS.length];
+
   for (const team of teams) {
     const updates = {};
     for (const key of statKeys) {
-      // Chaque stat est rebrassée légèrement (±8 points)
-      updates[key] = clamp(team[key] + randInt(-8, 8), 40, 99);
+      // Amplitude de base ±10, modulée par le focus du règlement
+      const focusMultiplier = pretext.focus[key] || 1.0;
+      const rawDelta = randInt(-10, 10) * focusMultiplier;
+      updates[key] = clamp(Math.round(team[key] + rawDelta), 40, 99);
     }
+    // Réinitialiser les devPoints pour repartir à égalité de développement
+    updates.devPoints = 0;
     await Team.findByIdAndUpdate(team._id, updates);
   }
-  console.log(`🔄 Changement de réglementation appliqué (saison ${season.year})`);
+
+  // Annoncer le changement dans le channel si possible
+  try {
+    const ch = RACE_CHANNEL ? await client.channels.fetch(RACE_CHANNEL).catch(() => null) : null;
+    if (ch) {
+      const embed = require('discord.js') ? null : null; // EmbedBuilder déjà importé
+      const reg = new EmbedBuilder()
+        .setTitle(`📋 NOUVELLE RÉGLEMENTATION — Saison ${season.year}`)
+        .setColor('#FF6600')
+        .setDescription(
+          `**${pretext.title}**
+
+${pretext.body}
+
+` +
+          `> *Les performances des écuries ont été recalibrées. La hiérarchie peut changer.*
+` +
+          `> *Rendez-vous aux premiers essais libres pour voir qui a su s'adapter.*`
+        )
+        .setFooter({ text: `Règlement ${season.regulationSet} — FIA PL officiel` });
+      await ch.send({ embeds: [reg] });
+    }
+  } catch(e) { /* pas de channel = silencieux */ }
+
+  console.log(\`🔄 Réglementation "${pretext.title}" appliquée (saison \${season.year})\`);
 }
 
 // ============================================================
@@ -6709,6 +6820,125 @@ async function applyRegulationChange(season) {
 //  Budget élevé  → cherche les meilleurs profils, offres généreuses, contrats courts (confiance)
 //  Budget moyen  → cherche l'équilibre perf/coût, contrats 2 saisons
 //  Budget faible → mise sur les jeunes (note basse mais potentiel), contrats longs (fidéliser)
+
+// ============================================================
+//  📰  ANNONCES MERCATO — Rumeurs signature (vrai + faux mélangés)
+// ============================================================
+
+// Délai aléatoire entre 10min et 3h avant de publier la "rumeur"
+// pour simuler le temps que les infos fuient dans le paddock
+async function publishSigningRumors(realPilot, realTeam, offer) {
+  const season = await getActiveSeason();
+  if (!season) return;
+  const allPilots = await Pilot.find();
+  const allTeams  = await Team.find();
+
+  // Choisir : publie-t-on la vraie signature ou une fausse rumeur ?
+  // 50% vrai immédiat, 30% vrai avec délai, 20% faux rumeur d'abord
+  const roll = Math.random();
+
+  const delay = Math.floor(Math.random() * (3 * 60 - 10) + 10) * 60 * 1000; // 10min → 3h
+
+  if (roll < 0.50) {
+    // ── Vraie signature, publiée après délai ───────────────
+    setTimeout(async () => {
+      try {
+        const ch = await client.channels.fetch(RACE_CHANNEL);
+        if (!ch) return;
+        const ov   = overallRating(realPilot);
+        const tier = ratingTier(ov);
+        const source = Math.random() < 0.5 ? '🗞️ **PL Racing News**' : '📡 **Pitlane Insider**';
+        const lines = [
+          \`${source} — **OFFICIEL : ${realPilot.name} signe chez ${realTeam.emoji} ${realTeam.name} !**\n${tier.badge} Le transfert est confirmé. Contrat de **${offer.seasons}** saison(s).\`,
+          \`${source} — C'est officiel. **${realPilot.name}** rejoint **${realTeam.emoji} ${realTeam.name}** pour la prochaine saison. Les deux parties ont confirmé l'accord.\n${tier.badge} *(${ov} overall)*\`,
+          \`🖊️ **Signature confirmée** — ${realTeam.emoji} **${realTeam.name}** annonce l'arrivée de **${realPilot.name}** dans son line-up. Durée : ${offer.seasons} saison(s).\`,
+        ];
+        await ch.send(lines[Math.floor(Math.random() * lines.length)]);
+      } catch(e) { console.error('Signing announce error:', e.message); }
+    }, delay);
+
+  } else if (roll < 0.80) {
+    // ── Fausse rumeur PURE — lie le pilote à une mauvaise équipe, ça reste ainsi ──
+    const fakeTeam = allTeams.filter(t => String(t._id) !== String(realTeam._id))[Math.floor(Math.random() * (allTeams.length - 1))];
+    setTimeout(async () => {
+      try {
+        const ch = await client.channels.fetch(RACE_CHANNEL);
+        if (!ch) return;
+        const fakeLines = [
+          \`🔄 **Rumeur — Paddock Whispers** : Des sources proches du dossier indiquent que **${realPilot.name}** serait très proche d'un accord avec **${fakeTeam?.emoji || '🏎️'} ${fakeTeam?.name || 'une écurie surprise'}**. Rien de signé encore.\`,
+          \`📡 **Pitlane Insider** — **${realPilot.name}** et **${fakeTeam?.emoji || '🏎️'} ${fakeTeam?.name || 'une grande écurie'}** : les discussions seraient avancées. Son entourage reste silencieux.\`,
+          \`🗞️ Exclusif — **${realPilot.name}** aurait été aperçu en réunion avec des dirigeants de **${fakeTeam?.emoji || '🏎️'} ${fakeTeam?.name || 'une écurie'}**. Aucun commentaire des deux côtés.\`,
+          \`📡 Un agent bien informé confirme à **Pitlane Insider** : **${realPilot.name}** et **${fakeTeam?.name || 'une écurie'}** seraient en négociations finales. Signature imminente ?\`,
+        ];
+        await ch.send(fakeLines[Math.floor(Math.random() * fakeLines.length)]);
+        // Pas de rectification — la rumeur reste dans la nature jusqu'au reveal grille
+      } catch(e) { console.error('Signing fake rumor error:', e.message); }
+    }, delay);
+
+  } else {
+    // ── Fausse rumeur d'un autre pilote — on cite le mauvais nom, la vérité ne sort pas ──
+    const fakePilot = allPilots.filter(p => String(p._id) !== String(realPilot._id) && !p.teamId)[0]
+      || allPilots.filter(p => String(p._id) !== String(realPilot._id))[Math.floor(Math.random() * (allPilots.length - 1))];
+    if (!fakePilot) return;
+    setTimeout(async () => {
+      try {
+        const ch = await client.channels.fetch(RACE_CHANNEL);
+        if (!ch) return;
+        const wrongLines = [
+          \`🔄 **Rumeur — Paddock Whispers** : **${fakePilot.name}** serait sur le point de rejoindre **${realTeam.emoji} ${realTeam.name}**. Nos sources sont formelles.\`,
+          \`📡 **Pitlane Insider** — C'est **${fakePilot.name}** qui serait la priorité de **${realTeam.emoji} ${realTeam.name}** pour la prochaine saison. Dossier en cours.\`,
+          \`🗞️ Selon plusieurs sources concordantes, **${realTeam.emoji} ${realTeam.name}** aurait jeté son dévolu sur **${fakePilot.name}**. L'officialisation se ferait dans les prochains jours.\`,
+        ];
+        await ch.send(wrongLines[Math.floor(Math.random() * wrongLines.length)]);
+        // Pas de correction — les fans devront attendre le /reveal_grille pour la vérité
+      } catch(e) { console.error('Signing distraction rumor error:', e.message); }
+    }, delay);
+  }
+}
+
+// ============================================================
+//  🏁  RÉVÉLATION DE LA GRILLE COMPLÈTE
+// ============================================================
+async function revealFinalGrid(season, channel) {
+  const allPilots = await Pilot.find({ teamId: { $ne: null } });
+  const allTeams  = await Team.find();
+  const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
+
+  // Grouper par équipe
+  const byTeam = new Map();
+  for (const pilot of allPilots) {
+    const tid = String(pilot.teamId);
+    if (!byTeam.has(tid)) byTeam.set(tid, []);
+    byTeam.get(tid).push(pilot);
+  }
+
+  let gridDesc = '';
+  for (const [tid, pilots] of byTeam) {
+    const team = teamMap.get(tid);
+    if (!team) continue;
+    const pilotStr = pilots.map(p => {
+      const ov   = overallRating(p);
+      const tier = ratingTier(ov);
+      return \`${tier.badge} **${p.name}** *(${ov})*\`;
+    }).join(' · ');
+    gridDesc += \`${team.emoji} **${team.name}** — ${pilotStr}\n\`;
+  }
+
+  const freePilots = await Pilot.find({ teamId: null });
+  if (freePilots.length) {
+    gridDesc += \`\n⚠️ *Pilote(s) sans écurie : ${freePilots.map(p => p.name).join(', ')}*\`;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(\`🏁 GRILLE OFFICIELLE — Saison ${season.year + 1}\`)
+    .setColor('#FFD700')
+    .setDescription(
+      \`La grille est complète. Voici le line-up officiel pour la prochaine saison !\n\n\` + gridDesc
+    )
+    .setFooter({ text: 'Bonne chance à tous les pilotes. Que le meilleur gagne. 🏆' });
+
+  await channel.send({ embeds: [embed] });
+}
 
 async function startTransferPeriod() {
   const season = await getActiveSeason();
@@ -6771,10 +7001,26 @@ async function startTransferPeriod() {
       ) / 5;
 
       // Statistiques en saison (si le pilote en a)
+      // Le poids de la saison est relatif à l'ambition de l'équipe :
+      // Une grande écurie valorise les victoires >> les points ; une petite équipe valorise la régularité
       const standing = allStandings.find(s => String(s.pilotId) === String(pilot._id));
-      const seasonScore = standing
-        ? (standing.points * 0.6 + standing.wins * 5 + standing.podiums * 2 - standing.dnfs * 3)
-        : 0;
+      let seasonScore = 0;
+      if (standing) {
+        const wins    = standing.wins    || 0;
+        const podiums = standing.podiums || 0;
+        const dnfs    = standing.dnfs    || 0;
+        const pts     = standing.points  || 0;
+        if (prefersPeakPerformers) {
+          // Grande écurie : valorise très fort les victoires, pénalise les DNF
+          seasonScore = wins * 15 + podiums * 4 + pts * 0.3 - dnfs * 5;
+        } else if (prefersYoungTalent) {
+          // Petite écurie : valorise la régularité et le potentiel de progression
+          seasonScore = pts * 0.8 + podiums * 2 + wins * 6 - dnfs * 2;
+        } else {
+          // Milieu de grille : équilibre — 1 victoire + 2 podiums reste moyen
+          seasonScore = pts * 0.5 + wins * 10 + podiums * 3 - dnfs * 3;
+        }
+      }
 
       // Adéquation voiture ↔ pilote : certaines stats du pilote complètent les faiblesses de la voiture
       // Ex: voiture faible en Dirty Air → préfère un pilote avec un bon score Dépassement
@@ -6815,22 +7061,35 @@ async function startTransferPeriod() {
       // ── Calibration du contrat ─────────────────────────────
       const ov = overallRating(pilot);
 
-      // Salaire de base : proportionnel au budget ET à la valeur du pilote
-      // Un pilote noté 80 dans une écurie à 160 budget → ~240 PLcoins/course
+      // ── Calibration du contrat selon budget réel de l'écurie ──────────
+      // Budget 100 (base) → masse salariale totale tolérable ~300 PLcoins/course (2 pilotes)
+      // Budget 60 (pauvre) → max ~150 PLcoins totaux → offres très basses
+      // Budget 180 (riche) → peut se permettre ~600+ PLcoins totaux
+      // Le salaire d'un pilote est borné par : budget_equipe × coeff_ov
+      // Un pilote ov=90 dans une équipe budget=60 recevra quand même peu — l'équipe n'a pas les moyens
+      // Un pilote ov=55 dans une équipe budget=180 recevra peu aussi — peu de valeur perçue
+
+      // Base : ce que l'équipe peut se permettre × attractivité du pilote (ov normalisé vs 75 baseline)
+      // Plafond doux : une petite équipe (budget 60) propose max ~120 PLcoins/course à un top pilote
+      const budgetCapPerPilot   = (team.budget / 100) * 150; // budget → cap PLcoins/course/pilote
+      const ovAttractiveness    = Math.pow(ov / 75, 1.5);    // exponentiel : ov 90 vaut 1.8×, ov 60 = 0.6×
       const salaireBase = Math.round(
-        (budgetRatio * 200) * (ov / 75) * rand(0.85, 1.15)
+        clamp(budgetCapPerPilot * ovAttractiveness * rand(0.85, 1.15), 40, 450)
       );
 
-      // Multiplicateur : les riches paient mieux en relatif
+      // Multiplicateur : les riches peuvent offrir plus de coins par course en %
+      // Cap à 2.2× pour ne pas dérégler les PLcoins
       const coinMultiplier = parseFloat(
-        clamp(budgetRatio * rand(1.0, 1.6), 0.8, 2.5).toFixed(2)
+        clamp(budgetRatio * rand(0.9, 1.5), 0.7, 2.2).toFixed(2)
       );
 
-      // Primes : proportionnelles au rang de l'écurie (meilleures écuries = plus grosses primes)
+      // Primes : proportionnelles au rang ET au budget. Une équipe pauvre ne peut pas offrir 500 de prime victoire.
+      // Plafond : budget_ratio × 180 pour la prime victoire
+      const primeVictoireMax = Math.round((team.budget / 100) * 180);
       const primeVictoire = Math.round(
-        (200 - teamRank * 15) * rand(0.8, 1.3) * budgetRatio
+        clamp((200 - teamRank * 12) * rand(0.7, 1.2) * budgetRatio, 0, primeVictoireMax)
       );
-      const primePodium = Math.round(primeVictoire * rand(0.3, 0.5));
+      const primePodium = Math.round(primeVictoire * rand(0.25, 0.45));
 
       // Durée du contrat :
       //  Pilote top (ov ≥ 75) + écurie riche    → contrat court (1 saison — confiance mutuelle)
@@ -6885,17 +7144,189 @@ async function startTransferPeriod() {
     offers.sort((a, b) => b.salaireBase - a.salaireBase);
     const topOffer = offers[0];
     // Chaque offre concurrente tente de surenchérir
+    // Salaire de référence initial (avant surenchères) pour le cap
+    const baseCap = Math.round(offers[offers.length - 1].salaireBase * 3.0); // max 3× le moins offrant
     for (let i = 1; i < offers.length; i++) {
       const offer = offers[i];
-      // Surenchère : +10% à +20% sur la meilleure offre visible
-      const surenchere = Math.round(topOffer.salaireBase * rand(1.08, 1.20));
+      // Surenchère : +10% à +20% sur la meilleure offre visible, cap à 3× le salaire plancher
+      const surenchere = Math.min(
+        Math.round(topOffer.salaireBase * rand(1.08, 1.20)),
+        baseCap
+      );
       if (surenchere > offer.salaireBase) {
         await TransferOffer.findByIdAndUpdate(offer._id, { salaireBase: surenchere });
       }
     }
   }
 
+  // ── Notifier les pilotes par DM que leurs offres sont disponibles ──
+  const allNewPending = await TransferOffer.find({ status: 'pending' });
+  // Grouper par pilote pour 1 seul DM résumé par joueur
+  const offersByPilotForDM = new Map();
+  for (const o of allNewPending) {
+    const key = String(o.pilotId);
+    if (!offersByPilotForDM.has(key)) offersByPilotForDM.set(key, []);
+    offersByPilotForDM.get(key).push(o);
+  }
+  for (const [pilotId, pilotOffers] of offersByPilotForDM) {
+    try {
+      const pilot    = await Pilot.findById(pilotId);
+      if (!pilot?.discordId) continue;
+      const discordUser = await (async () => {
+        try { return await client.users.fetch(pilot.discordId); } catch { return null; }
+      })();
+      if (!discordUser) continue;
+      const dmCh = await discordUser.createDM().catch(() => null);
+      if (!dmCh) continue;
+      const teamNames = [];
+      for (const o of pilotOffers) {
+        const t = await Team.findById(o.teamId);
+        if (t) teamNames.push(`${t.emoji} **${t.name}**`);
+      }
+      await dmCh.send(
+        `📬 **Mercato ouvert !** **${pilot.name}** a reçu **${pilotOffers.length}** offre(s) de contrat :\n` +
+        teamNames.join(', ') + '\n\n' +
+        `Utilise \`/offres\` dans le serveur pour les consulter et répondre. Tu as **7 jours** avant expiration.`
+      );
+    } catch(e) { /* DM bloqués — pas grave */ }
+  }
+
   return expiredContracts.length;
+}
+
+// ============================================================
+//  🔄 DEUXIÈME VAGUE DE TRANSFERTS
+//  Déclenché ~3-4 jours après la 1ère vague :
+//  Pour les pilotes libres qui ont tout refusé ou dont toutes
+//  les offres ont expiré, les écuries qui ont encore un slot
+//  refont une offre — souvent plus "désespérée" (contrat court,
+//  salaire revu à la baisse OU hausse si urgence).
+// ============================================================
+async function startSecondTransferWave(channel) {
+  const season = await getActiveSeason();
+  if (!season || season.status !== 'transfer') return;
+
+  // Pilotes toujours sans équipe ET sans offre pending
+  const freePilots = await Pilot.find({ teamId: null });
+  if (!freePilots.length) return;
+
+  const stillFree = [];
+  for (const pilot of freePilots) {
+    const pendingCount = await TransferOffer.countDocuments({ pilotId: pilot._id, status: 'pending' });
+    if (pendingCount === 0) stillFree.push(pilot);
+  }
+  if (!stillFree.length) return;
+
+  const allTeams       = await Team.find();
+  const allStandings   = await Standing.find({ seasonId: season._id });
+  const constrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
+  const teamRankMap    = new Map(constrStandings.map((s, i) => [String(s.teamId), i + 1]));
+  const totalTeams     = allTeams.length;
+
+  let waveOffers = 0;
+
+  for (const team of allTeams) {
+    const slotsAvailable = 2 - await Pilot.countDocuments({ teamId: team._id });
+    if (slotsAvailable <= 0) continue;
+
+    const teamRank    = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
+    const budgetRatio = team.budget / 100;
+    const prefersPeakPerformers = team.budget >= 120;
+    const prefersYoungTalent    = team.budget < 80;
+
+    // En 2ème vague, les équipes sont moins sélectives — elles élargiront leur cible
+    for (const pilot of stillFree) {
+      const ov = overallRating(pilot);
+
+      // Les grandes équipes restent exigeantes (ov ≥ 65), les petites prennent tout
+      if (prefersPeakPerformers && ov < 65) continue;
+
+      const already = await TransferOffer.findOne({
+        teamId: team._id, pilotId: pilot._id,
+        status: { $in: ['pending', 'accepted'] }
+      });
+      if (already) continue;
+
+      // Contrat d'urgence : durée 1 saison toujours, salaire légèrement réduit
+      // (l'écurie prend le risque, le pilote aussi)
+      // 2ème vague : offres d'urgence, même logique budget mais légèrement réduites (-15%)
+      const budgetCapPerPilot2   = (team.budget / 100) * 130; // légèrement inférieur à la 1ère vague
+      const ovAttractiveness2    = Math.pow(ov / 75, 1.5);
+      const salaireBase = Math.round(
+        clamp(budgetCapPerPilot2 * ovAttractiveness2 * rand(0.75, 1.05), 35, 380)
+      );
+      const coinMultiplier = parseFloat(
+        clamp(budgetRatio * rand(0.8, 1.35), 0.65, 2.0).toFixed(2)
+      );
+      const primeVictoireMax2 = Math.round((team.budget / 100) * 150);
+      const primeVictoire = Math.round(
+        clamp((180 - teamRank * 12) * rand(0.65, 1.05) * budgetRatio, 0, primeVictoireMax2)
+      );
+      const primePodium = Math.round(primeVictoire * rand(0.2, 0.4));
+
+      // Expiration plus courte : 4 jours seulement
+      const expiresAt = new Date(Date.now() + 4 * 24 * 60 * 60 * 1000);
+
+      await TransferOffer.create({
+        teamId: team._id, pilotId: pilot._id,
+        coinMultiplier,
+        primeVictoire: Math.max(0, primeVictoire),
+        primePodium:   Math.max(0, primePodium),
+        salaireBase:   Math.max(40, salaireBase),
+        seasons: 1,  // toujours 1 saison en 2ème vague
+        status: 'pending',
+        expiresAt,
+      });
+      waveOffers++;
+    }
+  }
+
+  // Annonce dans le channel si des offres ont été générées
+  if (channel && waveOffers > 0) {
+    const allNewOffers  = await TransferOffer.find({ status: 'pending' });
+    const allPilots2    = await Pilot.find({ _id: { $in: allNewOffers.map(o => o.pilotId) } });
+    const allTeams2     = await Team.find();
+    const pilotMap2     = new Map(allPilots2.map(p => [String(p._id), p]));
+    const teamMap2      = new Map(allTeams2.map(t => [String(t._id), t]));
+
+    const offersByPilot = new Map();
+    for (const o of allNewOffers) {
+      const key = String(o.pilotId);
+      if (!offersByPilot.has(key)) offersByPilot.set(key, []);
+      offersByPilot.get(key).push(o);
+    }
+
+    let marketDesc = '';
+    for (const [pilotId, offers] of offersByPilot) {
+      const pilot = pilotMap2.get(pilotId);
+      if (!pilot) continue;
+      const ov    = overallRating(pilot);
+      const tier  = ratingTier(ov);
+      const teamNames = offers.map(o => {
+        const t = teamMap2.get(String(o.teamId));
+        return t ? `${t.emoji} ${t.name}` : '?';
+      }).join(', ');
+      marketDesc += `${tier.badge} **${pilot.name}** *(${ov})* — ${offers.length} offre(s) : ${teamNames}\n`;
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('⚠️ DEUXIÈME VAGUE — Mercato d\'urgence !')
+      .setColor('#FF4400')
+      .setDescription(
+        `**${stillFree.length}** pilote(s) sans équipe · **${waveOffers}** nouvelle(s) offre(s) générée(s)\n` +
+        `Les pilotes libres ont **4 jours** pour accepter ou refuser — c'est la dernière chance.\n\n` +
+        `📋 Utilisez \`/offres\` pour voir vos propositions.\n\u200B`
+      )
+      .addFields({
+        name: '📊 Pilotes encore libres',
+        value: (marketDesc.length > 1024 ? marketDesc.slice(0, 1000) + `\n*...+ ${(marketDesc.match(/\n/g)||[]).length - (marketDesc.slice(0,1000).match(/\n/g)||[]).length} pilote(s) non affichés*` : marketDesc) || '*Aucun pilote libre*',
+      })
+      .setFooter({ text: 'Contrats d\'urgence : 1 saison uniquement. Les équipes ont besoin de leurs sièges.' });
+
+    await channel.send({ embeds: [embed] });
+  }
+
+  return waveOffers;
 }
 
 // ============================================================
@@ -7075,6 +7506,18 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_transfer')
     .setDescription('[ADMIN] Lance la période de transfert'),
+
+  new SlashCommandBuilder().setName('admin_second_wave')
+    .setDescription('[ADMIN] Force la 2ème vague de transferts (pilotes encore libres)'),
+
+  new SlashCommandBuilder().setName('pilotes_libres')
+    .setDescription('Liste les pilotes sans équipe pendant le mercato'),
+
+  new SlashCommandBuilder().setName('admin_grille_next')
+    .setDescription('[ADMIN] Voir la grille réelle de la prochaine saison (contrats signés + pilotes libres)'),
+
+  new SlashCommandBuilder().setName('reveal_grille')
+    .setDescription('[ADMIN] Révèle la grille complète de la prochaine saison'),
 
   new SlashCommandBuilder().setName('admin_evolve_cars')
     .setDescription('[ADMIN] Affiche l\'évolution des voitures cette saison'),
@@ -7500,6 +7943,9 @@ async function handleInteraction(interaction) {
       active: true,
     });
 
+    // ── Annonce publique signature (rumeurs mêlées de vrai/faux) ───
+    publishSigningRumors(pilot, team, offer).catch(console.error);
+
     return interaction.update({
       content: '',
       embeds: [new EmbedBuilder().setTitle('✅ Contrat signé !').setColor(team.color)
@@ -7521,7 +7967,7 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_second_wave', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race', 'reveal_grille', 'admin_grille_next'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
@@ -8321,52 +8767,78 @@ async function handleInteraction(interaction) {
     const pilot  = await getPilotForUser(interaction.user.id, pilotIndex);
     if (!pilot) return interaction.editReply({ content: '❌ Aucun pilote trouvé. Utilise `/create_pilot`.', ephemeral: true });
     const offers = await TransferOffer.find({ pilotId: pilot._id, status: 'pending' });
-    if (!offers.length) return interaction.editReply({ content: `📭 Aucune offre en attente pour **${pilot.name}** (Pilote ${pilotIndex}).`, ephemeral: true });
-
-    // Construire un embed + boutons par offre (max 5 offres affichées)
-    const embeds = [];
-    const components = [];
-
-    for (const o of offers.slice(0, 5)) {
-      const team = await Team.findById(o.teamId);
-      const embed = new EmbedBuilder()
-        .setTitle(`${team.emoji} ${team.name}`)
-        .setColor(team.color)
-        .setDescription(
-          `×**${o.coinMultiplier}** coins | **${o.seasons}** saison(s)\n` +
-          `💰 Salaire : **${o.salaireBase} 🪙**/course\n` +
-          `🏆 Prime V : **${o.primeVictoire} 🪙** | Prime P : **${o.primePodium} 🪙**`
-        )
-        .setFooter({ text: `ID de secours : ${o._id}` });
-      embeds.push(embed);
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`offer_accept_${o._id}`)
-          .setLabel(`✅ Rejoindre ${team.name}`)
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`offer_reject_${o._id}`)
-          .setLabel('❌ Refuser')
-          .setStyle(ButtonStyle.Danger),
-      );
-      components.push(row);
-    }
-
-    // Discord limite à 1 embed + 5 rows par message — on envoie en éphémère
-    // On envoie chaque offre séparément si > 1
-    await interaction.editReply({
-      content: `📬 **${offers.length} offre(s) en attente.** Les boutons expirent après 10 min — utilise \`/accepter_offre <ID>\` en secours.`,
-      embeds:  [embeds[0]],
-      components: [components[0]],
+    if (!offers.length) return interaction.editReply({
+      content: `📭 Aucune offre en attente pour **${pilot.name}** (Pilote ${pilotIndex}).
+*Si le mercato est ouvert, les offres arrivent sous 24h après la fin de saison.*`,
       ephemeral: true,
     });
 
-    // Offres supplémentaires en followUp
-    for (let i = 1; i < embeds.length; i++) {
-      await interaction.followUp({ embeds: [embeds[i]], components: [components[i]], ephemeral: true });
+    // Envoyer les offres en Message Privé pour éviter le flood du channel
+    try {
+      const dmChannel = await interaction.user.createDM();
+
+      await dmChannel.send({
+        content: `📬 **${offers.length} offre(s) en attente pour ${pilot.name} (Pilote ${pilotIndex}).**
+> Les boutons restent actifs 10 min. Utilise \`/accepter_offre <ID>\` en secours si les boutons ont expiré.`,
+      });
+
+      for (const o of offers) {
+        const team = await Team.findById(o.teamId);
+        const expiresIn = o.expiresAt
+          ? Math.max(0, Math.floor((new Date(o.expiresAt) - Date.now()) / (1000 * 60 * 60)))
+          : null;
+        const expiryStr = expiresIn !== null ? `⏳ Expire dans ~${expiresIn}h` : '';
+        const embed = new EmbedBuilder()
+          .setTitle(`${team.emoji} ${team.name} — Offre de contrat`)
+          .setColor(team.color)
+          .setDescription(
+            `×**${o.coinMultiplier}** coins | **${o.seasons}** saison(s)\n` +
+            `💰 Salaire : **${o.salaireBase} 🪙**/course\n` +
+            `🏆 Prime V : **${o.primeVictoire} 🪙** | 🥉 Prime P : **${o.primePodium} 🪙**` +
+            (expiryStr ? `\n${expiryStr}` : '')
+          )
+          .setFooter({ text: `ID de secours : ${o._id}` });
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`offer_accept_${o._id}`)
+            .setLabel(`✅ Rejoindre ${team.name}`)
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`offer_reject_${o._id}`)
+            .setLabel('❌ Refuser')
+            .setStyle(ButtonStyle.Danger),
+        );
+        await dmChannel.send({ embeds: [embed], components: [row] });
+      }
+
+      return interaction.editReply({
+        content: `📨 Tes offres t'ont été envoyées en **Message Privé** ! Vérifie tes DMs. (${offers.length} offre(s) pour **${pilot.name}**)`,
+        ephemeral: true,
+      });
+    } catch (dmError) {
+      // DMs bloqués → fallback éphémère dans le channel
+      console.warn(`[Offres] DM impossible pour ${interaction.user.id}: ${dmError.message}`);
+      const embeds = [];
+      const components = [];
+      for (const o of offers) {
+        const team = await Team.findById(o.teamId);
+        embeds.push(new EmbedBuilder()
+          .setTitle(`${team.emoji} ${team.name}`)
+          .setColor(team.color)
+          .setDescription(`×**${o.coinMultiplier}** | **${o.seasons}** saison(s) | 💰 **${o.salaireBase} 🪙**/course | 🏆 **${o.primeVictoire} 🪙** | 🥉 **${o.primePodium} 🪙**`)
+          .setFooter({ text: `ID : ${o._id}` }));
+        components.push(new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`offer_accept_${o._id}`).setLabel(`✅ ${team.name}`).setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`offer_reject_${o._id}`).setLabel('❌ Refuser').setStyle(ButtonStyle.Danger),
+        ));
+      }
+      await interaction.editReply({ content: `📬 **${offers.length} offre(s)** — Active tes DMs pour les recevoir en privé. Fallback ici :`, embeds: [embeds[0]], components: [components[0]], ephemeral: true });
+      for (let i = 1; i < embeds.length; i++) {
+        await interaction.followUp({ embeds: [embeds[i]], components: [components[i]], ephemeral: true });
+      }
+      return;
     }
-    return;
   }
 
   // ── /accepter_offre ───────────────────────────────────────
@@ -8404,6 +8876,8 @@ async function handleInteraction(interaction) {
       salaireBase:       offer.salaireBase,
       active: true,
     });
+
+    publishSigningRumors(pilot, team, offer).catch(console.error);
 
     return interaction.editReply({
       embeds: [new EmbedBuilder().setTitle('✅ Contrat signé !').setColor(team.color)
@@ -8850,6 +9324,10 @@ async function handleInteraction(interaction) {
         ].join('\n') },
         { name: '🔄 Transferts & Draft', value: [
           '`/admin_transfer` — Ouvre la période de transfert (IA génère les offres automatiquement)',
+          '`/admin_second_wave` — Force la 2ème vague de transferts pour les pilotes encore libres',
+          '`/reveal_grille` — Révèle publiquement la grille complète de la saison à venir',
+          '`/admin_grille_next` — [ADMIN privé] Voir la vraie grille avec contrats, salaires et pilotes libres',
+          '`/pilotes_libres` — Affiche les pilotes sans équipe pendant le mercato',
           '`/admin_draft_start` — Lance le draft snake (attribution manuelle des écuries)',
         ].join('\n') },
         { name: '🖼️ Gestion Pilotes', value: [
@@ -9692,18 +10170,147 @@ async function handleInteraction(interaction) {
     await interaction.editReply(`✅ Période de transfert ouverte ! ${expired} contrat(s) expiré(s).`);
   }
 
+  // ── /admin_second_wave ────────────────────────────────────
+  if (commandName === 'admin_second_wave') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    await interaction.deferReply();
+    const ch = interaction.channel;
+    const waveCount = await startSecondTransferWave(ch);
+    if (waveCount === 0) {
+      await interaction.editReply('✅ Aucune 2ème vague nécessaire — tous les pilotes libres ont déjà des offres ou sont sous contrat.');
+    } else {
+      await interaction.editReply(`✅ **2ème vague lancée !** ${waveCount} offre(s) d'urgence générée(s) pour les pilotes encore libres.`);
+    }
+  }
+
+  // ── /admin_grille_next ───────────────────────────────────
+  // Réservé admins : voir la vraie grille avec noms, équipes et contrats
+  if (commandName === 'admin_grille_next') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const allTeams  = await Team.find();
+    const allPilots = await Pilot.find();
+    const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
+
+    const byTeam = new Map();
+    for (const t of allTeams) byTeam.set(String(t._id), { team: t, pilots: [] });
+
+    const freePilots = [];
+    for (const p of allPilots) {
+      if (p.teamId) {
+        const entry = byTeam.get(String(p.teamId));
+        if (entry) entry.pilots.push(p);
+      } else {
+        freePilots.push(p);
+      }
+    }
+
+    let desc = '';
+    for (const { team, pilots } of byTeam.values()) {
+      if (!pilots.length) {
+        desc += `${team.emoji} **${team.name}** — ⚠️ *Aucun pilote signé*
+`;
+        continue;
+      }
+      const pilotLines = await Promise.all(pilots.map(async p => {
+        const contract = await Contract.findOne({ pilotId: p._id, active: true }).lean();
+        const ov = overallRating(p);
+        const tier = ratingTier(ov);
+        const sal  = contract ? `${contract.salaireBase}🪙/course` : '*sans contrat actif*';
+        const dur  = contract ? `${contract.seasonsRemaining} saison(s)` : '';
+        return `  ${tier.badge} **${p.name}** *(${ov})* — ${sal}${dur ? ' · ' + dur : ''}`;
+      }));
+      desc += `${team.emoji} **${team.name}**
+${pilotLines.join('
+')}
+`;
+    }
+
+    if (freePilots.length) {
+      desc += `
+⚠️ **Pilotes libres (${freePilots.length}) :**
+`;
+      for (const p of freePilots) {
+        const ov = overallRating(p);
+        const tier = ratingTier(ov);
+        const pending = await TransferOffer.countDocuments({ pilotId: p._id, status: 'pending' });
+        desc += `  ${tier.badge} **${p.name}** *(${ov})* — ${pending} offre(s) pending
+`;
+      }
+    }
+
+    // Envoyer en éphémère admin seulement
+    const embed = new EmbedBuilder()
+      .setTitle('🔒 [ADMIN] Grille réelle — Prochaine saison')
+      .setColor('#444444')
+      .setDescription(desc.slice(0, 4000) || 'Aucune donnée')
+      .setFooter({ text: 'Visible admins uniquement — ne pas divulguer avant /reveal_grille' });
+    return interaction.editReply({ embeds: [embed], ephemeral: true });
+  }
+
+  // ── /pilotes_libres ──────────────────────────────────────
+  // Montre les noms des pilotes libres + overall
+  // MAIS ne révèle pas qui a signé où — le mystère sur les équipes reste entier
+  if (commandName === 'pilotes_libres') {
+    const freePilots = await Pilot.find({ teamId: null });
+    if (!freePilots.length) {
+      const embed = new EmbedBuilder()
+        .setTitle('🏁 Mercato — Pilotes libres')
+        .setColor('#00AA44')
+        .setDescription('✅ **Tous les pilotes ont trouvé une écurie.**\n\nRendez-vous au `/reveal_grille` pour découvrir le line-up officiel !');
+      return interaction.editReply({ embeds: [embed] });
+    }
+    const totalPilots = await Pilot.countDocuments();
+    const signedCount = totalPilots - freePilots.length;
+    const lines2 = freePilots.map(p => {
+      const ov   = overallRating(p);
+      const tier = ratingTier(ov);
+      return `${tier.badge} **${p.name}** *(${ov} overall)*`;
+    });
+    const embed = new EmbedBuilder()
+      .setTitle('🔓 Mercato — Pilotes sans équipe')
+      .setColor('#FF6600')
+      .setDescription(
+        lines2.join('\n') + '\n\n' +
+        `*${signedCount} pilote(s) ont déjà signé quelque part — mais où ? Mystère 🤫*\n` +
+        `*Les line-ups seront révélés au \`/reveal_grille\`.*\n` +
+        `*Utilisez \`/offres\` si vous avez des propositions de contrat en attente.*`
+      );
+    return interaction.editReply({ embeds: [embed] });
+  }
+
+
+  // ── /reveal_grille ────────────────────────────────────────
+  if (commandName === 'reveal_grille') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    const season = await getActiveSeason();
+    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
+    await revealFinalGrid(season, interaction.channel);
+    await Season.findByIdAndUpdate(season._id, { gridRevealedAt: new Date() });
+    return interaction.editReply({ content: '✅ Grille révélée !', ephemeral: true });
+  }
+
   // ── /admin_evolve_cars ────────────────────────────────────
   if (commandName === 'admin_evolve_cars') {
     const teams = await Team.find().sort({ vitesseMax: -1 });
     const bar   = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10-Math.round(v/10));
     const embed = new EmbedBuilder().setTitle('🔧 Stats Voitures (état actuel)').setColor('#888888');
     for (const t of teams) {
+      // Calcul masse salariale pour info admin
+      const teamCtracts = await Contract.find({ teamId: t._id, active: true }).lean();
+      const totalSal = teamCtracts.reduce((sum, c) => sum + (c.salaireBase || 0), 0);
+      const salPen   = Math.min(8, Math.floor(totalSal / 100));
+      const salEmoji = totalSal >= 400 ? '💸' : totalSal >= 200 ? '💰' : '🪙';
       embed.addFields({
         name: `${t.emoji} ${t.name}  (dev: ${t.devPoints} pts)`,
         value:
           `Vit. Max ${bar(t.vitesseMax)}${t.vitesseMax}  |  DRS ${bar(t.drs)}${t.drs}\n` +
           `Refroid. ${bar(t.refroidissement)}${t.refroidissement}  |  Dirty ${bar(t.dirtyAir)}${t.dirtyAir}\n` +
-          `Pneus ${bar(t.conservationPneus)}${t.conservationPneus}  |  Moy ${bar(t.vitesseMoyenne)}${t.vitesseMoyenne}`,
+          `Pneus ${bar(t.conservationPneus)}${t.conservationPneus}  |  Moy ${bar(t.vitesseMoyenne)}${t.vitesseMoyenne}\n` +
+          `${salEmoji} Masse salariale : **${totalSal} 🪙/course** → pénalité dev **-${salPen} devPts/course**`,
         inline: false,
       });
     }
@@ -10656,6 +11263,31 @@ async function sendSeasonCeremony(season, channel) {
       { upsert: true }
     );
   } catch(e) { console.error('HallOfFame save error:', e.message); }
+
+  // ── Mise à jour des budgets selon le classement constructeurs ──
+  // Champion constructeur : +30 budget (attire les talents, rassure les sponsors)
+  // 2ème-3ème : +15
+  // Milieu de grille : ±0
+  // Derniers (bottom 2) : -15 (sponsors partent, budget serré)
+  // Plafond : 180 | Plancher : 60
+  try {
+    const allTeamsForBudget = await Team.find();
+    const budgetConstr = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 });
+    const total = budgetConstr.length;
+    for (let i = 0; i < budgetConstr.length; i++) {
+      const teamDoc = allTeamsForBudget.find(t => String(t._id) === String(budgetConstr[i].teamId));
+      if (!teamDoc) continue;
+      let delta = 0;
+      if (i === 0)                delta = +30;   // champion constructeur
+      else if (i <= 2)            delta = +15;   // podium constructeur
+      else if (i >= total - 2)    delta = -15;   // lanterne rouge / avant-dernier
+      const newBudget = Math.max(60, Math.min(180, teamDoc.budget + delta));
+      if (newBudget !== teamDoc.budget) {
+        await Team.findByIdAndUpdate(teamDoc._id, { budget: newBudget });
+        console.log(`[Budget] ${teamDoc.emoji} ${teamDoc.name} : ${teamDoc.budget} → ${newBudget} (rang ${i+1})`);
+      }
+    }
+  } catch(e) { console.error('Budget update error:', e.message); }
 }
 
 async function runRace(override, gpIndex = null) {
@@ -10893,6 +11525,9 @@ async function runRace(override, gpIndex = null) {
   const remaining = await Race.countDocuments({ seasonId: season._id, status: { $ne: 'done' } });
   if (remaining === 0 && channel) {
     await sendSeasonCeremony(season, channel);
+    // Stocker le timestamp de début de transfert pour survie aux redémarrages
+    await Season.findByIdAndUpdate(season._id, { transferStartedAt: new Date() });
+
     setTimeout(async () => {
       const expiredCount = await startTransferPeriod();
 
@@ -10937,11 +11572,24 @@ async function runRace(override, gpIndex = null) {
           )
           .addFields({
             name: '📊 État du marché',
-            value: marketDesc.slice(0, 1024) || '*Aucun pilote libre*',
+            value: (marketDesc.length > 1024 ? marketDesc.slice(0, 1000) + `\n*...+ ${(marketDesc.match(/\n/g)||[]).length - (marketDesc.slice(0,1000).match(/\n/g)||[]).length} pilote(s) non affichés*` : marketDesc) || '*Aucun pilote libre*',
           })
           .setFooter({ text: 'Les offres sont générées automatiquement par le bot selon le budget et les besoins de chaque écurie.' });
 
         await ch.send({ embeds: [transferEmbed] });
+
+        // ── DEUXIÈME VAGUE — 3 jours après la 1ère vague ──────────
+        // Pour les pilotes qui ont tout refusé ou ignoré leurs offres
+        setTimeout(async () => {
+          try {
+            const ch2 = await client.channels.fetch(RACE_CHANNEL);
+            const waveCount = await startSecondTransferWave(ch2);
+            if (!waveCount) {
+              // Tous les pilotes libres ont un siège — pas de 2ème vague nécessaire
+              await ch2.send('✅ **Mercato clôturé** — Tous les pilotes libres ont trouvé une écurie. La grille est complète !');
+            }
+          } catch(e) { console.error('Second transfer wave error:', e.message); }
+        }, 3 * 24 * 60 * 60 * 1000); // 3 jours après la 1ère vague
       } catch(e) { console.error('Transfer announcement error:', e.message); }
     }, 24 * 60 * 60 * 1000);
   }
@@ -10959,6 +11607,69 @@ async function runRace(override, gpIndex = null) {
 
 // ── Flag global pour pause du scheduler ──────────────────────
 global.schedulerPaused = false;
+
+// ── Cron de maintenance mercato (toutes les heures) ─────────────
+// Expire les offres périmées · relance les vagues si le bot a redémarré pendant le mercato
+async function transferMaintenanceTick() {
+  // 1. Expirer les offres dont expiresAt est dépassé
+  const now = new Date();
+  const expiredResult = await TransferOffer.updateMany(
+    { status: 'pending', expiresAt: { $lt: now } },
+    { status: 'expired' }
+  );
+  if (expiredResult.modifiedCount > 0) {
+    console.log(`[Mercato] ${expiredResult.modifiedCount} offre(s) expirée(s) automatiquement.`);
+  }
+
+  // 2. Vérifier si une saison est en mode transfer et si les vagues doivent être (re)lancées
+  const season = await Season.findOne({ status: 'transfer' });
+  if (!season || !season.transferStartedAt) return;
+
+  const msSinceStart = now - season.transferStartedAt;
+  const ONE_DAY  = 24 * 60 * 60 * 1000;
+  const THREE_DAYS = 3 * ONE_DAY;
+
+  // La 1ère vague devait être annoncée 24h après transferStartedAt
+  // Si le bot a redémarré et qu'elle n'a pas eu lieu (aucune offre pending), on la refait
+  if (msSinceStart >= ONE_DAY) {
+    const pendingCount = await TransferOffer.countDocuments({ status: 'pending' });
+    const freePilots   = await Pilot.find({ teamId: null });
+    if (freePilots.length > 0 && pendingCount === 0 && !season.secondWaveSentAt) {
+      console.log('[Mercato] Relance automatique de la 1ère vague (bot redémarré ?)');
+      try {
+        const expiredCount = await startTransferPeriod();
+        await Season.findByIdAndUpdate(season._id, { transferStartedAt: new Date() });
+        const ch = await client.channels.fetch(RACE_CHANNEL);
+        if (ch) await ch.send(`🔄 **MERCATO** — ${expiredCount} contrat(s) expiré(s). Offres générées. Utilisez \`/offres\` pour voir vos propositions.`);
+      } catch(e) { console.error('[Mercato] Erreur relance 1ère vague:', e.message); }
+    }
+  }
+
+  // 2ème vague : 3 jours après le début du mercato si pas encore lancée
+  if (msSinceStart >= THREE_DAYS && !season.secondWaveSentAt) {
+    console.log('[Mercato] Lancement automatique de la 2ème vague (cron)');
+    try {
+      const ch = await client.channels.fetch(RACE_CHANNEL);
+      const waveCount = await startSecondTransferWave(ch);
+      await Season.findByIdAndUpdate(season._id, { secondWaveSentAt: new Date() });
+      if (!waveCount && ch) {
+        await ch.send('✅ **Mercato** — Tous les pilotes libres ont des offres. Pas de 2ème vague nécessaire.');
+      }
+    } catch(e) { console.error('[Mercato] Erreur 2ème vague cron:', e.message); }
+  }
+
+  // Vérifier si la grille est complète (tous les pilotes sous contrat) et révéler si pas encore fait
+  if (!season.gridRevealedAt) {
+    const freePilotsNow = await Pilot.find({ teamId: null });
+    if (freePilotsNow.length === 0) {
+      try {
+        const ch = await client.channels.fetch(RACE_CHANNEL);
+        if (ch) await revealFinalGrid(season, ch);
+        await Season.findByIdAndUpdate(season._id, { gridRevealedAt: new Date() });
+      } catch(e) { console.error('[Mercato] Erreur reveal grille:', e.message); }
+    }
+  }
+}
 
 function startScheduler() {
   const guardedRun = (fn, label) => () => {
@@ -10979,6 +11690,9 @@ function startScheduler() {
   console.log('✅ Scheduler slot 0 : 11h EL · 13h Q · 15h Course');
   console.log('✅ Scheduler slot 1 : 17h EL · 18h Q · 20h Course');
   console.log('✅ Keep-alive : ping toutes les 8min');
+  // ── Maintenance mercato toutes les heures ──────────────────
+  cron.schedule('0 * * * *', () => transferMaintenanceTick().catch(console.error), { timezone: 'Europe/Paris' });
+  console.log('✅ Maintenance mercato : vérification toutes les heures');
 }
 
 // ── Vérification des variables d'environnement ──────────────
