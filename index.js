@@ -865,9 +865,12 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const tireLifeBase = tireCompound === 'SOFT' ? 20 : tireCompound === 'HARD' ? 48 : 32;
   const tireLifeRef  = tireLifeBase * (1 + carTireBonus * 0.5 + pilotTireBonus * 0.5);
   const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.0);
-  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×3 au-delà
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 3.5;
-  const wearPenalty  = tireWear * effectiveDeg * cliffFactor;
+  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×1.8 au-delà
+  // (réduit de ×3.5 à ×1.8 pour éviter des pertes de 5+ places en 1 seul tour)
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.8;
+  // Cap à 0.046 : max ~4.1s de perte par tour sur une voiture en fin de vie de pneu
+  // Réaliste F1 : un pilote sur pneus à bout perd 1-4s/tour, pas 10-16s
+  const wearPenalty  = Math.min(0.046, tireWear * effectiveDeg * cliffFactor);
   const tireF        = (1 + wearPenalty) / tireData.grip;
 
   // Dirty air — pénalité ~0.1s max sur circuit mixte, jusqu'à ~0.4s sur urbain
@@ -1080,10 +1083,23 @@ function resolveSafetyCar(scState, lapIncidents) {
 
 // ─── Incidents ────────────────────────────────────────────
 // Les réactions et le controle réduisent le risque d'accident
-function checkIncident(pilot, team) {
+function checkIncident(pilot, team, lap = 1, totalLaps = 50) {
   const roll = Math.random();
-  const reliabF  = (100 - team.refroidissement) / 100 * 0.007;  // réduit : max ~0.7%/tour
-  const crashF   = ((100 - pilot.controle) / 100 * 0.003) + ((100 - pilot.reactions) / 100 * 0.002);  // réduit : max ~0.5%/tour
+
+  // ── Fiabilité mécanique progressive ──────────────────────────────────────
+  // Tours 1-5  : seulement les défauts de conception graves (×0.12)
+  //              → Un problème en tour 2 = vrai bug de conception, ultra-rare
+  // Tours 6-15 : rodage, échauffement, risque modéré (×0.55)
+  // Tours 16+  : accumulation d'usure — plus la voiture roule, plus elle peut lâcher
+  //              Facteur linéaire de 0.70 (T16) → 1.20 (dernier tour)
+  //              Une voiture peu fiable peut donc craquer en fin de course
+  const lapProgress = Math.max(0, Math.min(1, (lap - 15) / Math.max(1, totalLaps - 15)));
+  const lapMultiplier = lap <= 5  ? 0.12
+                      : lap <= 15 ? 0.55
+                      : 0.70 + lapProgress * 0.50;
+
+  const reliabF  = (100 - team.refroidissement) / 100 * 0.007 * lapMultiplier;
+  const crashF   = ((100 - pilot.controle) / 100 * 0.003) + ((100 - pilot.reactions) / 100 * 0.002);
   if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
   if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
   if (roll < 0.002)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
@@ -4209,6 +4225,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       defendExtraWear : 0,      // usure extra par défense agressive
       pendingRepair   : null,   // 'aileron' | 'suspension'
       drsActive       : false,
+      damagedCar      : null,   // { lapPenalty: ms } — pénalité de rythme par tour après collision
     };
   }).filter(Boolean);
 
@@ -4450,7 +4467,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
     // ── Incidents ───────────────────────────────────────────
     for (const driver of alive) {
-      const incident = checkIncident(driver.pilot, driver.team);
+      const incident = checkIncident(driver.pilot, driver.team, lap, totalLaps);
       if (!incident) continue;
       if (scActive && (incident.type === 'CRASH' || incident.type === 'PUNCTURE')) continue;
 
@@ -4487,17 +4504,32 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           } else {
             nearest.totalTime += damage;
             nearest.catchUpDebt = (nearest.catchUpDebt || 0) + damage;
-            // 30% : les dégâts forcent un pit d'urgence
-            const forcedPit = Math.random() < 0.30 && (nearest.pitStops || 0) < 3 && lapsRemaining > 6;
+
+            // ── Voiture abîmée : pénalité de rythme par tour jusqu'au pit ──
+            // La voiture perd beaucoup de rythme à cause des dégâts aérodynamiques/mécaniques
+            // Plus les dégâts sont lourds, plus la perte de rythme est importante
+            const lapPenalty = damage > 6000
+              ? randInt(2200, 3500)   // gros dégâts : -2.2s à -3.5s/tour
+              : randInt(1400, 2200);  // dégâts modérés : -1.4s à -2.2s/tour
+            nearest.damagedCar = { lapPenalty };
+
+            // ── Pit forcé : quasi-obligatoire en cas de dégâts structurels ──
+            // Probabilité élevée (70-92%) selon l'ampleur des dégâts
+            // (ancienne valeur : 30% — irréaliste pour une voiture abîmée)
+            const heavyDamage   = damage > 6000;
+            const forcedPitProb = heavyDamage ? 0.92 : 0.70;
+            const forcedPit = Math.random() < forcedPitProb && (nearest.pitStops || 0) < 3 && lapsRemaining > 6;
             if (forcedPit) {
-              const dmgType = Math.random() < 0.5 ? 'aileron' : 'suspension';
+              // Aileron plus probable sur gros chocs (dégâts aéro visibles)
+              const dmgType  = heavyDamage
+                ? (Math.random() < 0.75 ? 'aileron' : 'suspension')
+                : (Math.random() < 0.55 ? 'aileron' : 'suspension');
               nearest.pendingRepair = dmgType;
-              nearest.tireWear = 40;
+              nearest.tireWear = Math.max(nearest.tireWear || 0, 50);
               nearest.tireAge  = 99;
               const dmgLabel = dmgType === 'aileron' ? 'aileron avant endommagé' : 'suspension touchée';
               incidentText = collisionDescription(driver, nearest, lap, true, false, damage) +
-                `
-  🔧 *${dmgLabel} — ${nearest.pilot.name} doit rentrer en urgence !*`;
+                `\n  🔧 *${dmgLabel} — ${nearest.pilot.name} doit rentrer en urgence !*`;
             } else {
               incidentText = collisionDescription(driver, nearest, lap, true, false, damage);
             }
@@ -4723,6 +4755,12 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           driver.catchUpDebt = Math.max(0, driver.catchUpDebt - recovery);
         }
 
+        // ── Pénalité de rythme — voiture abîmée après accrochage ──
+        // Appliquée jusqu'au prochain arrêt aux stands (pendingRepair est alors effacé)
+        if (driver.damagedCar) {
+          lt += driver.damagedCar.lapPenalty;
+        }
+
         driver.totalTime += lt;
         driver.tireWear  += 1;
         driver.tireAge   += 1;
@@ -4860,6 +4898,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
             repairDesc = `🔩 *Réparation de suspension — arrêt rallongé !*`;
           }
           delete driver.pendingRepair;
+          delete driver.damagedCar; // la réparation remet la voiture en état
         } else {
           pitTime = scActive ? randInt(19_000, 21_000) : randInt(19_000, 24_000);
         }
