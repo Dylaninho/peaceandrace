@@ -9345,26 +9345,23 @@ async function handleInteraction(interaction) {
       return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
 
     if (!raceIntroUrl && !raceIntroPath) {
-      return interaction.editReply({
-        content: '❌ Aucune intro configurée. Utilise `/admin_set_intro` d\'abord.',
-      });
+      return interaction.editReply({ content: '❌ Aucune intro configurée. Utilise `/admin_set_intro` d\'abord.' });
     }
 
-    await interaction.editReply({ content: '🎬 Envoi de l\'intro en cours...' });
+    await interaction.editReply({ content: `🎬 Envoi de l'intro dans ce channel...\n> \`${(raceIntroUrl || raceIntroPath).slice(0, 80)}\`` });
 
     try {
+      const ch = interaction.channel;
+      if (!ch) return;
       if (raceIntroUrl) {
-        await interaction.channel.send(raceIntroUrl);
+        await ch.send(raceIntroUrl);
       } else if (raceIntroPath) {
         const { AttachmentBuilder } = require('discord.js');
-        await interaction.channel.send({ files: [new AttachmentBuilder(raceIntroPath, { name: 'intro_f1.mp4' })] });
+        await ch.send({ files: [new AttachmentBuilder(raceIntroPath, { name: 'intro_f1.mp4' })] });
       }
-      await interaction.followUp({
-        content: `✅ Intro envoyée !\n> URL : \`${(raceIntroUrl || raceIntroPath).slice(0, 80)}\``,
-        ephemeral: true,
-      });
     } catch(e) {
-      await interaction.followUp({ content: `❌ Erreur lors de l'envoi : \`${e.message}\``, ephemeral: true });
+      console.error('[admin_test_intro] erreur envoi:', e.message);
+      await interaction.editReply({ content: `❌ Erreur lors de l'envoi : \`${e.message}\`` });
     }
     return;
   }
