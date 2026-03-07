@@ -402,11 +402,11 @@ const NATIONALITIES = [
 // ============================================================
 
 const TIRE = {
-  SOFT  : { grip: 1.00, deg: 0.0024, emoji: '`S`🔴', label: 'Soft'   }, // cliff ~lap 25
-  MEDIUM: { grip: 0.99, deg: 0.0016, emoji: '`M`🟡', label: 'Medium' }, // cliff ~lap 38
-  HARD  : { grip: 0.98, deg: 0.0010, emoji: '`H`⚪', label: 'Hard'   }, // cliff ~lap 60
-  INTER : { grip: 0.99, deg: 0.0013, emoji: '`I`🟢', label: 'Inter'  },
-  WET   : { grip: 0.99, deg: 0.0008, emoji: '`W`🔵', label: 'Wet'    },
+  SOFT  : { grip: 1.00, deg: 0.0024, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 25
+  MEDIUM: { grip: 0.99, deg: 0.0016, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 38
+  HARD  : { grip: 0.98, deg: 0.0010, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 60
+  INTER : { grip: 0.99, deg: 0.0013, emoji: '🟢', code: 'I', label: 'Inter'  },
+  WET   : { grip: 0.99, deg: 0.0008, emoji: '🔵', code: 'W', label: 'Wet'    },
 };
 
 // ─── Poids des stats selon le style de GP ─────────────────
@@ -693,6 +693,24 @@ function chooseStartCompound(laps, weather) {
   return Math.random() > 0.6 ? 'HARD' : 'MEDIUM';
 }
 
+// ─── Format d'écart intelligent selon la taille ──────────
+// fmtGap(ms)    : prend des millisecondes
+// fmtGapSec(s)  : prend des secondes
+// < 1s   →  847ms           (combat serré)
+// 1–9s   →  4.2s            (écart lisible en dixième)
+// ≥ 10s  →  +28s            (grand écart — précision inutile)
+function fmtGap(ms, { prefix = true } = {}) {
+  if (ms == null || !isFinite(ms)) return '—';
+  const abs  = Math.abs(ms);
+  const sign = prefix && ms >= 0 ? '+' : '';
+  if (abs < 1000)  return `${sign}${Math.round(abs)}ms`;
+  if (abs < 10000) return `${sign}${(abs / 1000).toFixed(1)}s`;
+  return `${sign}${Math.round(abs / 1000)}s`;
+}
+function fmtGapSec(s, opts = {}) {
+  return fmtGap(s * 1000, opts);
+}
+
 // ─── Durée de vie des pneus (réaliste F1) ─────────────────
 // SOFT  : ~18-25 tours avant le cliff
 // MEDIUM: ~28-38 tours avant le cliff
@@ -841,140 +859,192 @@ async function simulateQualifying(race, pilots, teams) {
   const q3Size = Math.min(10, Math.max(3, Math.floor(n * 0.5)));
   const q2Size = Math.min(15, Math.max(q3Size + 2, Math.floor(n * 0.75)));
 
-  // ── Forme du jour : bonus/malus unique par pilote (±800ms) ──
-  // Permet de redistribuer ~3-4 positions entre Q1, Q2 et Q3
+  // ── Forme par session : pilotes forts = moins volatile, faibles = plus aléatoire ──
+  // Un pilote avec de bonnes stats quali (freinage+controle) fluctue peu (±200ms max)
+  // Un pilote moyen peut perdre/gagner jusqu'à ±650ms
   function makeSessionForm() {
-    return new Map(pilots.map(p => [String(p._id), randInt(-600, 600)]));
+    return new Map(pilots.map(p => {
+      const qualiStr = ((p.freinage || 50) + (p.controle || 50)) / 2; // 0-100
+      // Plus la stat est haute, plus la variance est réduite
+      // Stat 80+ → ±200ms | Stat 50 → ±450ms | Stat 30 → ±650ms
+      const maxSwing = Math.round(700 - qualiStr * 5); // 700 - 80*5 = 300 … 700 - 30*5 = 550
+      return [String(p._id), randInt(-maxSwing, maxSwing)];
+    }));
   }
 
-  // ── Track evolution par segment : les temps s'améliorent au fil des tours ──
-  // Chaque segment donne jusqu'à -400ms grâce à l'évolution de la gomme
-  function baseTime(pilot, team, trackEvoBonus = 0, sessionForm = null) {
+  // ── Temps de base pour une session donnée ────────────────
+  // Le temps de base est recalculé à chaque session — pas de plancher hérité
+  function baseTime(pilot, team, trackEvoBonus, sessionForm) {
     const base = calcQualiTime(pilot, team, weather, race.gpStyle);
-    const form = sessionForm ? (sessionForm.get(String(pilot._id)) || 0) : 0;
+    const form = sessionForm.get(String(pilot._id)) || 0;
     return base - trackEvoBonus + form;
   }
 
-  // ── Tenter un tour rapide ─────────────────────────────────
-  // Un pilote peut améliorer ou non selon son niveau et un peu de variance
-  // aborted : true si tour annulé (drapeau jaune, trafic, erreur)
-  function tryLap(pilot, team, best, trackEvoBonus = 0, yellowFlag = false, sessionForm = null) {
+  // ── Tenter un tour : tire un temps autour du base ────────
+  // best = meilleur temps de CE run (Infinity si aucun tour propre encore)
+  // yellowFlag : 55% de chance d'annuler le tour
+  function tryLap(pilot, team, best, trackEvoBonus, yellowFlag, sessionForm) {
     if (yellowFlag && Math.random() < 0.55) return { time: Infinity, aborted: true };
-    const raw = baseTime(pilot, team, trackEvoBonus, sessionForm) + randInt(-400, 400);
-    const aborted = Math.random() < 0.04; // 4% de chance d'annuler son tour (erreur, trafic)
-    if (aborted) return { time: Infinity, aborted: true };
-    return { time: Math.min(best, raw), aborted: false, improved: raw < best };
+    if (Math.random() < 0.04) return { time: Infinity, aborted: true }; // trafic / erreur pilote
+    const raw = baseTime(pilot, team, trackEvoBonus, sessionForm) + randInt(-350, 350);
+    const improved = raw < best;
+    return { time: improved ? raw : best, raw, aborted: false, improved };
   }
 
-  // ── Q1 — 2 tentatives + track evo progressive ─────────────
-  const q1Form = makeSessionForm(); // forme unique pour toute la Q1
+  // ─────────────────────────────────────────────────────────
+  // Q1 — tous les pilotes, session indépendante
+  // Track evo croissante : 2ème tentative bénéficie d'un circuit plus gommé
+  // ─────────────────────────────────────────────────────────
+  const q1Form = makeSessionForm();
   let q1State = pilots.map(pilot => {
     const team = teams.find(t => String(t._id) === String(pilot.teamId));
     if (!team) return null;
-    const evo1 = randInt(0, 150);
-    const evo2 = randInt(100, 300);
+
+    const evo1 = randInt(0, 200);    // début de session, piste peu gommée
+    const evo2 = randInt(150, 350);  // 2ème run, piste améliorée
     const r1 = tryLap(pilot, team, Infinity, evo1, false, q1Form);
     const r2 = tryLap(pilot, team, r1.aborted ? Infinity : r1.time, evo2, false, q1Form);
-    const bestTime = Math.min(
-      r1.aborted ? Infinity : r1.time,
-      r2.aborted ? Infinity : r2.time
-    );
-    const abortedBoth = r1.aborted && r2.aborted;
+
+    const bothAborted = r1.aborted && r2.aborted;
+    // Si les 2 tours sont annulés → temps de secours pénalisé
+    const bestTime = bothAborted
+      ? baseTime(pilot, team, 0, q1Form) + randInt(600, 1400)
+      : Math.min(r1.aborted ? Infinity : r1.time, r2.aborted ? Infinity : r2.time);
+
     return {
       pilot, team,
-      time: abortedBoth ? baseTime(pilot, team, 0) + randInt(500, 1200) : bestTime,
-      r1: r1.aborted ? null : r1.time,
-      r2: r2.aborted ? null : r2.time,
+      // q1Time = temps canonique pour l'affichage Q1 (pas réutilisé en Q2)
+      q1Time  : bestTime,
+      time    : bestTime,
+      r1      : r1.aborted ? null : r1.raw,
+      r2      : r2.aborted ? null : r2.raw,
       abortedLaps: (r1.aborted ? 1 : 0) + (r2.aborted ? 1 : 0),
-      improved: !r1.aborted && !r2.aborted && r2.time < r1.time,
+      improved: !r1.aborted && !r2.aborted && r2.raw < r1.raw,
     };
   }).filter(Boolean);
   q1State.sort((a, b) => a.time - b.time);
 
   // Événements drama Q1
   const q1Events = [];
-  // Pilote qui rate ses 2 tours
   const doubleAbort = q1State.find(s => s.abortedLaps === 2);
   if (doubleAbort) q1Events.push({ type: 'double_abort', pilot: doubleAbort });
-  // Écart serré autour de la ligne de coupure Q1→Q2
-  const cutQ1 = q1State[q2Size - 1]; // dernier passant
-  const firstOut = q1State[q2Size];   // premier éliminé
+
+  const cutQ1    = q1State[q2Size - 1];
+  const firstOut = q1State[q2Size];
   if (cutQ1 && firstOut) {
     const gap = (firstOut.time - cutQ1.time) / 1000;
-    if (gap > 0 && gap < 0.15) q1Events.push({ type: 'thriller_q1', gap, safe: cutQ1, elim: firstOut });
+    if (gap > 0 && gap < 0.150) q1Events.push({ type: 'thriller_q1', gap, safe: cutQ1, elim: firstOut });
   }
-
-  // ── Q2 — 2 tentatives avec plus d'evo ─────────────────────
-  const q2Candidates = q1State.slice(0, q2Size);
+  // Pilote favori surpris (était dans le top 5 sur le papier mais éliminé)
   const q1Eliminated = q1State.slice(q2Size);
+  const upsetQ1 = q1Eliminated.find(s => {
+    const ov = (s.pilot.depassement + s.pilot.freinage + s.pilot.controle) / 3;
+    return ov >= 65;
+  });
+  if (upsetQ1) q1Events.push({ type: 'upset_q1', pilot: upsetQ1 });
 
-  // Drapeau jaune aléatoire en Q2 (~30% de chance)
-  const yellowFlagQ2 = Math.random() < 0.30;
-  const yellowFlagPilotQ2 = yellowFlagQ2 ? pick(q2Candidates) : null;
+  // ─────────────────────────────────────────────────────────
+  // Q2 — uniquement les qualifiés Q1, SESSION ENTIÈREMENT NOUVELLE
+  // Nouvelle forme aléatoire → les classements peuvent se redistribuer
+  // Pas de plancher Q1 : un pilote P1 en Q1 peut se retrouver P4 en Q2
+  // ─────────────────────────────────────────────────────────
+  const q2Candidates = q1State.slice(0, q2Size);
 
-  const q2Form = makeSessionForm(); // nouvelle forme pour Q2 — classement peut changer
+  const yellowFlagQ2       = Math.random() < 0.30;
+  const yellowFlagPilotQ2  = yellowFlagQ2 ? pick(q2Candidates) : null;
+
+  const q2Form = makeSessionForm(); // nouvelle forme → ± différente de Q1
+
   let q2State = q2Candidates.map(s => {
-    const evo1 = randInt(150, 300);
-    const evo2 = randInt(250, 450);
+    const evo1 = randInt(200, 380);  // piste plus gommée qu'en Q1
+    const evo2 = randInt(300, 500);
     const isYellow = yellowFlagQ2 && (Math.random() < 0.5);
-    const r1 = tryLap(s.pilot, s.team, s.time, evo1, isYellow, q2Form);
-    const r2 = tryLap(s.pilot, s.team, r1.aborted ? s.time : Math.min(s.time, r1.time), evo2, false, q2Form);
-    const best = Math.min(
-      s.time,
-      r1.aborted ? Infinity : r1.time,
-      r2.aborted ? Infinity : r2.time
-    );
+
+    // ── CLEF : on repart de Infinity, pas du temps Q1 ──
+    const r1 = tryLap(s.pilot, s.team, Infinity, evo1, isYellow, q2Form);
+    const r2 = tryLap(s.pilot, s.team, r1.aborted ? Infinity : r1.time, evo2, false, q2Form);
+
+    const bothAborted = r1.aborted && r2.aborted;
+    const bestTime = bothAborted
+      ? baseTime(s.pilot, s.team, 0, q2Form) + randInt(400, 1000)
+      : Math.min(r1.aborted ? Infinity : r1.time, r2.aborted ? Infinity : r2.time);
+
+    // Calcule delta Q1→Q2 (informatif, peut être positif = pilote moins bien)
+    const deltaVsQ1 = bestTime - s.q1Time;
+
     return {
-      ...s,
-      time: best,
-      improved: best < s.time,
-      lostLapToYellow: isYellow && r1.aborted,
+      pilot     : s.pilot,
+      team      : s.team,
+      q1Time    : s.q1Time,   // conservé pour affichage comparatif
+      q2Time    : bestTime,
+      time      : bestTime,   // temps de référence pour le tri et la grille finale
+      r1        : r1.aborted ? null : r1.raw,
+      r2        : r2.aborted ? null : r2.raw,
+      improved  : !r1.aborted && !r2.aborted && r2.raw < r1.raw,
+      lostLapToYellow : isYellow && r1.aborted,
+      deltaVsQ1,
     };
   });
   q2State.sort((a, b) => a.time - b.time);
 
   const q2Events = [];
   if (yellowFlagPilotQ2) q2Events.push({ type: 'yellow_flag', trigger: yellowFlagPilotQ2 });
-  const cutQ2 = q2State[q3Size - 1];
+
+  const cutQ2      = q2State[q3Size - 1];
   const firstOutQ2 = q2State[q3Size];
   if (cutQ2 && firstOutQ2) {
     const gap = (firstOutQ2.time - cutQ2.time) / 1000;
-    if (gap > 0 && gap < 0.12) q2Events.push({ type: 'thriller_q2', gap, safe: cutQ2, elim: firstOutQ2 });
-    // Pilote qui perd sa place dans les dernières secondes
-    const lastGasp = q2State.find((s, i) => i < q3Size && s.improved && s.time < firstOutQ2.time + 0.3 * 1000);
+    if (gap > 0 && gap < 0.120) q2Events.push({ type: 'thriller_q2', gap, safe: cutQ2, elim: firstOutQ2 });
+    const lastGasp = q2State.find((s, i) => i < q3Size && s.improved);
     if (lastGasp) q2Events.push({ type: 'last_gasp_q2', pilot: lastGasp });
   }
-  // Victime du drapeau jaune éliminée
   const yellowVictim = q2State.find((s, i) => i >= q3Size && s.lostLapToYellow);
   if (yellowVictim) q2Events.push({ type: 'yellow_victim', pilot: yellowVictim });
 
-  // ── Q3 — 2 tentatives, pression max ───────────────────────
-  const q3Candidates = q2State.slice(0, q3Size);
+  // Pilote qui régresse fortement en Q2 (deltaVsQ1 > +0.4s) — drama
+  const regression = q2State.find((s, i) => i >= q3Size && s.deltaVsQ1 > 400);
+  if (regression) q2Events.push({ type: 'regression_q2', pilot: regression, delta: (regression.deltaVsQ1 / 1000).toFixed(3) });
+
+  // Pilote qui grimpe (était proche de l'élimination en Q1, maintenant dans le top)
   const q2Eliminated = q2State.slice(q3Size);
 
-  // Red flag possible en Q3 (15% chance, crée un restart et des tours avortés)
-  const redFlagQ3 = Math.random() < 0.15;
-  const redFlagMoment = redFlagQ3 ? randInt(1, q3Size - 1) : -1; // après quel pilote
+  // ─────────────────────────────────────────────────────────
+  // Q3 — les q3Size meilleurs de Q2, SESSION ENTIÈREMENT NOUVELLE
+  // Pression max, piste au pic de grip, variance réduite (pilotes concentrés)
+  // Résultats indépendants de Q2 — nouveaux leaders possibles
+  // ─────────────────────────────────────────────────────────
+  const q3Candidates = q2State.slice(0, q3Size);
 
-  const q3Form = makeSessionForm(); // nouvelle forme pour Q3 — encore un classement différent
+  const redFlagQ3     = Math.random() < 0.15;
+  const redFlagMoment = redFlagQ3 ? randInt(1, q3Size - 1) : -1;
+
+  const q3Form = makeSessionForm(); // encore une nouvelle forme
+
   let q3State = q3Candidates.map((s, idx) => {
-    const evo1 = randInt(300, 500);
-    const evo2 = randInt(400, 600);
+    const evo1 = randInt(350, 550);  // piste au maximum du grip
+    const evo2 = randInt(450, 650);
     const affectedByRed = redFlagQ3 && idx >= redFlagMoment;
-    const r1 = tryLap(s.pilot, s.team, s.time, evo1, affectedByRed, q3Form);
-    const r2 = tryLap(s.pilot, s.team, r1.aborted ? s.time : Math.min(s.time, r1.time), evo2, false, q3Form);
-    const best = Math.min(
-      s.time,
-      r1.aborted ? Infinity : r1.time,
-      r2.aborted ? Infinity : r2.time
-    );
+
+    // ── CLEF : repart de Infinity, pas du temps Q2 ──
+    const r1 = tryLap(s.pilot, s.team, Infinity, evo1, affectedByRed, q3Form);
+    const r2 = tryLap(s.pilot, s.team, r1.aborted ? Infinity : r1.time, evo2, false, q3Form);
+
+    const bothAborted = r1.aborted && r2.aborted;
+    const bestTime = bothAborted
+      ? baseTime(s.pilot, s.team, 0, q3Form) + randInt(300, 800)
+      : Math.min(r1.aborted ? Infinity : r1.time, r2.aborted ? Infinity : r2.time);
+
     return {
-      ...s,
-      time: best,
-      improved: best < s.time,
-      abortedByRed: affectedByRed && r1.aborted,
-      r1q3: r1.aborted ? null : r1.time,
-      r2q3: r2.aborted ? null : r2.time,
+      pilot     : s.pilot,
+      team      : s.team,
+      q1Time    : s.q1Time,
+      q2Time    : s.q2Time,
+      q3Time    : bestTime,
+      time      : bestTime,
+      r1q3      : r1.aborted ? null : r1.raw,
+      r2q3      : r2.aborted ? null : r2.raw,
+      improved  : !r1.aborted && !r2.aborted && r2.raw < r1.raw,
+      abortedByRed : affectedByRed && r1.aborted,
     };
   });
   q3State.sort((a, b) => a.time - b.time);
@@ -986,33 +1056,37 @@ async function simulateQualifying(race, pilots, teams) {
     const victims = q3State.filter(s => s.abortedByRed);
     if (victims.length) q3Events.push({ type: 'red_victims', victims });
   }
-  // Pole surprise : pilote pas favori prend la pole
-  const poleDriver = q3State[0];
-  const secondDriver = q3State[1];
-  if (poleDriver && secondDriver) {
-    const poleGap = (q3State[1]?.time - poleDriver.time) / 1000;
-    if (poleGap > 0 && poleGap < 0.05) q3Events.push({ type: 'photo_finish_pole', gap: poleGap, pole: poleDriver, second: secondDriver });
-    else if (poleGap > 0.6) q3Events.push({ type: 'dominant_pole', gap: poleGap, pole: poleDriver });
+  if (q3State[0] && q3State[1]) {
+    const poleGap = (q3State[1].time - q3State[0].time) / 1000;
+    if (poleGap > 0 && poleGap < 0.05)
+      q3Events.push({ type: 'photo_finish_pole', gap: poleGap, pole: q3State[0], second: q3State[1] });
+    else if (poleGap > 0.6)
+      q3Events.push({ type: 'dominant_pole', gap: poleGap, pole: q3State[0] });
   }
 
-  // ── Grille finale ─────────────────────────────────────────
+  // ── Grille finale : Q3 trié + Q2 éliminés triés + Q1 éliminés triés ──
   const allSorted = [...q3State, ...q2Eliminated, ...q1Eliminated];
   const finalGrid = allSorted.map((s, i) => ({
     pilotId   : s.pilot._id,
     pilotName : s.pilot.name,
     teamName  : s.team.name,
     teamEmoji : s.team.emoji,
-    time      : s.time,
+    time      : s.time,    // temps de la dernière session participée
+    q1Time    : s.q1Time,
+    q2Time    : s.q2Time   || null,
+    q3Time    : s.q3Time   || null,
     improved  : s.improved,
     segment   : i < q3Size ? 'Q3' : i < q2Size ? 'Q2' : 'Q1',
   }));
 
   return {
-    grid: finalGrid, weather, q3Size, q2Size, allTimes: allSorted,
-    drama: { q1: q1Events, q2: q2Events, q3: q3Events },
+    grid        : finalGrid,
+    weather,
+    q3Size, q2Size,
+    drama       : { q1: q1Events, q2: q2Events, q3: q3Events },
     q1State, q2State, q3State,
     q1Eliminated, q2Eliminated,
-    yellowFlagQ2: yellowFlagPilotQ2,
+    yellowFlagQ2 : yellowFlagPilotQ2,
     redFlagQ3,
   };
 }
@@ -1382,16 +1456,16 @@ function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justR
     const gapTop = (second.totalTime - leader.totalTime) / 1000;
     if (gapTop < 0.3) {
       lines.push(pick([
-        `***👀 ${second.team.emoji}${second.pilot.name} DANS LE DRS !!! ${gapTop.toFixed(3)}s — LA BOMBE VA EXPLOSER !!!***`,
-        `***🔥 ${gapTop.toFixed(3)}s !!! ${second.team.emoji}${second.pilot.name} colle aux roues de ${leader.team.emoji}${leader.pilot.name} — ÇA VA PASSER OU ÇA VA CASSER !!!***`,
-        `***⚡ INCROYABLE !*** ${second.team.emoji}**${second.pilot.name}** est à **${gapTop.toFixed(3)}s** — il est dans les roues. Le DRS est activé !`,
-        `***😱 T${lap} — ${gapTop.toFixed(3)}s !*** Le gap est ridicule. ${leader.team.emoji}**${leader.pilot.name}** est sous pression extrême !`,
+        `***👀 ${second.team.emoji}${second.pilot.name} DANS LE DRS !!! ${fmtGapSec(gapTop, {prefix:false})} — LA BOMBE VA EXPLOSER !!!***`,
+        `***🔥 ${fmtGapSec(gapTop, {prefix:false})} !!! ${second.team.emoji}${second.pilot.name} colle aux roues de ${leader.team.emoji}${leader.pilot.name} — ÇA VA PASSER OU ÇA VA CASSER !!!***`,
+        `***⚡ INCROYABLE !*** ${second.team.emoji}**${second.pilot.name}** est à **${fmtGapSec(gapTop, {prefix:false})}** — il est dans les roues. Le DRS est activé !`,
+        `***😱 T${lap} — ${fmtGapSec(gapTop, {prefix:false})} !*** Le gap est ridicule. ${leader.team.emoji}**${leader.pilot.name}** est sous pression extrême !`,
       ]));
     } else if (gapTop < 1.0) {
       lines.push(pick([
-        `***⚡ T${lap} — ${second.team.emoji}${second.pilot.name} est à **${gapTop.toFixed(3)}s** de ${leader.team.emoji}${leader.pilot.name}*** — la pression est maximale !`,
-        `😤 **${second.team.emoji}${second.pilot.name}** fond sur **${leader.team.emoji}${leader.pilot.name}** — ${gapTop.toFixed(3)}s seulement. Ça chauffait, ça brûle maintenant.`,
-        `🎯 T${lap} — **${gapTop.toFixed(3)}s** entre P1 et P2. ${leader.team.emoji}**${leader.pilot.name}** sent la pression monter dans l'habitacle.`,
+        `***⚡ T${lap} — ${second.team.emoji}${second.pilot.name} est à **${fmtGapSec(gapTop, {prefix:false})}** de ${leader.team.emoji}${leader.pilot.name}*** — la pression est maximale !`,
+        `😤 **${second.team.emoji}${second.pilot.name}** fond sur **${leader.team.emoji}${leader.pilot.name}** — ${fmtGapSec(gapTop, {prefix:false})} seulement. Ça chauffait, ça brûle maintenant.`,
+        `🎯 T${lap} — **${fmtGapSec(gapTop, {prefix:false})}** entre P1 et P2. ${leader.team.emoji}**${leader.pilot.name}** sent la pression monter dans l'habitacle.`,
         `📻 Ingénieur radio : *"Attention, ${second.pilot.name} revient."* ${leader.team.emoji}**${leader.pilot.name}** sait ce qu'il a à faire.`,
       ]));
     } else if (gapTop < 2.5 && third) {
@@ -1499,10 +1573,10 @@ function atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justR
     const gap = (behind.totalTime - ahead.totalTime) / 1000;
     if (gap < 1.5 && gap > 0.3) {
       lines.push(pick([
-        `👁 **Surveillance !** ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) est à **${gap.toFixed(3)}s** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). Ça fume !`,
-        `🔭 **P${i} vs P${i+1}** — ${ahead.team.emoji}**${ahead.pilot.name}** sous pression de ${behind.team.emoji}**${behind.pilot.name}** · **${gap.toFixed(3)}s** entre eux.`,
-        `📡 T${lap} — Bataille P${i}/P${i+1} : ${ahead.team.emoji}**${ahead.pilot.name}** vs ${behind.team.emoji}**${behind.pilot.name}** · écart : **${gap.toFixed(3)}s**. Situation à surveiller.`,
-        `⚔️ ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) colle à **${gap.toFixed(3)}s** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). La tension monte dans ce duel.`,
+        `👁 **Surveillance !** ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) est à **${fmtGapSec(gap, {prefix:false})}** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). Ça fume !`,
+        `🔭 **P${i} vs P${i+1}** — ${ahead.team.emoji}**${ahead.pilot.name}** sous pression de ${behind.team.emoji}**${behind.pilot.name}** · **${fmtGapSec(gap, {prefix:false})}** entre eux.`,
+        `📡 T${lap} — Bataille P${i}/P${i+1} : ${ahead.team.emoji}**${ahead.pilot.name}** vs ${behind.team.emoji}**${behind.pilot.name}** · écart : **${fmtGapSec(gap, {prefix:false})}**. Situation à surveiller.`,
+        `⚔️ ${behind.team.emoji}**${behind.pilot.name}** (P${i+1}) colle à **${fmtGapSec(gap, {prefix:false})}** de ${ahead.team.emoji}**${ahead.pilot.name}** (P${i}). La tension monte dans ce duel.`,
       ]));
       break;
     }
@@ -3812,6 +3886,23 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     : randInt(10, 20);
   let weatherChanged = false; // flag pour n'annoncer qu'une fois par changement
 
+  // ── Prévision météo annoncée au départ si instable ────────
+  // Si la météo de départ n'est pas DRY, ou si la 1ère transition est probable avant le 1/3 de course
+  if (channel) {
+    const weatherLabelsShort = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Mixte', HOT:'🔥 Canicule' };
+    const isRiskyWeather = weather !== 'DRY' || nextWeatherChangeLap < totalLaps * 0.35;
+    if (isRiskyWeather) {
+      const forecastMsgs = {
+        WET   : `🌧️ *Conditions difficiles au départ — pluie déclarée. Les stratèges vont travailler d'arrache-pied.*`,
+        INTER : `🌦️ *Piste mixte au départ — les équipes hésitent entre inter' et slicks. Chaque décision compte.*`,
+        HOT   : `🔥 *Canicule annoncée — les pneus vont souffrir. La gestion thermique sera la clé.*`,
+        DRY   : `☀️ *Météo sèche au départ, mais les prévisions restent instables — attention aux changements en course.*`,
+      };
+      try { await channel.send(forecastMsgs[weather] || ''); } catch(e) {}
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
   const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
   const weatherLabels = { DRY:'Sec ☀️', WET:'Pluie 🌧️', INTER:'Mixte 🌦️', HOT:'Canicule 🔥' };
 
@@ -3871,6 +3962,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const overcutTracker  = new Map(); // pilotId → { startLap, rivalId, myPosAtStart }
   const racePenalties   = []; // { pilotId, seconds, reason, lap } — pénalités cumulées
   const pendingInvestigations = []; // { attackerId, victimId, lap } — décision post-GP
+  // ── Fil radio et fenêtres stratégiques ────────────────────
+  const stratWindowFired = new Set(); // pilotId_stintIndex → max 1 alerte par stint
+  const radioFiredLaps   = new Set(); // `${pilotId}_${lap}` → évite les doublons radio
 
   const send = async (msg) => {
     if (!channel) {
@@ -3898,7 +3992,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const makeGridLine = (d, pos) => {
     const ov   = overallRating(d.pilot);
     const tier = ratingTier(ov);
-    return `\`P${String(pos).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** ${tier.badge}${ov} ${TIRE[d.tireCompound].emoji}`;
+    return `\`P${String(pos).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** ${tier.badge}${ov} ${TIRE[d.tireCompound] ? `${TIRE[d.tireCompound].emoji} ${TIRE[d.tireCompound].code}` : '?'}`;
   };
   // Positions impaires → côté gauche (P1, P3, P5...), positions paires → côté droit (P2, P4, P6...)
   const oddLines  = drivers.filter((_, i) => i % 2 === 0).map((d, i) => makeGridLine(d, i * 2 + 1));
@@ -4070,7 +4164,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       if (leaderFinal) {
         const gapFinal = secondFinal ? (secondFinal.totalTime - leaderFinal.totalTime) / 1000 : 999;
         const finalFlavors = gapFinal < 1 ? [
-          `***🏁 DERNIER TOUR !!! ${leaderFinal.team.emoji}${leaderFinal.pilot.name} EN TÊTE — MAIS ${secondFinal?.team.emoji}${secondFinal?.pilot.name} EST À ${gapFinal.toFixed(3)}s !!! TOUT PEUT ENCORE BASCULER !!!***`,
+          `***🏁 DERNIER TOUR !!! ${leaderFinal.team.emoji}${leaderFinal.pilot.name} EN TÊTE — MAIS ${secondFinal?.team.emoji}${secondFinal?.pilot.name} EST À ${fmtGapSec(gapFinal, {prefix:false})} !!! TOUT PEUT ENCORE BASCULER !!!***`,
           `***⚡ LAST LAP !!! ${leaderFinal.team.emoji}${leaderFinal.pilot.name} devant — ${secondFinal?.team.emoji}${secondFinal?.pilot.name} dans son DRS !!! C'EST INSENSÉ !!!***`,
         ] : gapFinal < 5 ? [
           `***🏁 DERNIER TOUR !*** ${leaderFinal.team.emoji}**${leaderFinal.pilot.name}** en tête — **+${gapFinal.toFixed(1)}s** sur ${secondFinal?.team.emoji}**${secondFinal?.pilot.name}**... Serré. Il faut tenir !`,
@@ -4392,11 +4486,75 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       const myIdx    = aliveNow.findIndex(d => String(d.pilot._id) === String(driver.pilot._id));
       const gapAhead = myIdx > 0 ? driver.totalTime - aliveNow[myIdx - 1].totalTime : null;
 
-      // Sous SC ou dans les 4 tours post-SC : pas d'undercut (tout le monde est groupé)
+      // ── Strategy window : alerte quand les pneus d'un leader approchent du cliff ──
+      // Déclenché une seule fois par stint (stintIndex = pitStops actuel)
+      if (!scActive && lapsRemaining > 6) {
+        const wornThr  = wornThresholdFor(driver.tireCompound, driver.team, driver.pilot);
+        const wornPct  = (driver.tireWear || 0) / wornThr;
+        const swKey    = `${String(driver.pilot._id)}_${driver.pitStops}`;
+        const isLeaderOrTop5 = driver.pos <= 5;
+        // Fenêtre : entre 80% et 95% du seuil — alerte avant que ça se voie vraiment
+        if (isLeaderOrTop5 && wornPct >= 0.80 && wornPct < 0.96 && !stratWindowFired.has(swKey)) {
+          stratWindowFired.add(swKey);
+          const td = TIRE[driver.tireCompound];
+          const compStr = td ? `${td.emoji} ${td.code}` : driver.tireCompound;
+          const tireWarnLabel = wornPct >= 0.90
+            ? `*pneus dans le rouge*`
+            : `*pneus qui s'approchent du cliff*`;
+          const stratMsgs = driver.pos === 1 ? [
+            `🔧 **T${lap} — FENÊTRE STRATÉGIQUE !** ${driver.team.emoji}**${driver.pilot.name}** (P1) roule sur des ${compStr} ${tireWarnLabel}. *La question n'est plus si il va pitter, mais quand. Et ses rivaux le savent.*`,
+            `📡 **T${lap}** — Le mur de ${driver.team.emoji}**${driver.team.name}** surveille les données : ${driver.pilot.name} (P1) a des ${compStr} ${tireWarnLabel}. *Chaque tour au-dehors est un risque.*`,
+            `🎯 **T${lap} — DÉCISION IMMINENTE** pour ${driver.team.emoji}**${driver.pilot.name}** (P1) — ses ${compStr} ${tireWarnLabel}. *Est-ce qu'il tient encore quelques tours, ou est-ce que l'écurie intervient maintenant ?*`,
+          ] : driver.pos <= 3 ? [
+            `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) sur des ${compStr} ${tireWarnLabel}. *La fenêtre stratégique s'ouvre — ses rivaux directs vont-ils en profiter ?*`,
+            `📻 **T${lap}** — Attention à ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) : ses ${compStr} vieillissent. ${tireWarnLabel}. *Il va falloir choisir.*`,
+            `⚠️ **T${lap}** — Les pneus de ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) commencent à parler — ${compStr} ${tireWarnLabel}. *La stratégie de l'écurie va être scrutée de près.*`,
+          ] : [
+            `📡 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) roule sur des ${compStr} ${tireWarnLabel}. *L'arrêt aux stands se dessine.*`,
+            `🔭 **T${lap}** — Données en provenance du ${driver.team.name} : les ${compStr} de ${driver.pilot.name} (P${driver.pos}) ${tireWarnLabel}. *Pit imminent probable.*`,
+          ];
+          events.push({ priority: 4, text: pick(stratMsgs) });
+        }
+      }
+
+      // ── Radio "box box box" : message discret avant le pit ──
+      // Déclenché la boucle AVANT que le pit soit effectif, donc perçu comme une alerte radio
       const { pit, reason: rawReason } = shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive);
       const blockUndercut = scActive || scCooldown > 0;
       const reason = (blockUndercut && rawReason === 'undercut') ? null : rawReason;
       const doPit  = pit && reason !== null;
+
+      // ── 📻 Radio "box box" — discret, avant l'annonce officielle du pit ──
+      if (doPit && driver.pos <= 12) {
+        const radioKey = `${String(driver.pilot._id)}_${driver.pitStops}`;
+        if (!radioFiredLaps.has(radioKey)) {
+          radioFiredLaps.add(radioKey);
+          const td = TIRE[driver.tireCompound];
+          const compStr = td ? `${td.emoji} ${td.code}` : driver.tireCompound;
+          const radioMsgs = reason === 'undercut' ? [
+            `📻 *Ingénieur → **${driver.pilot.name}** : "Box, box, box — undercut activé !"*`,
+            `📻 *"${driver.pilot.name}, prépare-toi — on te rentre pour l'undercut. Box ce tour."*`,
+            `📻 *${driver.team.emoji} Stratégie undercut confirmée pour **${driver.pilot.name}** (P${driver.pos}) — box immédiat.*`,
+          ] : reason === 'sc_opportunity' ? [
+            `📻 *Ingénieur → **${driver.pilot.name}** : "Safety Car dehors — box, box, box ! On prend les pneus maintenant."*`,
+            `📻 *"SC en cours, **${driver.pilot.name}** — fenêtre parfaite. Rentre aux stands ce tour."*`,
+            `📻 *${driver.team.emoji} Décision rapide : **${driver.pilot.name}** rentre sous SC — opportunité trop belle pour la rater.*`,
+          ] : reason === 'tires_worn' ? [
+            `📻 *Ingénieur → **${driver.pilot.name}** : "Box, box — les ${compStr} sont foutus. Rentre ce tour."*`,
+            `📻 *"**${driver.pilot.name}**, les données disent arrêt maintenant. Box, box, box."*`,
+            `📻 *${driver.team.emoji} ${driver.pilot.name} reçoit l'ordre de rentrer — les ${compStr} sont au bout du rouleau.*`,
+            `📻 *"P${driver.pos}, rentre aux stands — les pneus n'en peuvent plus." **${driver.pilot.name}** acquiesce.*`,
+          ] : reason === 'forced_compound' ? [
+            `📻 *"**${driver.pilot.name}**, il faut impérativement s'arrêter — règlement oblige. Box ce tour."*`,
+            `📻 *${driver.team.emoji} Dernier rappel au règlement : **${driver.pilot.name}** doit changer de compound. Box maintenant.*`,
+          ] : [
+            `📻 *Ingénieur → **${driver.pilot.name}** : "Box ce tour, tout est prêt pour toi."*`,
+            `📻 *${driver.team.emoji} "**${driver.pilot.name}**, rentre aux stands — arrêt programmé, pneumatiques prêts."*`,
+            `📻 *La fenêtre s'ouvre pour ${driver.team.emoji}**${driver.pilot.name}** (P${driver.pos}) — pit confirmé dans quelques secondes.*`,
+          ];
+          events.push({ priority: 3, text: pick(radioMsgs) });
+        }
+      }
 
       if (doPit && driver.pitStops < 3 && lapsRemaining > 5) {
         const posIn      = driver.pos;
@@ -4466,7 +4624,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         const gapToLeader = driver.pos > 1
           ? (() => {
               const leaderTime = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime)[0]?.totalTime;
-              return leaderTime != null ? ` · ${((driver.totalTime - leaderTime) / 1000).toFixed(1)}s du leader` : '';
+              return leaderTime != null ? ` · ${fmtGap(driver.totalTime - leaderTime)} du leader` : '';
             })()
           : '';
         const warmupNote = repairDesc ? `
@@ -4484,14 +4642,19 @@ const exitNeighborStr = neighborAhead && neighborBehind
   ? ` (devant ${neighborBehind.team.emoji}**${neighborBehind.pilot.name}**)`
   : '';
 
+        const _ot = TIRE[oldTire];
+        const _nt = TIRE[newCompound];
+        const tireFrom = _ot ? `${_ot.emoji} ${_ot.code}` : '?';
+        const tireTo   = _nt ? `${_nt.emoji} **${_nt.code} — ${_nt.label}**` : '?';
+
         const pitFlavors = repairDesc ? [
           `🔧 **T${lap} — PIT D'URGENCE !** ${driver.team.emoji}**${driver.pilot.name}** (P${posIn}) rentre précipitamment. Arrêt de **${pitDur}s** — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
         ] : reason === 'undercut' ? [
-          `🔧 **T${lap} — UNDERCUT !** ${driver.team.emoji}**${driver.pilot.name}** plonge aux stands depuis **P${posIn}** — ${TIRE[oldTire].emoji} → ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** — **${pitDur}s** — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}. La stratégie va-t-elle payer ?${warmupNote}`,
-          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** tente l'undercut depuis **P${posIn}** ! ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
+          `🔧 **T${lap} — UNDERCUT !** ${driver.team.emoji}**${driver.pilot.name}** plonge aux stands depuis **P${posIn}** — ${tireFrom} → ${tireTo} — **${pitDur}s** — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}. La stratégie va-t-elle payer ?${warmupNote}`,
+          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** tente l'undercut depuis **P${posIn}** ! ${tireTo} en ${pitDur}s — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
         ] : [
-          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${TIRE[oldTire].emoji} cramés. ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en **${pitDur}s** — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
-          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag}. ${TIRE[newCompound].emoji}**${TIRE[newCompound].label}** en ${pitDur}s. Ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
+          `🔧 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** rentre aux stands depuis **P${posIn}**${scPitTag} — ${tireFrom} cramés. ${tireTo} en **${pitDur}s** — ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
+          `🔧 **T${lap} — ARRÊT AUX STANDS** pour ${driver.team.emoji}**${driver.pilot.name}** (P${posIn})${scPitTag}. ${tireTo} en ${pitDur}s. Ressort ${posOutContext}${exitNeighborStr}${gapToLeader}.${warmupNote}`,
         ];
 
         // Tracker undercut
@@ -4625,14 +4788,24 @@ const exitNeighborStr = neighborAhead && neighborBehind
         }
 
         const postGapMs = Math.abs(driver.totalTime - passed.totalTime);
-        const gapStr    = postGapMs < 1000 ? `${postGapMs}ms` : `${(postGapMs/1000).toFixed(3)}s`;
-        const gapLeader = driver.pos > 1 ? ` · ${((driver.totalTime - ranked[0].totalTime)/1000).toFixed(3)}s du leader` : '';
+        const gapStr    = fmtGap(postGapMs, { prefix: false });
+        const gapLeader = driver.pos > 1 ? ` · ${fmtGap(driver.totalTime - ranked[0].totalTime)} du leader` : '';
         const drsTag    = gpStyle === 'rapide' && driver.team.drs > 82 ? ' 📡 *DRS*' : '';
         const areRivals = (
           (driver.pilot.rivalId && String(driver.pilot.rivalId) === String(passed.pilot._id)) ||
           (passed.pilot.rivalId && String(passed.pilot.rivalId) === String(driver.pilot._id))
         );
+        const areTeammates = String(driver.pilot.teamId) === String(passed.pilot.teamId);
+
         const rivalTag = areRivals ? `\n⚔️ *Rivalité déclarée — ce dépassement a une saveur particulière !*` : '';
+        const teammateTag = areTeammates
+          ? `\n👥 *${pick([
+              `Duel interne — l'équipe regarde ça avec des sueurs froides.`,
+              `Coéquipiers qui se battent sur la piste ! La direction d'équipe va avoir du travail.`,
+              `Le duel interne est lancé — l'un des deux va devoir lever le pied... ou pas.`,
+              `Entre coéquipiers, ces points valent double pour le classement interne.`,
+            ])}*`
+          : '';
 
         // Vérifier si c'est une contre-attaque
         const bkey = [String(driver.pilot._id), String(passed.pilot._id)].sort().join('_');
@@ -4654,9 +4827,11 @@ const exitNeighborStr = neighborAhead && neighborBehind
           ? `***🏆 T${lap} — CHANGEMENT EN TÊTE !!!***${drsTag}`
           : ovIsTop3
             ? `***⚔️ T${lap} — DÉPASSEMENT DANS LE TOP 3 !***${drsTag}`
-            : isCounterAttack
-              ? `🔄 **T${lap} — CONTRE-ATTAQUE !**${drsTag}`
-              : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
+            : areTeammates
+              ? `👥 **T${lap} — DUEL INTERNE !**${drsTag}`
+              : isCounterAttack
+                ? `🔄 **T${lap} — CONTRE-ATTAQUE !**${drsTag}`
+                : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
 
         const howDesc = isCounterAttack
           ? counterAttackDescription(driver, passed, gpStyle)
@@ -4666,8 +4841,8 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const gifCat   = ovForLead ? 'overtake_lead' : ovIsTop3 ? 'overtake_podium' : 'overtake_normal';
 
         events.push({
-          priority: ovForLead ? 9 : ovIsTop3 ? 8 : isCounterAttack ? 7 : 6,
-          text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}`,
+          priority: ovForLead ? 9 : ovIsTop3 ? 8 : areTeammates ? 7 : isCounterAttack ? 7 : 6,
+          text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}${teammateTag}`,
           gif: pickGif(gifCat),
         });
         overtakeMentioned.add(String(driver.pilot._id));
@@ -4756,7 +4931,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       if (!target) { undercutTracker.delete(undId); continue; }
       const undWorked = undDriver.pos < target.pos;
       const gap = Math.abs(undDriver.totalTime - target.totalTime);
-      const gapStr = gap < 1000 ? `${gap}ms` : `${(gap/1000).toFixed(3)}s`;
+      const gapStr = fmtGap(gap, { prefix: false });
       events.push({ priority: 7, text: undWorked
         ? `✅ **T${lap} — L'UNDERCUT A PAYÉ !** ${undDriver.team.emoji}**${undDriver.pilot.name}** est devant ${target.team.emoji}**${target.pilot.name}** — **${gapStr}** d'avance. Stratégie parfaite.`
         : `❌ **T${lap} — L'UNDERCUT N'A PAS FONCTIONNÉ.** ${target.team.emoji}**${target.pilot.name}** a tenu le rythme — ${undDriver.team.emoji}**${undDriver.pilot.name}** ressort toujours derrière (${gapStr}).`,
@@ -4774,7 +4949,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       if (!rival) { overcutTracker.delete(ocId); continue; }
       const ocWorked = ocDriver.pos < rival.pos;
       const gap = Math.abs(ocDriver.totalTime - rival.totalTime);
-      const gapStr = gap < 1000 ? `${gap}ms` : `${(gap/1000).toFixed(3)}s`;
+      const gapStr = fmtGap(gap, { prefix: false });
       events.push({ priority: 6, text: ocWorked
         ? `✅ **T${lap} — L'OVERCUT A FONCTIONNÉ !** ${ocDriver.team.emoji}**${ocDriver.pilot.name}** est devant ${rival.team.emoji}**${rival.pilot.name}** — **${gapStr}** d'avance. Rester dehors était le bon choix.`
         : `❌ **T${lap} — L'OVERCUT N'A PAS PAYÉ.** ${rival.team.emoji}**${rival.pilot.name}** ressort devant avec des pneus frais — ${ocDriver.team.emoji}**${ocDriver.pilot.name}** a perdu le pari stratégique (${gapStr} derrière).`,
@@ -4833,19 +5008,56 @@ const exitNeighborStr = neighborAhead && neighborBehind
             const penSec  = pick([5, 10]);
             const penMs   = penSec * 1000;
             const aggr    = behind; // l'attaquant prend en général la pénalité
+            const isTeamBattle = String(ahead.pilot.teamId) === String(behind.pilot.teamId);
             aggr.totalTime += penMs;
             aggr.totalPenalties = (aggr.totalPenalties || 0) + penSec;
             racePenalties.push({ pilotId: String(aggr.pilot._id), seconds: penSec, reason: 'battle_contact', lap });
             raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id) });
             drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i2) => d.pos = i2+1);
             battleMap.delete(bkey);
-            events.push({ priority: 7, text: pick([
+            const contactFlavors = isTeamBattle ? [
+              `💥 **T${lap} — CONTACT INTERNE !** ${aggr.team.emoji}**${aggr.pilot.name}** percute son propre coéquipier **${ahead.pilot.name}** ! **+${penSec}s**. *L'équipe va devoir avoir une conversation très sérieuse.*`,
+              `🚨 **T${lap} — CATASTROPHE INTERNE !** Après ${battle.lapsClose} tours de bagarre entre **${aggr.pilot.name}** et **${ahead.pilot.name}**, le contact inévitable ! **+${penSec}s**. *Les deux perdent des points — le directeur technique doit être furieux.*`,
+              `💢 **T${lap}** — ${battle.lapsClose} tours de guerre interne, et ça finit comme ça... ${aggr.team.emoji}**${aggr.pilot.name}** touche **${ahead.pilot.name}**. **+${penSec}s**. *Double peine pour l'écurie.*`,
+            ] : [
               `💥 **T${lap} — CONTACT APRÈS ${battle.lapsClose} TOURS DE BATAILLE !** ${aggr.team.emoji}**${aggr.pilot.name}** percute ${ahead.team.emoji}**${ahead.pilot.name}** — **+${penSec}s** de pénalité. *La frustration a parlé.*`,
               `🚨 **T${lap}** — Après ${battle.lapsClose} tours au coude à coude, ça dérape ! ${aggr.team.emoji}**${aggr.pilot.name}** accroche ${ahead.team.emoji}**${ahead.pilot.name}**. **+${penSec}s** pour ${aggr.pilot.name}.`,
-            ]) });
+            ];
+            events.push({ priority: isTeamBattle ? 8 : 7, text: pick(contactFlavors) });
             break;
           }
+
+          const isTeamBattle = String(ahead.pilot.teamId) === String(behind.pilot.teamId);
           let defText = defenseDescription(ahead, behind, gpStyle);
+
+          // ── 📻 Radio de bataille : tension croissante par paliers ──
+          // Tour 5 = signal d'alerte, Tour 7 = tension maximale
+          const battleRadioKey5 = `${bkey}_radio5`;
+          const battleRadioKey7 = `${bkey}_radio7`;
+          if (battle.lapsClose === 5 && !radioFiredLaps.has(battleRadioKey5)) {
+            radioFiredLaps.add(battleRadioKey5);
+            events.push({ priority: 3, text: pick([
+              `📻 *Ingénieur → **${ahead.pilot.name}** : "P${ahead.pos}, **${behind.pilot.name}** est dans ton DRS depuis 5 tours. Reste propre."*`,
+              `📻 *"**${ahead.pilot.name}**, garde la tête froide — **${behind.pilot.name}** est juste derrière depuis ${battle.lapsClose} tours."*`,
+              `📻 *${ahead.team.emoji} Wall → cockpit : "Push, push — **${behind.pilot.name}** essaie de te faire une erreur. Reste concentré."*`,
+            ]) });
+          } else if (battle.lapsClose === 7 && !radioFiredLaps.has(battleRadioKey7)) {
+            radioFiredLaps.add(battleRadioKey7);
+            events.push({ priority: 3, text: pick([
+              `📻 *"**${ahead.pilot.name}** — ÇA FAIT 7 TOURS. **${behind.pilot.name}** est toujours là. Donne tout !"*`,
+              `📻 *${behind.team.emoji} Wall → **${behind.pilot.name}** : "Il commence à craquer. Continue à pousser, la position est à toi."*`,
+              `📻 *"**${behind.pilot.name}**, reste patient — ses pneus vont lâcher avant les tiens. Continue."*`,
+            ]) });
+          }
+
+          // Flaveur coéquipier sur les défenses
+          if (isTeamBattle && battle.lapsClose >= 3) {
+            defText += pick([
+              `\n› *Duel interne — les deux roulent pour la même équipe mais aucun n'a l'intention de céder.*`,
+              `\n› *Coéquipiers en guerre sur la piste — le mur des stands observe en silence.*`,
+              `\n› *L'équipe n'intervient pas encore. Mais si ça dure, ils devront choisir leurs priorités.*`,
+            ]);
+          }
           // Mentionner l'usure pneus si défense longue
           if (battle.lapsClose >= 5 && (ahead.defendExtraWear || 0) > 1.5) {
             const wornNote = (ahead.defendExtraWear || 0) > 3
@@ -4885,17 +5097,24 @@ const exitNeighborStr = neighborAhead && neighborBehind
     const showFullStandings = (lap % 10 === 0) || lap === totalLaps;
     const showTop5          = (lap % 5 === 0 && !showFullStandings) || (scActive && prevScState !== 'NONE');
 
-    // Helper: état d'usure pneu
-    // Format : `S`🔴 🟢 = Soft compound, pneus frais
+    // ── Indicateur pneu : compound + barre d'usure 5 blocs ───
+    // Format :  🔴 S ▰▰▰▱▱  (Soft, 60% usé)
+    //           🟡 M ▰▱▱▱▱  (Medium, frais)
+    //           ⚪ H ▰▰▰▰▰⚠️ (Hard, dans le rouge)
+    //           🌡️ = pneus en chauffe (warmup)
     const tireWearLabel = (d) => {
-      const td  = TIRE[d.tireCompound];
-      if (!td) return '⬜';
-      const worn = d.tireWear || 0;
-      const deg  = td.deg || 0.0016;
-      const thr  = deg > 0 ? Math.round(0.06 / deg) : 38;
-      const wup  = (d.warmupLapsLeft || 0) > 0 ? '🌡️' : '';
-      const wearDot = worn >= thr * 1.0 ? '🔴' : worn >= thr * 0.65 ? '🟠' : '🟢';
-      return `${td.emoji}${wup ? wup : ''}${wearDot}`;
+      const td = TIRE[d.tireCompound];
+      if (!td) return '❓';
+      const worn   = d.tireWear || 0;
+      const deg    = td.deg || 0.0016;
+      const cliff  = deg > 0 ? Math.round(0.06 / deg) : 38; // tours avant cliff
+      const wup    = (d.warmupLapsLeft || 0) > 0;
+      const pct    = Math.min(1, worn / cliff);
+      const filled = Math.round(pct * 5);
+      const bar    = '▰'.repeat(filled) + '▱'.repeat(5 - filled);
+      const warn   = pct >= 1.0 ? '⚠️' : '';
+      const warmup = wup ? '🌡️' : '';
+      return `${td.emoji} ${warmup || td.code} \`${bar}\`${warn}`;
     };
 
     let standingsText = '';
@@ -4904,7 +5123,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       standingsText = '\n\n📋 **CLASSEMENT COMPLET — Tour ' + lap + '/' + totalLaps + '**\n' +
         ranked.map((d, i) => {
           const gapMs  = i === 0 ? null : d.totalTime - ranked[0].totalTime;
-          const gapStr = i === 0 ? '⏱ **LEADER**' : `+${(gapMs/1000).toFixed(3)}s / leader`;
+          const gapStr = i === 0 ? '⏱ **LEADER**' : `${fmtGap(gapMs)} / leader`;
           return `\`P${String(i+1).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${tireWearLabel(d)} (${d.pitStops} arr.)`;
         }).join('\n') +
         (dnfLines.length ? '\n' + dnfLines.map(d => `~~${d.team.emoji}${d.pilot.name}~~ ❌ T${d.dnfLap}`).join(' · ') : '');
@@ -4912,7 +5131,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       standingsText = '\n\n🏎️ **Top ' + Math.min(5, ranked.length) + ' — T' + lap + '/' + totalLaps + '**\n' +
         ranked.slice(0, 5).map((d, i) => {
           const gapMs  = i === 0 ? null : d.totalTime - ranked[0].totalTime;
-          const gapStr = i === 0 ? 'LEADER' : `+${(gapMs/1000).toFixed(3)}s / leader`;
+          const gapStr = i === 0 ? 'LEADER' : `${fmtGap(gapMs)} / leader`;
           return `**P${i+1}** ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${tireWearLabel(d)}`;
         }).join('\n');
     }
@@ -4986,6 +5205,8 @@ const exitNeighborStr = neighborAhead && neighborBehind
     const primeV   = (driver.pos === 1 && !driver.dnf) ? (contract?.primeVictoire || 0) : 0;
     const primeP   = (driver.pos <= 3 && !driver.dnf)  ? (contract?.primePodium   || 0) : 0;
     const fl       = fastestLapHolder && String(fastestLapHolder.pilot._id) === String(driver.pilot._id);
+    // ⚡ Fastest lap : +1 point bonus si dans le top 10 et pas DNF (règle F1 réelle)
+    const flPts    = fl && !driver.dnf && driver.pos <= 10 ? 1 : 0;
 
     // Bonus de participation : tout le monde gagne quelque chose même sans point
     // P1-P10 = 0 bonus (pts F1 suffisent), P11 = 12, P15 = 60, P20 = 120
@@ -5004,6 +5225,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       dnf       : driver.dnf,
       dnfReason : driver.dnfReason,
       coins, fastestLap: fl,
+      flPts,          // bonus fastest lap (0 ou 1)
       penaltySec: driver.totalPenalties || 0,
     });
   }
@@ -5017,8 +5239,8 @@ const exitNeighborStr = neighborAhead && neighborBehind
   const gapWin    = runnerUp && !runnerUp.dnf ? (runnerUp.totalTime - winner.totalTime) / 1000 : null;
   const hadTop3Dnf = finalRanked.slice(0,3).some(d => d.dnf);
   const winFlavors = gapWin && gapWin < 1 ? [
-    `***🏁🏁🏁 DRAPEAU À DAMIER !!! ${race.emoji} ${race.circuit}***\n***🏆 ${winner.team.emoji}${winner.pilot.name} GAGNE !!! À ${gapWin.toFixed(3)}s !!! QUELLE COURSE INCROYABLE !!!***`,
-    `***🏁 C'EST FINI !!! VICTOIRE DE ${winner.team.emoji}${winner.pilot.name.toUpperCase()} !!! +${gapWin.toFixed(3)}s — ON A TOUT VU !!!***`,
+    `***🏁🏁🏁 DRAPEAU À DAMIER !!! ${race.emoji} ${race.circuit}***\n***🏆 ${winner.team.emoji}${winner.pilot.name} GAGNE !!! À ${fmtGapSec(gapWin, {prefix:false})} !!! QUELLE COURSE INCROYABLE !!!***`,
+    `***🏁 C'EST FINI !!! VICTOIRE DE ${winner.team.emoji}${winner.pilot.name.toUpperCase()} !!! +${fmtGapSec(gapWin, {prefix:false})} — ON A TOUT VU !!!***`,
   ] : hadTop3Dnf ? [
     `🏁 **DRAPEAU À DAMIER !** ${race.emoji} ${race.circuit}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** remporte une victoire marquée par le drame — pas celle qu'on attendait, mais totalement méritée.`,
     `🏁 **VICTOIRE SOUS LE CHAOS !** ${race.emoji}\n🏆 **${winner.team.emoji} ${winner.pilot.name}** profite des incidents pour s'imposer. Le sport est cruel et merveilleux à la fois.`,
@@ -5047,11 +5269,11 @@ const exitNeighborStr = neighborAhead && neighborBehind
     .setDescription(
       finalRanked.slice(0, 3).map((d, i) => {
         const gapMs  = i === 0 ? null : d.totalTime - finalRanked[0].totalTime;
-        const gapStr = i === 0 ? '' : ` (+${(gapMs/1000).toFixed(3)}s)`;
+        const gapStr = i === 0 ? '' : ` (${fmtGap(gapMs)})`;
         return `${['🥇','🥈','🥉'][i]} **${d.team.emoji} ${d.pilot.name}** — ${d.team.name}${gapStr}`;
       }).join('\n') +
       '\n\u200B\n**Abandons :**\n' + dnfStr +
-      (fastestLapHolder ? `\n\u200B\n⚡ **Meilleur tour :** ${fastestLapHolder.team.emoji} **${fastestLapHolder.pilot.name}** — ${msToLapStr(fastestLapMs)}` : '')
+      (fastestLapHolder ? `\n\u200B\n⚡ **Meilleur tour :** ${fastestLapHolder.team.emoji} **${fastestLapHolder.pilot.name}** — ${msToLapStr(fastestLapMs)}${fastestLapHolder.pos <= 10 && !fastestLapHolder.dnf ? ' *(+1 pt)*' : ''}` : '')
     );
   await sendEmbed(podiumEmbed);
 
@@ -5336,17 +5558,17 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
 
   for (const r of raceResults) {
     await Pilot.findByIdAndUpdate(r.pilotId, { $inc: { plcoins: r.coins, totalEarned: r.coins } });
-    const pts = F1_POINTS[r.pos - 1] || 0;
+    const pts    = F1_POINTS[r.pos - 1] || 0;
+    const flPts  = r.flPts || 0; // +1 si fastest lap + top 10
     const standingResult = await Standing.findOneAndUpdate(
       { seasonId: season._id, pilotId: r.pilotId },
-      { $inc: { points: pts, wins: r.pos===1&&!r.dnf?1:0, podiums: r.pos<=3&&!r.dnf?1:0, dnfs: r.dnf?1:0 } },
+      { $inc: { points: pts + flPts, wins: r.pos===1&&!r.dnf?1:0, podiums: r.pos<=3&&!r.dnf?1:0, dnfs: r.dnf?1:0 } },
       { upsert: true, new: true }
     );
-    console.log(`[applyRaceResults] P${r.pos} pilotId=${r.pilotId} pts+${pts} dnf=${r.dnf} → standing total=${standingResult?.points}`);
-    // Classement constructeurs
+    console.log(`[applyRaceResults] P${r.pos} pilotId=${r.pilotId} pts+${pts}${flPts?'+1FL':''}=${pts+flPts} dnf=${r.dnf} → standing total=${standingResult?.points}`);
     const constrResult = await ConstructorStanding.findOneAndUpdate(
       { seasonId: season._id, teamId: r.teamId },
-      { $inc: { points: pts } },
+      { $inc: { points: pts + flPts } },
       { upsert: true, new: true }
     );
     console.log(`[applyRaceResults] teamId=${r.teamId} constructeur total=${constrResult?.points}`);
@@ -8436,7 +8658,7 @@ async function runPractice(override, gpIndex = null) {
   const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
   const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
   const tireEmoji     = c => TIRE[c]?.emoji || '';
-  const tireLabel     = c => TIRE[c] ? `${TIRE[c].emoji} ${TIRE[c].label}` : c;
+  const tireLabel     = c => TIRE[c] ? `${TIRE[c] ? `${TIRE[c].emoji} ${TIRE[c].code}` : '?'} ${TIRE[c].label}` : c;
 
   // ── Nombre de GPs dans la saison ──────────────────────────
   const totalRaces    = await Race.countDocuments({ seasonId: season._id });
@@ -8717,16 +8939,31 @@ async function runQualifying(override, gpIndex = null) {
   const weatherLabels = { DRY:'☀️ Sec', WET:'🌧️ Pluie', INTER:'🌦️ Intermédiaire', HOT:'🔥 Chaud' };
   const W = ms => new Promise(r => setTimeout(r, ms));
 
-  const q3Grid = grid.slice(0, q3Size);
-  const q2Grid = grid.slice(q3Size, q2Size);
-  const q1Grid = grid.slice(q2Size);
-  const poleman = q3Grid[0];
+  // ── Références par session (jamais la pole finale pour Q1/Q2) ──
+  const q1Ref = q1State[0]?.time || 0;
+  const q2Ref = q2State[0]?.time || 0;
+  const q3Ref = q3State[0]?.time || 0;
+  const poleman = q3State[0];
 
-  // ── helper : ligne de résultat avec indicateur amélioration ──
-  const timeLine = (g, pos, refTime) => {
-    const gap = pos === 1 ? '⏱ REF' : `+${((g.time - refTime) / 1000).toFixed(3)}s`;
-    const imp = g.improved ? ' 📈' : '';
-    return `\`P${String(pos).padStart(2,' ')}\` ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)} — ${gap}${imp}`;
+  // ── helper ligne : temps + gap par rapport AU LEADER DE CETTE SESSION ──
+  const q1Line = (s, pos) => {
+    const gap = pos === 1 ? '⏱ REF' : `+${((s.time - q1Ref) / 1000).toFixed(3)}s`;
+    const imp = s.improved ? ' 📈' : '';
+    return `\`P${String(pos).padStart(2,' ')}\` ${s.team.emoji} **${s.pilot.name}** — ${msToLapStr(s.time)} — ${gap}${imp}`;
+  };
+  const q2Line = (s, pos) => {
+    const gap = pos === 1 ? '⏱ REF' : `+${((s.time - q2Ref) / 1000).toFixed(3)}s`;
+    const imp = s.improved ? ' 📈' : '';
+    // Indicateur de bond/régression vs Q1 (optionnel, très lisible)
+    const delta = s.deltaVsQ1 !== undefined
+      ? (s.deltaVsQ1 < -80 ? ' ⬆️' : s.deltaVsQ1 > 80 ? ' ⬇️' : '')
+      : '';
+    return `\`P${String(pos).padStart(2,' ')}\` ${s.team.emoji} **${s.pilot.name}** — ${msToLapStr(s.time)} — ${gap}${imp}${delta}`;
+  };
+  const q3Line = (s, pos) => {
+    const gap = pos === 1 ? '⏱ REF' : `+${((s.time - q3Ref) / 1000).toFixed(3)}s`;
+    const imp = s.improved ? ' 📈' : '';
+    return `\`P${String(pos).padStart(2,' ')}\` ${s.team.emoji} **${s.pilot.name}** — ${msToLapStr(s.time)} — ${gap}${imp}`;
   };
 
   // ─── INTRO ───────────────────────────────────────────────
@@ -8740,15 +8977,15 @@ async function runQualifying(override, gpIndex = null) {
   await W(3000);
 
   // ══════════════════════════════════════════════════════════
-  // Q1
+  // Q1 — classement propre à Q1
   // ══════════════════════════════════════════════════════════
   await channel.send(
-    `🟡 **Q1 — EN PISTE !** · ${grid.length} pilotes · Élimination à partir de P${q2Size + 1}\n` +
+    `🟡 **Q1 — EN PISTE !** · ${q1State.length} pilotes · Élimination à partir de P${q2Size + 1}\n` +
     `*Chaque pilote dispose de 2 tentatives — track evolution en cours...*`
   );
   await W(3000);
 
-  // Flash mi-session Q1 : 3-4 temps intermédiaires (légèrement dégradés = pas encore leur meilleur)
+  // Flash mi-Q1 : premiers temps du run 1 (bruts, avant amélioration)
   const flashQ1 = [...q1State].sort(() => Math.random() - 0.5).slice(0, 4);
   await channel.send(
     `📻 *Q1 — premier run :* ` +
@@ -8763,51 +9000,56 @@ async function runQualifying(override, gpIndex = null) {
       await W(1500);
     }
     if (ev.type === 'thriller_q1') {
-      await channel.send(`😰 *Q1 ultra-serré en bas du classement — **${ev.gap.toFixed(3)}s** entre ${ev.safe.team.emoji}**${ev.safe.pilot.name}** (qualifié de justesse) et ${ev.elim.team.emoji}**${ev.elim.pilot.name}** (éliminé). Le drapeau à damier va tout changer...*`);
+      await channel.send(`😰 *Q1 ultra-serré autour de la coupure — **${ev.gap.toFixed(3)}s** entre ${ev.safe.team.emoji}**${ev.safe.pilot.name}** (qualifié) et ${ev.elim.team.emoji}**${ev.elim.pilot.name}** (éliminé).*`);
+      await W(1500);
+    }
+    if (ev.type === 'upset_q1') {
+      await channel.send(`😱 *${ev.pilot.team.emoji}**${ev.pilot.pilot.name}** ÉLIMINÉ en Q1 ! Grosse surprise — l'un des favoris rentre au garage.*`);
       await W(1500);
     }
   }
 
-  // Résultats Q1
+  // ── Résultats Q1 : classement de Q1 uniquement ──
+  const q1Passants  = q1State.slice(0, q2Size);
+  const q1Elims     = q1State.slice(q2Size);
+  const q1TopLines  = q1Passants.map((s, i) => q1Line(s, i + 1)).join('\n');
+  const q1ElimLines = q1Elims.map((s, i) => q1Line(s, q2Size + 1 + i)).join('\n');
+
   const q1Embed = new EmbedBuilder()
     .setTitle(`🔴 Q1 TERMINÉ — ${race.emoji} ${race.circuit}`)
     .setColor('#FF4444')
     .setDescription(
-      `**Classement complet Q1 :**\n` +
-      [...q3State, ...q2State.slice(q3Size), ...q1Eliminated].slice(0, q2Size)
-        .map((s, i) => {
-          const g = grid[i];
-          return timeLine(g, i + 1, poleman.time);
-        }).join('\n') +
-      `\n\n🔴 **Éliminés (P${q2Size + 1}–${grid.length}) :**\n` +
-      q1Grid.map((g, i) => timeLine(g, q2Size + 1 + i, poleman.time)).join('\n') +
-      `\n\n✅ **Top ${q2Size} qualifiés pour Q2**`
+      `**Classement Q1 — top ${q2Size} :**\n` +
+      q1TopLines +
+      `\n\n🔴 **Éliminés (P${q2Size + 1}–${q1State.length}) :**\n` +
+      q1ElimLines +
+      `\n\n✅ **${q2Size} pilotes qualifiés pour Q2** · *Nouveaux runs, nouveau classement*`
     );
   await channel.send({ embeds: [q1Embed] });
   await W(4000);
 
   // ══════════════════════════════════════════════════════════
-  // Q2
+  // Q2 — session indépendante, classement peut être très différent
   // ══════════════════════════════════════════════════════════
-  const bubbleQ2 = q2State.slice(q3Size - 2, q3Size + 2).map(s => `${s.team.emoji}**${s.pilot.name}**`).join(' · ');
+  const bubbleQ2 = q2State.slice(q3Size - 2, Math.min(q3Size + 2, q2State.length))
+    .map(s => `${s.team.emoji}**${s.pilot.name}**`).join(' · ');
   await channel.send(
     `🟡 **Q2 — EN PISTE !** · ${q2Size} pilotes · Élimination à partir de P${q3Size + 1}\n` +
-    `*Sur le fil de la zone rouge : ${bubbleQ2}*`
+    `*Session repart de zéro — le classement Q1 ne compte plus. Sur le fil : ${bubbleQ2}*`
   );
   await W(3000);
 
-  // Drapeau jaune Q2
   if (qualiData.yellowFlagQ2) {
     const yp = qualiData.yellowFlagQ2;
-    await channel.send(`🟡 **DRAPEAU JAUNE !** ${yp.team?.emoji || ''}**${yp.pilot?.name || yp.name || '?'}** est sorti des limites — les tours en cours sont annulés pour les pilotes dans ce secteur !`);
+    await channel.send(`🟡 **DRAPEAU JAUNE !** ${yp.team?.emoji || ''}**${yp.pilot?.name || '?'}** est sorti des limites — les tours en cours sont annulés !`);
     await W(2000);
   }
 
-  // Flash mi-Q2
+  // Flash mi-Q2 : run 1
   const flashQ2 = [...q2State].sort(() => Math.random() - 0.5).slice(0, 4);
   await channel.send(
-    `📻 *Q2 — deuxième run :* ` +
-    flashQ2.map(s => `${s.team.emoji}**${s.pilot.name}** ${s.r2 ? msToLapStr(s.r2) : '*amélioré*'}`).join(' · ')
+    `📻 *Q2 — premier run :* ` +
+    flashQ2.map(s => `${s.team.emoji}**${s.pilot.name}** ${s.r1 ? msToLapStr(s.r1) : '*tour annulé*'}`).join(' · ')
   );
   await W(2500);
 
@@ -8818,28 +9060,36 @@ async function runQualifying(override, gpIndex = null) {
       await W(1500);
     }
     if (ev.type === 'last_gasp_q2') {
-      await channel.send(`⚡ *DERNIÈRE SECONDE !* ${ev.pilot.team.emoji}**${ev.pilot.pilot.name}** améliore son temps in-extremis et s'accroche au top ${q3Size} !`);
+      await channel.send(`⚡ *DERNIÈRE SECONDE !* ${ev.pilot.team.emoji}**${ev.pilot.pilot.name}** améliore in-extremis et s'accroche au top ${q3Size} !`);
       await W(1500);
     }
     if (ev.type === 'yellow_victim') {
-      await channel.send(`😤 ${ev.pilot.team.emoji}**${ev.pilot.pilot.name}** éliminé à cause du drapeau jaune — son meilleur tour annulé. *Cruel.*`);
+      await channel.send(`😤 ${ev.pilot.team.emoji}**${ev.pilot.pilot.name}** éliminé à cause du drapeau jaune — son tour annulé. *Cruel.*`);
+      await W(1500);
+    }
+    if (ev.type === 'regression_q2') {
+      await channel.send(`😬 *${ev.pilot.team.emoji}**${ev.pilot.pilot.name}** régresse de **+${ev.delta}s** par rapport à sa Q1 — la pression ou un mauvais setup ?*`);
       await W(1500);
     }
   }
 
-  const lastQ2Safe  = q2State[q3Size - 1];
-  const firstOutQ2  = q2State[q3Size];
-  const q2ThrillStr = lastQ2Safe && firstOutQ2 ? `\n⚠️ **${lastQ2Safe.team.emoji}${lastQ2Safe.pilot.name}** passe de justesse — **${((firstOutQ2.time - lastQ2Safe.time)/1000).toFixed(3)}s** d'avance sur **${firstOutQ2.team.emoji}${firstOutQ2.pilot.name}**.` : '';
+  // ── Résultats Q2 : classement propre à Q2 ──
+  const q2Passants  = q2State.slice(0, q3Size);
+  const q2Elims     = q2State.slice(q3Size);
+  const q2ThrillStr = q2Passants.length && q2Elims.length
+    ? `\n⚠️ **${q2Passants[q2Passants.length-1].team.emoji}${q2Passants[q2Passants.length-1].pilot.name}** passe de justesse — **${((q2Elims[0].time - q2Passants[q2Passants.length-1].time)/1000).toFixed(3)}s** d'avance sur **${q2Elims[0].team.emoji}${q2Elims[0].pilot.name}**.`
+    : '';
 
   const q2Embed = new EmbedBuilder()
     .setTitle(`🔴 Q2 TERMINÉ — ${race.emoji} ${race.circuit}`)
     .setColor('#FF8800')
     .setDescription(
-      `🔴 **Éliminés (P${q3Size + 1}–${q2Size}) :**\n` +
-      q2Grid.map((g, i) => timeLine(g, q3Size + 1 + i, poleman.time)).join('\n') +
+      `✅ **Top ${q3Size} qualifiés pour Q3 :**\n` +
+      q2Passants.map((s, i) => q2Line(s, i + 1)).join('\n') +
       q2ThrillStr +
-      `\n\n✅ **Top ${q3Size} qualifiés pour Q3 :**\n` +
-      q3Grid.map((g, i) => `${['🥇','🥈','🥉'][i] || `**${i+1}.**`} ${g.teamEmoji} **${g.pilotName}** — ${msToLapStr(g.time)}`).join('\n')
+      `\n\n🔴 **Éliminés (P${q3Size + 1}–${q2Size}) :**\n` +
+      q2Elims.map((s, i) => q2Line(s, q3Size + 1 + i)).join('\n') +
+      `\n\n*⬆️ = meilleur qu'en Q1 · ⬇️ = moins bien qu'en Q1*`
     );
   await channel.send({ embeds: [q2Embed] });
   await W(4000);
@@ -8850,7 +9100,7 @@ async function runQualifying(override, gpIndex = null) {
   const q3Names = q3State.map(s => `${s.team.emoji}**${s.pilot.name}**`).join(' · ');
   await channel.send(
     `🔥 **Q3 — SHOOT-OUT POUR LA POLE POSITION !**\n` +
-    `Les ${q3Size} meilleurs pilotes · **2 tentatives chacun** — tout se joue maintenant !\n` +
+    `Les ${q3Size} meilleurs · **2 tentatives** — session repart de zéro, tout est possible !\n` +
     `*En piste : ${q3Names}*`
   );
   await W(3000);
@@ -8866,35 +9116,34 @@ async function runQualifying(override, gpIndex = null) {
   // Drapeau rouge Q3
   if (redFlagQ3) {
     const triggerDrama = drama.q3.find(e => e.type === 'red_flag');
-    const victims = drama.q3.find(e => e.type === 'red_victims');
+    const victims      = drama.q3.find(e => e.type === 'red_victims');
     await channel.send(`🚩 **DRAPEAU ROUGE EN Q3 !** Session interrompue !${triggerDrama?.trigger ? ` Sortie de ${triggerDrama.trigger.team?.emoji || ''}**${triggerDrama.trigger.pilot?.name || '?'}**.` : ''}`);
     await W(2000);
-    await channel.send(`🔁 *Relance de Q3 — il reste quelques minutes. Certains pilotes doivent encore trouver leur tour.*`);
+    await channel.send(`🔁 *Relance de Q3 — il reste quelques minutes. Tout est encore jouable.*`);
     await W(2000);
     if (victims?.victims?.length) {
       const vNames = victims.victims.map(v => `${v.team.emoji}**${v.pilot.name}**`).join(', ');
-      await channel.send(`😤 *Victimes du drapeau rouge : ${vNames} n'ont pas pu boucler leur tour de qualif.*`);
+      await channel.send(`😤 *Victimes : ${vNames} n'ont pas pu boucler leur tour.*`);
       await W(1500);
     }
   }
 
-  // Révélation des temps Q3 du deuxième run (de bas en haut — le suspense monte)
+  // Révélation des temps Q3 (de bas en haut)
   await channel.send(`📻 *Q3 — deuxième run en cours... Les temps tombent !*`);
   await W(1500);
 
-  const q3Sorted = [...q3State].sort((a, b) => a.time - b.time);
-  const revealCount = Math.min(5, q3Sorted.length);
-  // Révéler du dernier au P3 avec suspense, puis P2 et P1 séparément
+  const q3Sorted     = [...q3State].sort((a, b) => a.time - b.time);
+  const revealCount  = Math.min(5, q3Sorted.length);
   for (let i = q3Sorted.length - 1; i >= q3Sorted.length - revealCount + 2; i--) {
-    const s = q3Sorted[i];
+    const s   = q3Sorted[i];
     const pos = i + 1;
-    const gap = `+${((s.time - q3Sorted[0].time) / 1000).toFixed(3)}s`;
+    const gap = `+${((s.time - q3Ref) / 1000).toFixed(3)}s`;
     await channel.send(`📻 **P${pos}** ${s.team.emoji}**${s.pilot.name}** — ${msToLapStr(s.time)} — ${gap}${s.improved ? ' 📈' : ''}`);
     await W(1200);
   }
   if (q3Sorted.length >= 2) {
-    const p2 = q3Sorted[1];
-    const gapP2 = `+${((p2.time - q3Sorted[0].time) / 1000).toFixed(3)}s`;
+    const p2    = q3Sorted[1];
+    const gapP2 = `+${((p2.time - q3Ref) / 1000).toFixed(3)}s`;
     await channel.send(`📻 **P2** ${p2.team.emoji}**${p2.pilot.name}** — ${msToLapStr(p2.time)} — ${gapP2}${p2.improved ? ' 📈' : ''}\n*Peut-il encore être battu ?*`);
     await W(2000);
   }
@@ -8902,7 +9151,7 @@ async function runQualifying(override, gpIndex = null) {
   // Drama Q3
   for (const ev of drama.q3) {
     if (ev.type === 'photo_finish_pole') {
-      await channel.send(`⚡ *ÉCART INCROYABLE* — seulement **${ev.gap.toFixed(3)}s** entre ${ev.pole.team.emoji}**${ev.pole.pilot.name}** et ${ev.second.team.emoji}**${ev.second.pilot.name}**. La pole se joue au millième !`);
+      await channel.send(`⚡ *ÉCART INCROYABLE* — seulement **${ev.gap.toFixed(3)}s** entre ${ev.pole.team.emoji}**${ev.pole.pilot.name}** et ${ev.second.team.emoji}**${ev.second.pilot.name}** !`);
       await W(1500);
     }
     if (ev.type === 'dominant_pole') {
@@ -8911,30 +9160,35 @@ async function runQualifying(override, gpIndex = null) {
     }
   }
 
-  // ── Grille finale Q3 ─────────────────────────────────────
+  // ── Résultats Q3 — classement propre à Q3 ─────────────────
   const q3FinalEmbed = new EmbedBuilder()
     .setTitle(`🏆 Q3 — GRILLE DE DÉPART OFFICIELLE — ${race.emoji} ${race.circuit}`)
     .setColor('#FFD700')
     .setDescription(
-      q3Grid.map((g, i) => timeLine(g, i + 1, poleman.time)).join('\n') +
+      q3Sorted.map((s, i) => q3Line(s, i + 1)).join('\n') +
       `\n\nMétéo Q : **${weatherLabels[weather] || weather}**`
     );
   await channel.send({ embeds: [q3FinalEmbed] });
   await W(2000);
 
   // ── POLE POSITION ─────────────────────────────────────────
-  const gap2nd = q3Grid[1] ? ((q3Grid[1].time - poleman.time) / 1000).toFixed(3) : null;
+  const p2State  = q3Sorted[1];
+  const gap2nd   = p2State ? ((p2State.time - poleman.time) / 1000).toFixed(3) : null;
   const poleMsgs = gap2nd && parseFloat(gap2nd) < 0.05
-    ? [`***🏆 POLE POSITION !!! ${poleman.teamEmoji}${poleman.pilotName} EN ${msToLapStr(poleman.time)} !!!***\n*Seulement +${gap2nd}s de marge — photo finish historique avec ${q3Grid[1]?.teamEmoji}${q3Grid[1]?.pilotName} !*`]
+    ? [`***🏆 POLE POSITION !!! ${poleman.team.emoji}${poleman.pilot.name} EN ${msToLapStr(poleman.time)} !!!***\n*Seulement +${gap2nd}s de marge — photo finish historique avec ${p2State.team.emoji}${p2State.pilot.name} !*`]
     : gap2nd && parseFloat(gap2nd) > 0.5
-    ? [`🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** — ${msToLapStr(poleman.time)}\n*+${gap2nd}s d'avance sur ${q3Grid[1]?.teamEmoji}**${q3Grid[1]?.pilotName}** — dominateur ce week-end.*`]
-    : [`🏆 **POLE POSITION** pour ${poleman.teamEmoji} **${poleman.pilotName}** — ${msToLapStr(poleman.time)}` + (gap2nd ? ` · +${gap2nd}s sur ${q3Grid[1]?.teamEmoji}**${q3Grid[1]?.pilotName}**` : '')];
+    ? [`🏆 **POLE POSITION** pour ${poleman.team.emoji} **${poleman.pilot.name}** — ${msToLapStr(poleman.time)}\n*+${gap2nd}s d'avance sur ${p2State.team.emoji}**${p2State.pilot.name}** — dominateur ce week-end.*`]
+    : [`🏆 **POLE POSITION** pour ${poleman.team.emoji} **${poleman.pilot.name}** — ${msToLapStr(poleman.time)}` + (gap2nd ? ` · +${gap2nd}s sur ${p2State.team.emoji}**${p2State.pilot.name}**` : '')];
   await channel.send(pick(poleMsgs));
   await W(2000);
 
-  // ── Grille complète ───────────────────────────────────────
-  const fullGrid = [...q3Grid, ...q2Grid, ...q1Grid];
-  const fullGridLines = fullGrid.map((g, i) => timeLine(g, i + 1, poleman.time)).join('\n');
+  // ── Grille complète : Q3 + Q2 éliminés + Q1 éliminés ─────
+  // Chaque groupe affiche le temps de SA session (pas un temps comparatif inter-sessions)
+  const fullGridLines = [
+    ...q3Sorted.map((s, i) => `\`P${String(i+1).padStart(2,' ')}\` ${s.team.emoji} **${s.pilot.name}** — ${msToLapStr(s.time)} *(Q3)*`),
+    ...q2Eliminated.map((s, i) => `\`P${String(q3Size+1+i).padStart(2,' ')}\` ${s.team.emoji} **${s.pilot.name}** — ${msToLapStr(s.time)} *(Q2)*`),
+    ...q1Eliminated.map((s, i) => `\`P${String(q2Size+1+i).padStart(2,' ')}\` ${s.team.emoji} **${s.pilot.name}** — ${msToLapStr(s.time)} *(Q1)*`),
+  ].join('\n');
   const fullGridEmbed = new EmbedBuilder()
     .setTitle(`🏎️ GRILLE COMPLÈTE — ${race.emoji} ${race.circuit}`)
     .setColor('#CC0000')
@@ -9176,14 +9430,93 @@ async function runRace(override, gpIndex = null) {
 
   const channel = await getRaceChannel(override);
 
-  // ── Snapshot avant la course pour montrer les changements ─
+  // ── Snapshot avant la course pour les classements delta ──
   const standingsBefore = await Standing.find({ seasonId: season._id }).lean();
   const constrBefore    = await ConstructorStanding.find({ seasonId: season._id }).lean();
   const standBeforeMap  = new Map(standingsBefore.map((s,i) => [String(s.pilotId), i + 1]));
   const constrBeforeMap = new Map(constrBefore.map((s,i) => [String(s.teamId), i + 1]));
-  // Re-sort avant course pour les rangs corrects
   standingsBefore.sort((a,b) => b.points - a.points).forEach((s,i) => standBeforeMap.set(String(s.pilotId), i+1));
   constrBefore.sort((a,b) => b.points - a.points).forEach((s,i) => constrBeforeMap.set(String(s.teamId), i+1));
+
+  // ── Grille de départ animée — publiée avant le départ ────
+  if (channel) {
+    const W = ms => new Promise(r => setTimeout(r, ms));
+    const allStandingsSnap = standingsBefore.slice().sort((a,b) => b.points - a.points);
+    const champMap   = new Map(allStandingsSnap.map((s, i) => [String(s.pilotId), { pts: s.points, rank: i + 1 }]));
+
+    // Lignes de grille, 2 colonnes
+    const gridLines = grid.map((g, i) => {
+      const p = pilots.find(x => String(x._id) === String(g.pilotId));
+      const t = p ? teams.find(x => String(x._id) === String(p.teamId)) : null;
+      const champInfo = p ? champMap.get(String(p._id)) : null;
+      const rankTag = champInfo ? ` *(C${champInfo.rank})*` : '';
+      return `\`P${String(i+1).padStart(2,' ')}\` ${t?.emoji || ''}**${p?.name || '?'}**${rankTag}`;
+    });
+    const half = Math.ceil(gridLines.length / 2);
+
+    // Duels à surveiller
+    const watchDuels = [];
+    // Rivaux proches sur la grille
+    for (let i = 0; i < grid.length; i++) {
+      const pA = pilots.find(p => String(p._id) === String(grid[i].pilotId));
+      if (!pA?.rivalId) continue;
+      const jB = grid.findIndex(g2 => String(g2.pilotId) === String(pA.rivalId));
+      if (jB >= 0 && Math.abs(i - jB) <= 5) {
+        const pB = pilots.find(p => String(p._id) === String(pA.rivalId));
+        const tA = teams.find(t => String(t._id) === String(pA.teamId));
+        const tB = pB ? teams.find(t => String(t._id) === String(pB.teamId)) : null;
+        watchDuels.push(`⚔️ **Rivalité** : ${tA?.emoji||''}${pA.name} *(P${i+1})* vs ${tB?.emoji||''}${pB?.name||'?'} *(P${jB+1})*`);
+        break;
+      }
+    }
+    // Coéquipiers adjacents
+    for (let i = 0; i < grid.length - 1; i++) {
+      const pA = pilots.find(p => String(p._id) === String(grid[i].pilotId));
+      const pB = pilots.find(p => String(p._id) === String(grid[i+1].pilotId));
+      if (pA && pB && String(pA.teamId) === String(pB.teamId)) {
+        const t = teams.find(t => String(t._id) === String(pA.teamId));
+        watchDuels.push(`👥 **Duel interne** : ${t?.emoji||''}${pA.name} *(P${i+1})* vs ${pB.name} *(P${i+2})*`);
+        break;
+      }
+    }
+    // Leaders du champ proches sur la grille
+    if (allStandingsSnap.length >= 2) {
+      const c1 = allStandingsSnap[0], c2 = allStandingsSnap[1];
+      const g1i = grid.findIndex(g => String(g.pilotId) === String(c1.pilotId));
+      const g2i = grid.findIndex(g => String(g.pilotId) === String(c2.pilotId));
+      if (g1i >= 0 && g2i >= 0 && Math.abs(g1i - g2i) <= 7) {
+        const p1 = pilots.find(p => String(p._id) === String(c1.pilotId));
+        const p2 = pilots.find(p => String(p._id) === String(c2.pilotId));
+        const t1 = p1 ? teams.find(t => String(t._id) === String(p1.teamId)) : null;
+        const t2 = p2 ? teams.find(t => String(t._id) === String(p2.teamId)) : null;
+        watchDuels.push(`🏆 **Titre** : ${t1?.emoji||''}${p1?.name||'?'} *(P${g1i+1}, ${c1.points}pts)* vs ${t2?.emoji||''}${p2?.name||'?'} *(P${g2i+1}, ${c2.points}pts)*`);
+      }
+    }
+
+    const duelsStr = watchDuels.length ? `\n\n**🔭 À surveiller :**\n${watchDuels.join('\n')}` : '';
+    const styleEmojis = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
+    const totalRaces  = await Race.countDocuments({ seasonId: season._id });
+    const gpNum       = (race.index ?? 0) + 1;
+
+    const preRaceEmbed = new EmbedBuilder()
+      .setTitle(`🏎️ GRILLE DE DÉPART — ${race.emoji} ${race.circuit} · GP ${gpNum}/${totalRaces}`)
+      .setColor('#FF1801')
+      .addFields(
+        { name: `P1–P${half}`, value: gridLines.slice(0, half).join('\n') || '—', inline: true },
+        { name: `P${half+1}–P${grid.length}`, value: gridLines.slice(half).join('\n') || '—', inline: true },
+      )
+      .setDescription(`${styleEmojis[race.gpStyle]||''} **${race.gpStyle.toUpperCase()}**${duelsStr}`)
+      .setFooter({ text: `Les feux s'éteignent dans quelques instants... ${race.emoji}` });
+
+    await channel.send({ embeds: [preRaceEmbed] });
+    await W(4000);
+    await channel.send(pick([
+      `🚦 **FEU ROUGE...** Tout le monde est en position. Le silence avant la tempête.`,
+      `🚦 *Les mécaniciens quittent la grille... La tension est à son comble.*`,
+      `🚦 *5 feux... 4... 3... 2... 1...*`,
+    ]));
+    await W(3000);
+  }
 
   const { results, collisions, penalties } = await simulateRace(race, grid, pilots, teams, contracts, channel, season);
   await applyRaceResults(results, race._id, season, collisions);
