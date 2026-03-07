@@ -10451,7 +10451,7 @@ async function handleInteraction(interaction) {
     }
 
     if (!Object.keys(countByPilot).length) {
-      return interaction.editReply({ content: '📭 Aucune offre enregistrée ce mercato. Revenez plus tard.', ephemeral: false });
+      return interaction.reply({ content: '📭 Aucune offre enregistrée ce mercato. Revenez plus tard.', ephemeral: false });
     }
 
     // Trier par nombre d'offres desc
@@ -10485,7 +10485,7 @@ async function handleInteraction(interaction) {
       )
       .setFooter({ text: isTransfer ? 'Mercato en cours — classement temps réel' : 'Mercato terminé — classement final' });
 
-    return interaction.editReply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed] });
   }
 
   // ── /pilotes_libres ──────────────────────────────────────
