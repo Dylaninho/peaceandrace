@@ -3202,6 +3202,137 @@ function genTitleFightArticle(leader, challenger, leaderTeam, challengerTeam, ga
 }
 
 // ── Orchestrateur post-GP ─────────────────────────────────
+// ══════════════════════════════════════════════════════════
+// DRIVER OF THE DAY
+// ══════════════════════════════════════════════════════════
+async function generateDriverOfTheDay(race, finalResults, drivers, channel) {
+  if (!channel) return;
+
+  const allTeams  = await Team.find().lean();
+  const allPilots = await Pilot.find({ teamId: { $ne: null } }).lean();
+  const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
+  const pilotMap  = new Map(allPilots.map(p => [String(p._id), p]));
+
+  // Grille de départ depuis qualiGrid
+  const qualiGrid    = race.qualiGrid || [];
+  const startPosMap  = new Map(qualiGrid.map((g, i) => [String(g.pilotId), i + 1]));
+  const totalDrivers = finalResults.length;
+  const gpStyle      = race.gpStyle || 'mixte';
+
+  // ── Calcul du score DOTD pour chaque pilote ───────────────
+  const scores = [];
+
+  for (const r of finalResults) {
+    if (r.dnf) continue; // DNF exclu du vote
+    const pilot  = pilotMap.get(String(r.pilotId));
+    const team   = teamMap.get(String(r.teamId));
+    if (!pilot || !team) continue;
+
+    const finishPos  = r.pos;
+    const startPos   = startPosMap.get(String(r.pilotId)) || finishPos;
+    const placesGained = startPos - finishPos; // positif = a remonté
+
+    let score = 0;
+
+    // 1. Places gagnées (facteur principal)
+    // +4 pts par place gagnée, -2 pts par place perdue
+    score += placesGained > 0 ? placesGained * 4 : placesGained * 2;
+
+    // 2. Résultat absolu — finir haut reste bien
+    // P1=20, P2=15, P3=12, P4=8, P5=6, P6-P10=3, P11+=0
+    const absoluteBonus = [20, 15, 12, 8, 6, 3, 3, 3, 3, 3];
+    score += absoluteBonus[finishPos - 1] || 0;
+
+    // 3. Underdog factor — petite écurie qui surperforme
+    // carScore < 70 = petite écurie. Bonus inversement proportionnel à la force de la voiture
+    const cScore      = carScore(team, gpStyle);
+    const underdogMul = Math.max(0, (75 - cScore) / 75); // 0 pour top team, ~0.3 pour bas de grille
+    const underdogBonus = underdogMul * finishPos <= 10 ? underdogMul * 15 : 0;
+    score += underdogBonus;
+
+    // 4. Fastest lap bonus
+    if (r.fastestLap) score += 8;
+
+    // 5. Pénalités → malus léger (ne ruine pas le score, juste pénalise)
+    score -= (r.penaltySec || 0) * 0.5;
+
+    // 6. Remontée depuis très loin en grille (P15+) → bonus spectaculaire
+    if (startPos >= 15 && placesGained >= 5) score += 10;
+    if (startPos >= 18 && placesGained >= 3) score += 8;
+
+    // 7. Petite variance humaine (±3%) pour simuler le vote public imparfait
+    score *= 1 + (Math.random() - 0.5) * 0.06;
+
+    scores.push({ pilot, team, finishPos, startPos, placesGained, fastestLap: r.fastestLap, score });
+  }
+
+  if (scores.length < 2) return;
+
+  // Trier par score décroissant
+  scores.sort((a, b) => b.score - a.score);
+
+  // Normaliser en % (les 3 premiers partagent ~100%)
+  const top3    = scores.slice(0, 3);
+  const total   = top3.reduce((s, d) => s + Math.max(0, d.score), 0);
+  const winner  = top3[0];
+
+  // Pourcentages réalistes — le gagnant a toujours la majorité
+  // Distribution pondérée : gagnant ~50-65%, 2ème ~20-30%, 3ème ~10-20%
+  const rawPcts = top3.map(d => total > 0 ? (Math.max(0, d.score) / total) * 100 : 33);
+  // Forcer un minimum de 5% pour le top 3
+  const pcts = rawPcts.map(p => Math.max(5, Math.round(p)));
+  // Normaliser pour que la somme = 100
+  const pctSum = pcts.reduce((a,b) => a+b, 0);
+  const normalPcts = pcts.map((p, i) => i === 0 ? p + (100 - pctSum) : p);
+
+  // ── Contexte narratif pour le gagnant ─────────────────────
+  const gained     = winner.placesGained;
+  const cScoreW    = carScore(winner.team, gpStyle);
+  const isUnderdog = cScoreW < 68;
+
+  let context = '';
+  if (gained >= 8)           context = `Remonté de **P${winner.startPos}** à **P${winner.finishPos}** — +${gained} places.`;
+  else if (gained >= 4)      context = `Belle remontée depuis P${winner.startPos}, termine P${winner.finishPos}.`;
+  else if (gained >= 1)      context = `Progression solide : P${winner.startPos} → P${winner.finishPos}.`;
+  else if (winner.finishPos === 1 && isUnderdog) context = `Victoire surprise avec une voiture de milieu de grille — éblouissant.`;
+  else if (winner.finishPos === 1) context = `Victoire dominante, aucune faille du premier au dernier tour.`;
+  else if (winner.fastestLap) context = `Fastest lap en prime — une course dans la course.`;
+  else if (isUnderdog)        context = `Tout tiré d'une voiture qui n'était pas censée finir aussi haut.`;
+  else                        context = `Régularité et intelligence de course au-dessus du lot.`;
+
+  // ── Embed ─────────────────────────────────────────────────
+  const DOTD_COLORS = ['🥇', '🥈', '🥉'];
+
+  const embed = new EmbedBuilder()
+    .setColor('#E8C84A')
+    .setTitle(`🏆 DRIVER OF THE DAY — ${race.emoji} ${race.circuit}`)
+    .setDescription(
+      `*Le vote du public est clos. La performance qui a le plus marqué les esprits ce week-end...*\n\u200B`
+    )
+    .addFields(
+      {
+        name: `${DOTD_COLORS[0]} ${winner.team.emoji} ${winner.pilot.name} — **${normalPcts[0]}%**`,
+        value: context,
+        inline: false,
+      },
+      ...top3.slice(1).map((d, i) => {
+        const g = d.placesGained;
+        const sub = g > 0 ? `+${g} places (P${d.startPos}→P${d.finishPos})`
+                  : g < 0 ? `P${d.startPos}→P${d.finishPos}`
+                  : `P${d.finishPos} — ligne à ligne`;
+        return {
+          name: `${DOTD_COLORS[i + 1]} ${d.team.emoji} ${d.pilot.name} — **${normalPcts[i + 1]}%**`,
+          value: sub,
+          inline: true,
+        };
+      })
+    )
+    .setFooter({ text: `Vote public · ${race.circuit} · Résultats non contractuels` });
+
+  await sleep(4000);
+  await channel.send({ embeds: [embed] });
+}
+
 async function generatePostRaceNews(race, finalResults, season, channel) {
   const allPilots  = await Pilot.find({ teamId: { $ne: null } });
   const allTeams   = await Team.find();
@@ -6195,6 +6326,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
       const seasonForOff = await getActiveSeason();
       if (seasonForOff) await generateOffTrackIncidents(race, results, seasonForOff, channel);
     } catch(e) { console.error('Off-track incidents erreur:', e); }
+    try {
+      await generateDriverOfTheDay(race, results, drivers, channel);
+    } catch(e) { console.error('Driver of the day erreur:', e); }
   }, 150_000 + Math.random() * 30_000); // 2min30 à 3min après la fin
 
   // ── Personality hooks post-course
