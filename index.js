@@ -1079,12 +1079,13 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false)
 
   // ── Dernier recours : fin de course et jamais pité ──────────
   // Règle F1 : obligation d'utiliser 2 compounds → forcer un pit si jamais arrêté
-  if ((pitStops || 0) === 0 && lapsRemaining <= 12 && lapsRemaining > 5) {
-    const forcedChance = 0.35 + (12 - lapsRemaining) * 0.08; // monte de 35% à ~99% sur les 8 derniers tours
+  // Déclenchement dès lapsRemaining <= 18 pour éviter les pits surprise à 5 tours de la fin
+  if ((pitStops || 0) === 0 && lapsRemaining <= 18 && lapsRemaining > 8) {
+    const forcedChance = 0.20 + (18 - lapsRemaining) * 0.08; // monte de 20% à ~100% sur les 12 derniers tours
     if (Math.random() < forcedChance) return { pit: true, reason: 'forced_compound' };
   }
-  // Ultime filet : si on arrive au tour -5 sans jamais pité, pit systématique
-  if ((pitStops || 0) === 0 && lapsRemaining <= 5) return { pit: true, reason: 'forced_compound' };
+  // Ultime filet : si on arrive au tour -8 sans jamais pité, pit systématique
+  if ((pitStops || 0) === 0 && lapsRemaining <= 8) return { pit: true, reason: 'forced_compound' };
 
   // Stratégie 1-stop : attend 38% de la course avant le 1er arrêt
   if (pitStrategy === 'one_stop' && (pitStops || 0) === 0) {
@@ -5275,7 +5276,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
       }
 
-      if (doPit && driver.pitStops < 3 && lapsRemaining > 5) {
+      if (doPit && driver.pitStops < 3 && lapsRemaining > 8) {
         const posIn      = driver.pos;
         const oldTire    = driver.tireCompound;
         const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds);
@@ -5695,16 +5696,13 @@ const exitNeighborStr = neighborAhead && neighborBehind
         if (attacker) {
           const roll = Math.random();
           if (roll < 0.5) {
-            const penSec = randInt(2, 5); // 2s à 5s
-            const penMs  = penSec * 1000;
-            attacker.totalTime += penMs;
-            attacker.totalPenalties = (attacker.totalPenalties || 0) + penSec;
-            drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
-            racePenalties.push({ pilotId: String(attacker.pilot._id), seconds: penSec, reason: 'contact', lap });
+            // Contact signalé → investigation post-course (pas de téléportation en pleine course)
+            // La pénalité éventuelle sera appliquée après l'arrivée comme les autres enquêtes
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id) });
+            pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap });
             events.push({ priority: 5, text: pick([
-              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** percute légèrement ${victim.team.emoji}**${victim.pilot.name}** — **+${penSec}s** de pénalité. Total : ${attacker.totalPenalties}s ce GP.`,
-              `⚠️ **T${lap}** — Contact ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. La FIA décide : **+${penSec}s** pour ${attacker.pilot.name}${(attacker.totalPenalties || 0) > penSec ? ` (${attacker.totalPenalties}s au total)` : ''}.`,
+              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}** — *sous investigation FIA, décision post-course.*`,
+              `⚠️ **T${lap}** — Contact ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Les commissaires vont étudier les images.*`,
             ]) });
           } else {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id) });
@@ -5728,27 +5726,83 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
         const battle = battleMap.get(bkey);
         if (battle && battle.lapsClose >= 3 && gap < 1.2) {
-          // ── Bataille très longue (8+ tours) → risque d'incident ──
-          if (battle.lapsClose >= 8 && Math.random() < 0.22 && !scActive) {
-            const penSec  = pick([5, 10]);
-            const penMs   = penSec * 1000;
-            const aggr    = behind; // l'attaquant prend en général la pénalité
+          // ── Probabilité d'incident proportionnelle à la durée de la bataille ──
+          // 3 tours : ~4%, 5 tours : ~8%, 8 tours : ~14%, 12 tours : ~22%, 15+ : ~28%
+          const incidentChance = Math.min(0.30, 0.01 * battle.lapsClose + 0.01);
+          if (!scActive && Math.random() < incidentChance) {
+            const aggr = behind;
             const isTeamBattle = String(ahead.pilot.teamId) === String(behind.pilot.teamId);
-            aggr.totalTime += penMs;
-            aggr.totalPenalties = (aggr.totalPenalties || 0) + penSec;
-            racePenalties.push({ pilotId: String(aggr.pilot._id), seconds: penSec, reason: 'battle_contact', lap });
-            raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id) });
-            drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i2) => d.pos = i2+1);
-            battleMap.delete(bkey);
-            const contactFlavors = isTeamBattle ? [
-              `💥 **T${lap} — CONTACT INTERNE !** ${aggr.team.emoji}**${aggr.pilot.name}** percute son propre coéquipier **${ahead.pilot.name}** ! **+${penSec}s**. *L'équipe va devoir avoir une conversation très sérieuse.*`,
-              `🚨 **T${lap} — CATASTROPHE INTERNE !** Après ${battle.lapsClose} tours de bagarre entre **${aggr.pilot.name}** et **${ahead.pilot.name}**, le contact inévitable ! **+${penSec}s**. *Les deux perdent des points — le directeur technique doit être furieux.*`,
-              `💢 **T${lap}** — ${battle.lapsClose} tours de guerre interne, et ça finit comme ça... ${aggr.team.emoji}**${aggr.pilot.name}** touche **${ahead.pilot.name}**. **+${penSec}s**. *Double peine pour l'écurie.*`,
-            ] : [
-              `💥 **T${lap} — CONTACT APRÈS ${battle.lapsClose} TOURS DE BATAILLE !** ${aggr.team.emoji}**${aggr.pilot.name}** percute ${ahead.team.emoji}**${ahead.pilot.name}** — **+${penSec}s** de pénalité. *La frustration a parlé.*`,
-              `🚨 **T${lap}** — Après ${battle.lapsClose} tours au coude à coude, ça dérape ! ${aggr.team.emoji}**${aggr.pilot.name}** accroche ${ahead.team.emoji}**${ahead.pilot.name}**. **+${penSec}s** pour ${aggr.pilot.name}.`,
-            ];
-            events.push({ priority: isTeamBattle ? 8 : 7, text: pick(contactFlavors) });
+
+            // Contact (70%) → enquête post-course | Incident mécanique/crevaison (30%)
+            const incidentRoll = Math.random();
+
+            if (incidentRoll < 0.70) {
+              // Contact → investigation post-course
+              raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id) });
+              pendingInvestigations.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), lap });
+              battleMap.delete(bkey);
+              const contactFlavors = isTeamBattle ? [
+                `💢 **T${lap} — CONTACT INTERNE !** Après ${battle.lapsClose} tours de duel, ${aggr.team.emoji}**${aggr.pilot.name}** touche son coéquipier **${ahead.pilot.name}**. *Sous investigation FIA — décision post-course.*`,
+                `🚨 **T${lap}** — La tension interne explose ! ${aggr.team.emoji}**${aggr.pilot.name}** accroche **${ahead.pilot.name}** (T${battle.lapsClose} de bataille). *Les commissaires vont trancher.*`,
+              ] : [
+                `💥 **T${lap} — CONTACT APRÈS ${battle.lapsClose} TOURS !** ${aggr.team.emoji}**${aggr.pilot.name}** percute ${ahead.team.emoji}**${ahead.pilot.name}**. *Sous investigation — sentence possible après la course.*`,
+                `🔍 **T${lap}** — ${battle.lapsClose} tours de bataille et ça finit par un contact ! ${aggr.team.emoji}**${aggr.pilot.name}** / ${ahead.team.emoji}**${ahead.pilot.name}**. *La FIA va trancher après l'arrivée.*`,
+              ];
+              events.push({ priority: isTeamBattle ? 8 : 7, text: pick(contactFlavors) });
+            } else {
+              // Incident physique lié au combat : crash, dégâts carrosserie, crevaison
+              const victim  = Math.random() < 0.6 ? aggr : ahead;
+              const other   = victim === aggr ? ahead : aggr;
+              const rollInc = Math.random();
+
+              if (rollInc < 0.35) {
+                // Crash de l'un des deux → DNF
+                if (!victim.dnf) {
+                  victim.dnf = true; victim.dnfLap = lap; victim.dnfReason = 'CRASH';
+                  lapDnfs.push({ driver: victim, type: 'CRASH' });
+                  lapIncidents.push({ type: 'CRASH', onTrack: true });
+                  battleMap.delete(bkey);
+                  events.push({ priority: 9, text: pick([
+                    `💥 **T${lap} — CRASH !** ${victim.team.emoji}**${victim.pilot.name}** sort de la piste lors de la bataille avec ${other.team.emoji}**${other.pilot.name}**. **ABANDON.**`,
+                    `🚨 **T${lap}** — Duel fatal ! ${victim.team.emoji}**${victim.pilot.name}** perd le contrôle en défendant face à ${other.team.emoji}**${other.pilot.name}**. **DNF.**`,
+                  ]) });
+                }
+              } else if (rollInc < 0.55) {
+                // Crash des deux
+                [victim, other].forEach(d => {
+                  if (!d.dnf) { d.dnf = true; d.dnfLap = lap; d.dnfReason = 'CRASH'; lapDnfs.push({ driver: d, type: 'CRASH' }); }
+                });
+                lapIncidents.push({ type: 'CRASH', onTrack: true });
+                battleMap.delete(bkey);
+                events.push({ priority: 10, text: pick([
+                  `💥 **T${lap} — DOUBLE CRASH !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent ! **Deux abandons.** La bataille tourne au cauchemar.`,
+                  `🚨 **T${lap}** — Contact violent entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** — les deux voitures dans le bac à graviers. **DNF.**`,
+                ]) });
+              } else if (rollInc < 0.75) {
+                // Crevaison suite au contact
+                if (!victim.dnf) {
+                  victim.dnf = true; victim.dnfLap = lap; victim.dnfReason = 'PUNCTURE';
+                  lapDnfs.push({ driver: victim, type: 'PUNCTURE' });
+                  lapIncidents.push({ type: 'PUNCTURE', onTrack: true });
+                  battleMap.delete(bkey);
+                  events.push({ priority: 8, text: pick([
+                    `🫧 **T${lap} — CREVAISON !** ${victim.team.emoji}**${victim.pilot.name}** prend un accroc lors du duel avec ${other.team.emoji}**${other.pilot.name}** — pneu crevé, abandon immédiat.`,
+                    `🫧 **T${lap}** — Contact roue-à-roue fatal ! ${victim.team.emoji}**${victim.pilot.name}** rentre aux stands avec un pneu à plat. **Fin de course.**`,
+                  ]) });
+                }
+              } else {
+                // Dégâts carrosserie → pit forcé ou voiture abîmée
+                const dmg = randInt(4000, 10000);
+                victim.damagedCar = { lapPenalty: dmg };
+                victim.pendingRepair = Math.random() < 0.5 ? 'aileron' : 'suspension';
+                battleMap.delete(bkey);
+                raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id) });
+                events.push({ priority: 7, text: pick([
+                  `⚙️ **T${lap} — DÉGÂTS !** Contact entre ${aggr.team.emoji}**${aggr.pilot.name}** et ${ahead.team.emoji}**${ahead.pilot.name}** — ${victim.team.emoji}**${victim.pilot.name}** a de la casse sur la voiture, pit obligatoire.`,
+                  `🔧 **T${lap}** — Accrochage dans la bataille ! ${victim.team.emoji}**${victim.pilot.name}** rentre aux stands en urgence pour une réparation.`,
+                ]) });
+              }
+            }
             break;
           }
 
@@ -6862,6 +6916,9 @@ const commands = [
       .setRequired(false)
     ),
 
+  new SlashCommandBuilder().setName('admin_test_intro')
+    .setDescription('[ADMIN] 🎬 Teste l\'envoi de la vidéo d\'intro dans ce channel'),
+
   new SlashCommandBuilder().setName('admin_set_race_results')
     .setDescription(`[ADMIN] Saisit manuellement le classement d'un GP (si la simulation a planté)`)
     .addStringOption(o => o.setName('classement').setDescription(`Noms des pilotes dans l'ordre, séparés par des virgules. Ex: Alice,Bob,Charlie`).setRequired(true))
@@ -7320,7 +7377,7 @@ async function handleInteraction(interaction) {
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
-    'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro'].includes(commandName);
+    'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -9206,7 +9263,11 @@ async function handleInteraction(interaction) {
     if (!attachment && !urlInput) {
       raceIntroUrl  = null;
       raceIntroPath = null;
-      await BotConfig.findOneAndUpdate({ key: 'global' }, { raceIntroUrl: null, updatedAt: new Date() }, { upsert: true });
+      await BotConfig.findOneAndUpdate(
+        { key: 'global' },
+        { $set: { raceIntroUrl: null, updatedAt: new Date() } },
+        { upsert: true }
+      );
       return interaction.editReply({
         content:
           '🎬 **Intro vidéo désactivée.**\n' +
@@ -9227,7 +9288,11 @@ async function handleInteraction(interaction) {
       }
       raceIntroUrl  = attachment.url;
       raceIntroPath = null;
-      await BotConfig.findOneAndUpdate({ key: 'global' }, { raceIntroUrl, updatedAt: new Date() }, { upsert: true });
+      await BotConfig.findOneAndUpdate(
+        { key: 'global' },
+        { $set: { raceIntroUrl: attachment.url, updatedAt: new Date() } },
+        { upsert: true }
+      );
       const sizeMb  = (attachment.size / 1_048_576).toFixed(1);
       return interaction.editReply({
         content:
@@ -9252,7 +9317,11 @@ async function handleInteraction(interaction) {
 
     raceIntroUrl  = urlInput;
     raceIntroPath = null;
-    await BotConfig.findOneAndUpdate({ key: 'global' }, { raceIntroUrl, updatedAt: new Date() }, { upsert: true });
+    await BotConfig.findOneAndUpdate(
+      { key: 'global' },
+      { $set: { raceIntroUrl: urlInput, updatedAt: new Date() } },
+      { upsert: true }
+    );
 
     const hostHint = urlInput.includes('archive.org')       ? '🗃️ Internet Archive — URL permanente ✅'
                    : urlInput.includes('catbox.moe')         ? '📦 catbox.moe — URL permanente ✅'
@@ -9270,7 +9339,35 @@ async function handleInteraction(interaction) {
     });
   }
 
-  // ── /admin_fix_emojis ─────────────────────────────────────
+  // ── /admin_test_intro ─────────────────────────────────────
+  if (commandName === 'admin_test_intro') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
+
+    if (!raceIntroUrl && !raceIntroPath) {
+      return interaction.editReply({
+        content: '❌ Aucune intro configurée. Utilise `/admin_set_intro` d\'abord.',
+      });
+    }
+
+    await interaction.editReply({ content: '🎬 Envoi de l\'intro en cours...' });
+
+    try {
+      if (raceIntroUrl) {
+        await interaction.channel.send(raceIntroUrl);
+      } else if (raceIntroPath) {
+        const { AttachmentBuilder } = require('discord.js');
+        await interaction.channel.send({ files: [new AttachmentBuilder(raceIntroPath, { name: 'intro_f1.mp4' })] });
+      }
+      await interaction.followUp({
+        content: `✅ Intro envoyée !\n> URL : \`${(raceIntroUrl || raceIntroPath).slice(0, 80)}\``,
+        ephemeral: true,
+      });
+    } catch(e) {
+      await interaction.followUp({ content: `❌ Erreur lors de l'envoi : \`${e.message}\``, ephemeral: true });
+    }
+    return;
+  }
   if (commandName === 'admin_fix_emojis') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
