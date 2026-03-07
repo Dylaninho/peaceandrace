@@ -4590,12 +4590,12 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     try {
       // ── Envoi de la vidéo comme fichier (player Discord click-to-play, pas d'autoplay) ──
       if (raceIntroUrl) {
-        // URL Discord CDN → re-envoyée comme pièce jointe pour avoir le player "click to play"
-        // (pas une simple URL inline qui s'auto-jouerait)
-        const { AttachmentBuilder } = require('discord.js');
-        const attachment = new AttachmentBuilder(raceIntroUrl, { name: 'intro_f1.mp4' });
-        await channel.send({ files: [attachment] });
+        // Envoyer l'URL directement — Discord génère automatiquement un player vidéo natif.
+        // ⚠️ Ne PAS utiliser AttachmentBuilder(url) : discord.js téléchargerait tout le fichier
+        // en RAM avant d'uploader → crash OOM garanti sur les gros fichiers (200 Mo+).
+        await channel.send(raceIntroUrl);
       } else if (raceIntroPath) {
+        // Fichier local : AttachmentBuilder est OK car Node stream depuis le disque sans tout charger
         const { AttachmentBuilder } = require('discord.js');
         const attachment = new AttachmentBuilder(raceIntroPath, { name: 'intro_f1.mp4' });
         await channel.send({ files: [attachment] });
