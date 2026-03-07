@@ -235,6 +235,7 @@ const PilotGPRecordSchema = new mongoose.Schema({
   points       : { type: Number, default: 0 },
   coins        : { type: Number, default: 0 },
   fastestLap   : { type: Boolean, default: false },
+  driverOfTheDay: { type: Boolean, default: false },
   raceDate     : { type: Date, default: Date.now },
 });
 PilotGPRecordSchema.index({ pilotId: 1, raceDate: -1 });
@@ -3276,14 +3277,18 @@ async function generateDriverOfTheDay(race, finalResults, drivers, channel) {
   const total   = top3.reduce((s, d) => s + Math.max(0, d.score), 0);
   const winner  = top3[0];
 
-  // Pourcentages réalistes — le gagnant a toujours la majorité
-  // Distribution pondérée : gagnant ~50-65%, 2ème ~20-30%, 3ème ~10-20%
-  const rawPcts = top3.map(d => total > 0 ? (Math.max(0, d.score) / total) * 100 : 33);
-  // Forcer un minimum de 5% pour le top 3
-  const pcts = rawPcts.map(p => Math.max(5, Math.round(p)));
-  // Normaliser pour que la somme = 100
-  const pctSum = pcts.reduce((a,b) => a+b, 0);
-  const normalPcts = pcts.map((p, i) => i === 0 ? p + (100 - pctSum) : p);
+  // Pourcentages directement proportionnels aux scores — reflète les vrais écarts
+  // Si un pilote domine les critères, il aura 70%+. Si c'est serré, les % seront proches.
+  const minScore = Math.min(...top3.map(d => d.score));
+  const adjusted = top3.map(d => Math.max(0, d.score - Math.min(0, minScore))); // tout positif
+  const adjSum   = adjusted.reduce((a, b) => a + b, 0);
+  const pcts     = adjSum > 0
+    ? adjusted.map(v => Math.round((v / adjSum) * 100))
+    : [50, 30, 20];
+  // Corriger l'arrondi pour que la somme = 100 exactement
+  const pctSum    = pcts.reduce((a, b) => a + b, 0);
+  const normalPcts = [...pcts];
+  normalPcts[0] += 100 - pctSum;
 
   // ── Contexte narratif pour le gagnant ─────────────────────
   const gained     = winner.placesGained;
@@ -3308,8 +3313,11 @@ async function generateDriverOfTheDay(race, finalResults, drivers, channel) {
     .setTitle(`🏆 DRIVER OF THE DAY — ${race.emoji} ${race.circuit}`)
     .setDescription(
       `*Le vote du public est clos. La performance qui a le plus marqué les esprits ce week-end...*\n\u200B`
-    )
-    .addFields(
+    );
+
+  if (winner.pilot.photoUrl) embed.setThumbnail(winner.pilot.photoUrl);
+
+  embed.addFields(
       {
         name: `${DOTD_COLORS[0]} ${winner.team.emoji} ${winner.pilot.name} — **${normalPcts[0]}%**`,
         value: context,
@@ -3331,6 +3339,12 @@ async function generateDriverOfTheDay(race, finalResults, drivers, channel) {
 
   await sleep(4000);
   await channel.send({ embeds: [embed] });
+
+  // Sauvegarder le DOTD dans le GPRecord du gagnant
+  await PilotGPRecord.findOneAndUpdate(
+    { pilotId: winner.pilot._id, raceId: race._id },
+    { $set: { driverOfTheDay: true } }
+  );
 }
 
 async function generatePostRaceNews(race, finalResults, season, channel) {
@@ -8970,12 +8984,13 @@ async function handleInteraction(interaction) {
     if (vue === 'recent') {
       const recents = allRecs.slice(0, 10);
       const lines = recents.map(r => {
-        const fl = r.fastestLap ? ' ⚡' : '';
-        const gl = gainLoss(r);
-        const pts = r.points > 0 ? ` · **${r.points}pts**` : '';
+        const fl   = r.fastestLap ? ' ⚡' : '';
+        const dotd = r.driverOfTheDay ? ' 🏆' : '';
+        const gl   = gainLoss(r);
+        const pts  = r.points > 0 ? ` · **${r.points}pts**` : '';
         const grid = r.startPos ? ` *(grille P${r.startPos})*` : '';
         return `${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})*\n` +
-               `  ${posStr(r)}${gl}${pts}${fl} — ${r.teamEmoji} ${r.teamName}${grid}`;
+               `  ${posStr(r)}${gl}${pts}${fl}${dotd} — ${r.teamEmoji} ${r.teamName}${grid}`;
       }).join('\n\n');
 
       // Forme récente : 5 derniers
@@ -9067,7 +9082,8 @@ async function handleInteraction(interaction) {
 
       const statsBlock =
         `🥇 **${wins.length}** victoire(s) · 🏆 **${podiums.length}** podium(s) · ❌ **${dnfs.length}** DNF\n` +
-        `⚡ **${flaps.length}** meilleur(s) tour(s) · 📊 **${totalPts}** pts totaux · 💰 **${totalCoins}** 🪙 gagnés\n` +
+        `⚡ **${flaps.length}** meilleur(s) tour(s) · 🏆 **${allRecs.filter(r => r.driverOfTheDay).length}** Driver of the Day\n` +
+        `📊 **${totalPts}** pts totaux · 💰 **${totalCoins}** 🪙 gagnés\n` +
         (bestGain ? `🚀 Meilleure remontée : **+${bestGain.startPos - bestGain.finishPos}** places (${bestGain.circuitEmoji} ${bestGain.circuit} S${bestGain.seasonYear})\n` : '') +
         (bestStreak > 0 ? `🔥 Meilleure série dans les points : **${bestStreak}** GP(s) consécutifs\n` : '') +
         (favCircuit ? `🏟️ Circuit favori : ${favCircuit.emoji} **${favCircuit.circuit}** (moy. **P${favCircuit.avg.toFixed(1)}** sur ${favCircuit.count} courses)\n` : '') +
