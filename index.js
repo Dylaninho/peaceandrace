@@ -52,9 +52,58 @@ const PING_URL     = process.env.APP_URL
 // ── Keep-alive HTTP server (ping toutes les 15min) ──────────
 // ============================================================
 
+const fs = require('fs');
+const path = require('path');
+
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('F1 Bot is alive 🏎️');
+  // ── Route /ping — keep-alive ──────────────────────────────
+  if (req.url === '/ping' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    return res.end('F1 Bot is alive 🏎️');
+  }
+
+  // ── Route /intro — sert le fichier vidéo localement ───────
+  // Place ton MP4 à côté du bot (même dossier) et nomme-le "intro.mp4"
+  // URL d'accès : https://ton-app.onrender.com/intro
+  // Supporte les Range requests (lecture partielle) — requis pour Discord
+  if (req.url === '/intro') {
+    const videoPath = path.join(__dirname, 'intro.mp4');
+    if (!fs.existsSync(videoPath)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      return res.end('intro.mp4 introuvable — place le fichier dans le même dossier que index.js');
+    }
+    const stat = fs.statSync(videoPath);
+    const fileSize = stat.size;
+    const range = req.headers.range;
+
+    if (range) {
+      // Range request (lecture progressive, seek Discord player)
+      const parts   = range.replace(/bytes=/, '').split('-');
+      const start   = parseInt(parts[0], 10);
+      const end     = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+      const chunkSize = end - start + 1;
+      const file    = fs.createReadStream(videoPath, { start, end });
+      res.writeHead(206, {
+        'Content-Range'  : `bytes ${start}-${end}/${fileSize}`,
+        'Accept-Ranges'  : 'bytes',
+        'Content-Length' : chunkSize,
+        'Content-Type'   : 'video/mp4',
+      });
+      return file.pipe(res);
+    } else {
+      // Requête complète
+      res.writeHead(200, {
+        'Content-Length' : fileSize,
+        'Content-Type'   : 'video/mp4',
+        'Accept-Ranges'  : 'bytes',
+      });
+      return fs.createReadStream(videoPath).pipe(res);
+    }
+  }
+
+  // ── 404 pour tout le reste ────────────────────────────────
+  res.writeHead(404);
+  res.end('Not found');
 });
 server.listen(PORT, () => console.log(`✅ Keep-alive server sur port ${PORT} — ping : ${PING_URL}`));
 
@@ -7268,7 +7317,7 @@ async function handleInteraction(interaction) {
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
-    'admin_replan','admin_evolve_cars','admin_reset_rivalites'].includes(commandName);
+    'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -9145,7 +9194,7 @@ async function handleInteraction(interaction) {
   // ── /admin_set_intro ─────────────────────────────────────────
   if (commandName === 'admin_set_intro') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
 
     const attachment = interaction.options.getAttachment('video');
     const urlInput   = interaction.options.getString('url');
@@ -9155,12 +9204,11 @@ async function handleInteraction(interaction) {
       raceIntroUrl  = null;
       raceIntroPath = null;
       await BotConfig.findOneAndUpdate({ key: 'global' }, { raceIntroUrl: null, updatedAt: new Date() }, { upsert: true });
-      return interaction.reply({
+      return interaction.editReply({
         content:
           '🎬 **Intro vidéo désactivée.**\n' +
           'Aucune vidéo ne sera envoyée avant les prochains GPs.\n\n' +
           '> *Pour réactiver : refais `/admin_set_intro` en attachant un fichier ou en collant une URL.*',
-        ephemeral: true,
       });
     }
 
@@ -9168,37 +9216,34 @@ async function handleInteraction(interaction) {
     if (attachment) {
       const isVideo = attachment.contentType && attachment.contentType.startsWith('video/');
       if (!isVideo) {
-        return interaction.reply({
+        return interaction.editReply({
           content:
             '❌ **Le fichier doit être une vidéo** (MP4, MOV, WebM...).\n' +
             `> Type reçu : \`${attachment.contentType || 'inconnu'}\``,
-          ephemeral: true,
         });
       }
       raceIntroUrl  = attachment.url;
       raceIntroPath = null;
       await BotConfig.findOneAndUpdate({ key: 'global' }, { raceIntroUrl, updatedAt: new Date() }, { upsert: true });
       const sizeMb  = (attachment.size / 1_048_576).toFixed(1);
-      return interaction.reply({
+      return interaction.editReply({
         content:
           `🎬 **Intro configurée via pièce jointe** (${sizeMb} Mo)\n\n` +
           `> ⚠️ *Lien CDN Discord — peut expirer après quelques jours.*\n` +
-          `> *Pour une URL permanente, héberge le fichier sur GitHub (raw) ou Cloudflare R2 et utilise le champ \`url\`.*\n` +
+          `> *Pour une URL permanente, héberge le fichier sur Internet Archive ou catbox.moe et utilise le champ \`url\`.*\n` +
           `> *Pour désactiver : \`/admin_set_intro\` sans rien remplir.*`,
-        ephemeral: true,
       });
     }
 
     // ── Priorité 2 : URL externe ──────────────────────────────
     const isValidUrl = urlInput.startsWith('http://') || urlInput.startsWith('https://');
     if (!isValidUrl) {
-      return interaction.reply({
+      return interaction.editReply({
         content:
           '❌ URL invalide — elle doit commencer par `https://`.\n\n' +
           '**Exemples d\'URLs permanentes :**\n' +
-          '> 🐙 GitHub Raw : `https://raw.githubusercontent.com/pseudo/repo/main/intro.mp4`\n' +
-          '> ☁️ Cloudflare R2 : `https://pub-xxx.r2.dev/intro.mp4`',
-        ephemeral: true,
+          '> 🗃️ Internet Archive : `https://archive.org/download/mon-fichier/intro.mp4`\n' +
+          '> 📦 catbox.moe : `https://files.catbox.moe/xxxxxx.mp4`',
       });
     }
 
@@ -9206,20 +9251,19 @@ async function handleInteraction(interaction) {
     raceIntroPath = null;
     await BotConfig.findOneAndUpdate({ key: 'global' }, { raceIntroUrl, updatedAt: new Date() }, { upsert: true });
 
-    // Détecter le type d'hébergement pour rassurer sur la pérennité
-    const hostHint = urlInput.includes('raw.githubusercontent.com') ? '🐙 GitHub Raw — URL permanente ✅'
-                   : urlInput.includes('r2.dev')                    ? '☁️ Cloudflare R2 — URL permanente ✅'
-                   : urlInput.includes('cdn.discordapp.com')         ? '⚠️ Discord CDN — peut expirer'
+    const hostHint = urlInput.includes('archive.org')       ? '🗃️ Internet Archive — URL permanente ✅'
+                   : urlInput.includes('catbox.moe')         ? '📦 catbox.moe — URL permanente ✅'
+                   : urlInput.includes('raw.githubusercontent') ? '🐙 GitHub Raw — URL permanente ✅'
+                   : urlInput.includes('cdn.discordapp.com') ? '⚠️ Discord CDN — peut expirer'
                    : '🔗 Hébergement externe';
 
-    return interaction.reply({
+    return interaction.editReply({
       content:
         `🎬 **Intro vidéo configurée !**\n` +
         `Elle sera envoyée avant chaque GP.\n\n` +
         `${hostHint}\n` +
         `\`${urlInput.length > 80 ? urlInput.slice(0, 77) + '…' : urlInput}\`\n\n` +
         `> *Pour désactiver : \`/admin_set_intro\` sans rien remplir.*`,
-      ephemeral: true,
     });
   }
 
