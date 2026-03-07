@@ -6738,20 +6738,20 @@ const REGULATION_PRETEXTS = [
   },
   {
     title : '🛞 Changement de fournisseur de pneus & composés 2025',
-    body  : 'Nouveaux composés pneumatiques pour toute la saison. Les voitures très efficaces sur les anciens pneus ' +
-            'pourraient souffrir, tandis que d'autres trouveront une fenêtre de fonctionnement plus large.',
+    body  : "Nouveaux composés pneumatiques pour toute la saison. Les voitures très efficaces sur les anciens pneus " +
+            "pourraient souffrir, tandis que d'autres trouveront une fenêtre de fonctionnement plus large.",
     focus : { conservationPneus: 1.8, gestionPneus: 1.0, vitesseMoyenne: 1.2, refroidissement: 1.0, vitesseMax: 0.8, drs: 0.8, dirtyAir: 1.0 },
   },
   {
     title : '🏎️ Révolution châssis — Voitures à effet de sol renforcé',
-    body  : 'Retour aux tunnels Venturi complets. Les équipes qui maîtrisaient l'aéro traditionnelle repartent presque ' +
-            'de zéro, tandis que certains outsiders pourraient surprendre dès les premiers tests.',
+    body  : "Retour aux tunnels Venturi complets. Les équipes qui maîtrisaient l'aéro traditionnelle repartent presque " +
+            "de zéro, tandis que certains outsiders pourraient surprendre dès les premiers tests.",
     focus : { vitesseMoyenne: 1.8, dirtyAir: 1.5, vitesseMax: 1.0, drs: 0.7, refroidissement: 1.0, conservationPneus: 1.2 },
   },
   {
     title : '📡 Restrictions DRS & systèmes de recharge',
-    body  : 'La FIA PL réduit la durée d'activation du DRS et impose de nouveaux plafonds sur les systèmes ERS. ' +
-            'Les circuits rapides vont changer de visage. Les spécialistes de la gestion thermique sont avantagés.',
+    body  : "La FIA PL réduit la durée d'activation du DRS et impose de nouveaux plafonds sur les systèmes ERS. " +
+            "Les circuits rapides vont changer de visage. Les spécialistes de la gestion thermique sont avantagés.",
     focus : { drs: 1.8, vitesseMax: 1.5, refroidissement: 1.3, dirtyAir: 0.9, conservationPneus: 1.0, vitesseMoyenne: 0.8 },
   },
 ];
@@ -6780,7 +6780,6 @@ async function applyRegulationChange(season) {
   try {
     const ch = RACE_CHANNEL ? await client.channels.fetch(RACE_CHANNEL).catch(() => null) : null;
     if (ch) {
-      const embed = require('discord.js') ? null : null; // EmbedBuilder déjà importé
       const reg = new EmbedBuilder()
         .setTitle(`📋 NOUVELLE RÉGLEMENTATION — Saison ${season.year}`)
         .setColor('#FF6600')
@@ -6799,7 +6798,7 @@ ${pretext.body}
     }
   } catch(e) { /* pas de channel = silencieux */ }
 
-  console.log(\`🔄 Réglementation "${pretext.title}" appliquée (saison \${season.year})\`);
+  console.log(`🔄 Réglementation "${pretext.title}" appliquée (saison ${season.year})`);
 }
 
 // ============================================================
@@ -6827,20 +6826,195 @@ ${pretext.body}
 
 // Délai aléatoire entre 10min et 3h avant de publier la "rumeur"
 // pour simuler le temps que les infos fuient dans le paddock
+// ============================================================
+//  📰 RÉACTION PILOTE AU REFUS D'OFFRE
+// ============================================================
+async function publishRefusalReaction(pilot, offer) {
+  // Seulement 40% de chance d'article — pas systématique
+  if (Math.random() > 0.40) return;
+  const season = await getActiveSeason();
+  if (!season) return;
+  const team = await Team.findById(offer.teamId);
+  if (!team) return;
+
+  const ch = RACE_CHANNEL ? await client.channels.fetch(RACE_CHANNEL).catch(() => null) : null;
+  if (!ch) return;
+
+  const ov   = overallRating(pilot);
+  const arch = pilot.archetype || 'calculateur';
+
+  // Ton de la réaction selon l'archétype du pilote
+  const reactions = {
+    guerrier: [
+      `❌ **Rumeur Paddock** — **${pilot.name}** aurait décliné l'approche de **${team.emoji} ${team.name}**. Son entourage parle d'un "désaccord sur l'ambition sportive". Il vise plus haut.`,
+      `📡 **Pitlane Insider** — **${pilot.name}** et **${team.name}** : les négociations ont capoté. Le pilote n'aurait pas apprécié les conditions proposées. La chasse est encore ouverte.`,
+    ],
+    icone: [
+      `🗞️ **PL Racing News** — **${pilot.name}** reste libre. L'écurie **${team.emoji} ${team.name}** aurait fait une approche, sans suite. Son management reste "serein" sur la situation.`,
+      `📡 **Pitlane Insider** — Pas d'accord entre **${pilot.name}** et **${team.name}**. Les deux camps restent discrets. On parle de divergences sur le projet à long terme.`,
+    ],
+    rookie_ambitieux: [
+      `🔄 **Paddock Whispers** — **${pilot.name}** aurait repoussé une offre de **${team.emoji} ${team.name}**. Surprenant pour un pilote en quête d'un baquet. Il parie sur mieux ?`,
+      `📡 **Pitlane Insider** — **${pilot.name}** n'a pas donné suite à **${team.name}**. Son agent indique qu'il "attend la bonne opportunité". Audacieux, ou imprudent ?`,
+    ],
+    calculateur: [
+      `🗞️ **PL Racing News** — Les discussions entre **${pilot.name}** et **${team.emoji} ${team.name}** n'ont pas abouti. Aucun commentaire des deux côtés. Dossier fermé, pour l'instant.`,
+      `📡 L'approche de **${team.name}** vers **${pilot.name}** n'a pas convaincu. Son entourage évoque un "calcul stratégique". Il attend d'autres options.`,
+    ],
+    bad_boy: [
+      `💥 **Paddock Whispers** — **${pilot.name}** a envoyé balader **${team.emoji} ${team.name}** ? En tout cas, les discussions sont terminées. Son agent reste muet, ce qui dit tout.`,
+      `🔄 **Rumeur** — **${pilot.name}** et **${team.name}**, c'est non. Selon nos sources, le courant ne passait pas. Le mercato réserve encore des surprises.`,
+    ],
+    vieux_sage: [
+      `🗞️ **PL Racing News** — **${pilot.name}** ne rejoindra pas **${team.emoji} ${team.name}**. "Ce n'était pas le bon projet", aurait-il confié à son entourage. Sage, ou exigeant ?`,
+      `📡 **Pitlane Insider** — Pas de suite pour **${pilot.name}** chez **${team.name}**. Le vétéran sait ce qu'il veut. La question est : le marché lui donnera-t-il raison ?`,
+    ],
+  };
+
+  const pool = reactions[arch] || reactions.calculateur;
+  const msg  = pool[Math.floor(Math.random() * pool.length)];
+
+  // Délai aléatoire 30min–6h pour paraître organique
+  const delay = Math.floor(Math.random() * (6 * 60 - 30) + 30) * 60 * 1000;
+  setTimeout(async () => {
+    try { await ch.send(msg); } catch(e) { /* silencieux */ }
+  }, delay);
+}
+
+// ============================================================
+//  📊 BILAN MERCATO OFFICIEL (posté après /reveal_grille)
+// ============================================================
+async function generateMercatoBilan(season, channel) {
+  const allTeams  = await Team.find();
+  const allPilots = await Pilot.find();
+
+  const moves = [];
+  for (const pilot of allPilots) {
+    const accepted = await TransferOffer.findOne({ pilotId: pilot._id, status: 'accepted' }).lean();
+    if (accepted) {
+      const toTeam = await Team.findById(accepted.teamId);
+      moves.push({ pilot, team: toTeam, offer: accepted });
+    }
+  }
+
+  const free   = allPilots.filter(p => !p.teamId);
+  const stayed = allPilots.filter(p => p.teamId && !moves.find(m => String(m.pilot._id) === String(p._id)));
+
+  const parts = [];
+
+  if (moves.length) {
+    const moveLines = ['**🔄 Transferts actés :**'];
+    for (const { pilot, team } of moves) {
+      const ov   = overallRating(pilot);
+      const tier = ratingTier(ov);
+      moveLines.push(tier.badge + ' **' + pilot.name + '** → ' + team.emoji + ' **' + team.name + '**');
+    }
+    parts.push(moveLines.join('\n'));
+  }
+
+  if (stayed.length) {
+    const stayLines = ['**🔒 Prolongations / Continuité :**'];
+    const sample = stayed.slice(0, 6);
+    for (const p of sample) {
+      const team = allTeams.find(t => String(t._id) === String(p.teamId));
+      if (team) stayLines.push('↩️ **' + p.name + '** reste chez ' + team.emoji + ' **' + team.name + '**');
+    }
+    if (stayed.length > 6) stayLines.push('_...et ' + (stayed.length - 6) + ' autres_');
+    parts.push(stayLines.join('\n'));
+  }
+
+  if (free.length) {
+    parts.push('⚠️ **Sans écurie (' + free.length + ') :** ' + free.map(p => p.name).join(', '));
+  }
+
+  const narratives = [
+    'Un mercato agité qui redistribue les cartes. Les surprises sont au rendez-vous.',
+    'Le paddock a vécu une intersaison sous tension. Certains moves vont faire parler.',
+    'Peu de transferts finalement — la stabilité prime. La hiérarchie devrait se confirmer.',
+    'Un marché actif mais sélectif. Les grandes écuries ont joué la carte de la fidélité.',
+    'Intersaison mouvementée. Les ambitions sont là — reste à les concrétiser sur la piste.',
+  ];
+  parts.push('_' + narratives[Math.floor(Math.random() * narratives.length)] + '_');
+
+  const embed = new EmbedBuilder()
+    .setTitle('📋 BILAN MERCATO — Intersaison ' + season.year)
+    .setColor('#2F4F4F')
+    .setDescription(parts.join('\n\n').slice(0, 4000))
+    .setFooter({ text: 'Que le meilleur gagne. Bonne saison à tous 🏎️' });
+
+  await channel.send({ embeds: [embed] });
+}
+// ============================================================
+//  🎙️ CONFÉRENCE DE PRESSE PRÉ-SAISON (auto au 1er GP)
+// ============================================================
+async function generatePreseasonPressConf(season, channel) {
+  const allTeams  = await Team.find();
+  const allPilots = await Pilot.find({ teamId: { $ne: null } });
+
+  const byTeam = new Map();
+  for (const t of allTeams) byTeam.set(String(t._id), { team: t, pilots: [] });
+  for (const p of allPilots) {
+    const entry = byTeam.get(String(p.teamId));
+    if (entry) entry.pilots.push(p);
+  }
+
+  const teamBlocks = [];
+  for (const { team, pilots } of byTeam.values()) {
+    if (!pilots.length) continue;
+    const isTop = team.budget >= 120;
+    const isMid = team.budget >= 80 && team.budget < 120;
+    const pilotNames = pilots.map(p => '**' + p.name + '**').join(' & ');
+
+    let tone;
+    if (isTop) {
+      const topTones = [
+        `L'equipe arrive confiante. Nous avons le materiel pour le titre, declare la direction.`,
+        `Cette saison est la notre. Les ingenieurs avancent des chiffres impressionnants.`,
+        `Pas de langue de bois chez ${team.name} : ils visent le titre constructeurs.`,
+      ];
+      tone = topTones[Math.floor(Math.random() * topTones.length)];
+    } else if (isMid) {
+      const midTones = [
+        `Nous voulons bousculer les grands. Ambitions affichees, moyens mesures.`,
+        `L'equipe parle de progression et de points reguliers. Prudence calculee.`,
+        `On a bosse dur cet hiver. La voiture a evolue dans le bon sens.`,
+      ];
+      tone = midTones[Math.floor(Math.random() * midTones.length)];
+    } else {
+      const smallTones = [
+        `On est la pour apprendre et marquer des points quand l'occasion se presente.`,
+        `Humilite dans les mots, mais determination dans les yeux. ${team.name} veut surprendre.`,
+        `Cette saison, on veut montrer qu'on a notre place en PL. Objectif : top 8 regulier.`,
+      ];
+      tone = smallTones[Math.floor(Math.random() * smallTones.length)];
+    }
+
+    teamBlocks.push(team.emoji + ' **' + team.name + '** — ' + pilotNames + '\n> ' + tone);
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('🎙️ CONFÉRENCE DE PRESSE PRÉ-SAISON ' + season.year)
+    .setColor('#1a1a2e')
+    .setDescription(
+      "*Les équipes présentent leurs pilotes et leurs ambitions avant le coup d'envoi de la saison.*\n\n" +
+      teamBlocks.join('\n\n').slice(0, 3800)
+    )
+    .setFooter({ text: 'Saison ' + season.year + ' — PL Racing • Que le spectacle commence 🏁' });
+
+  await channel.send({ embeds: [embed] });
+}
+
 async function publishSigningRumors(realPilot, realTeam, offer) {
   const season = await getActiveSeason();
   if (!season) return;
   const allPilots = await Pilot.find();
   const allTeams  = await Team.find();
 
-  // Choisir : publie-t-on la vraie signature ou une fausse rumeur ?
-  // 50% vrai immédiat, 30% vrai avec délai, 20% faux rumeur d'abord
   const roll = Math.random();
-
-  const delay = Math.floor(Math.random() * (3 * 60 - 10) + 10) * 60 * 1000; // 10min → 3h
+  const delay = Math.floor(Math.random() * (3 * 60 - 10) + 10) * 60 * 1000;
 
   if (roll < 0.50) {
-    // ── Vraie signature, publiée après délai ───────────────
+    // Vraie signature publiée après délai
     setTimeout(async () => {
       try {
         const ch = await client.channels.fetch(RACE_CHANNEL);
@@ -6848,35 +7022,36 @@ async function publishSigningRumors(realPilot, realTeam, offer) {
         const ov   = overallRating(realPilot);
         const tier = ratingTier(ov);
         const source = Math.random() < 0.5 ? '🗞️ **PL Racing News**' : '📡 **Pitlane Insider**';
-        const lines = [
-          \`${source} — **OFFICIEL : ${realPilot.name} signe chez ${realTeam.emoji} ${realTeam.name} !**\n${tier.badge} Le transfert est confirmé. Contrat de **${offer.seasons}** saison(s).\`,
-          \`${source} — C'est officiel. **${realPilot.name}** rejoint **${realTeam.emoji} ${realTeam.name}** pour la prochaine saison. Les deux parties ont confirmé l'accord.\n${tier.badge} *(${ov} overall)*\`,
-          \`🖊️ **Signature confirmée** — ${realTeam.emoji} **${realTeam.name}** annonce l'arrivée de **${realPilot.name}** dans son line-up. Durée : ${offer.seasons} saison(s).\`,
+        const msgs = [
+          `${source} — **OFFICIEL : ${realPilot.name} signe chez ${realTeam.emoji} ${realTeam.name} !**\n${tier.badge} Le transfert est confirmé. Contrat de **${offer.seasons}** saison(s).`,
+          `${source} — C'est officiel. **${realPilot.name}** rejoint **${realTeam.emoji} ${realTeam.name}** pour la prochaine saison.\n${tier.badge} *(${ov} overall)*`,
+          `🖊️ **Signature confirmée** — ${realTeam.emoji} **${realTeam.name}** annonce l'arrivée de **${realPilot.name}**. Durée : ${offer.seasons} saison(s).`,
         ];
-        await ch.send(lines[Math.floor(Math.random() * lines.length)]);
+        await ch.send(msgs[Math.floor(Math.random() * msgs.length)]);
       } catch(e) { console.error('Signing announce error:', e.message); }
     }, delay);
 
   } else if (roll < 0.80) {
-    // ── Fausse rumeur PURE — lie le pilote à une mauvaise équipe, ça reste ainsi ──
+    // Fausse rumeur pure — mauvaise équipe, pas de rectification
     const fakeTeam = allTeams.filter(t => String(t._id) !== String(realTeam._id))[Math.floor(Math.random() * (allTeams.length - 1))];
     setTimeout(async () => {
       try {
         const ch = await client.channels.fetch(RACE_CHANNEL);
         if (!ch) return;
-        const fakeLines = [
-          \`🔄 **Rumeur — Paddock Whispers** : Des sources proches du dossier indiquent que **${realPilot.name}** serait très proche d'un accord avec **${fakeTeam?.emoji || '🏎️'} ${fakeTeam?.name || 'une écurie surprise'}**. Rien de signé encore.\`,
-          \`📡 **Pitlane Insider** — **${realPilot.name}** et **${fakeTeam?.emoji || '🏎️'} ${fakeTeam?.name || 'une grande écurie'}** : les discussions seraient avancées. Son entourage reste silencieux.\`,
-          \`🗞️ Exclusif — **${realPilot.name}** aurait été aperçu en réunion avec des dirigeants de **${fakeTeam?.emoji || '🏎️'} ${fakeTeam?.name || 'une écurie'}**. Aucun commentaire des deux côtés.\`,
-          \`📡 Un agent bien informé confirme à **Pitlane Insider** : **${realPilot.name}** et **${fakeTeam?.name || 'une écurie'}** seraient en négociations finales. Signature imminente ?\`,
+        const ft = fakeTeam?.emoji || '🏎️';
+        const fn = fakeTeam?.name  || 'une écurie surprise';
+        const msgs = [
+          `🔄 **Rumeur — Paddock Whispers** : Des sources proches du dossier indiquent que **${realPilot.name}** serait très proche d'un accord avec **${ft} ${fn}**. Rien de signé encore.`,
+          `📡 **Pitlane Insider** — **${realPilot.name}** et **${ft} ${fn}** : les discussions seraient avancées. Son entourage reste silencieux.`,
+          `🗞️ Exclusif — **${realPilot.name}** aurait été aperçu en réunion avec des dirigeants de **${ft} ${fn}**. Aucun commentaire des deux côtés.`,
+          `📡 Un agent bien informé confirme à **Pitlane Insider** : **${realPilot.name}** et **${fn}** seraient en négociations finales. Signature imminente ?`,
         ];
-        await ch.send(fakeLines[Math.floor(Math.random() * fakeLines.length)]);
-        // Pas de rectification — la rumeur reste dans la nature jusqu'au reveal grille
+        await ch.send(msgs[Math.floor(Math.random() * msgs.length)]);
       } catch(e) { console.error('Signing fake rumor error:', e.message); }
     }, delay);
 
   } else {
-    // ── Fausse rumeur d'un autre pilote — on cite le mauvais nom, la vérité ne sort pas ──
+    // Fausse rumeur — mauvais pilote cité, vérité jamais corrigée
     const fakePilot = allPilots.filter(p => String(p._id) !== String(realPilot._id) && !p.teamId)[0]
       || allPilots.filter(p => String(p._id) !== String(realPilot._id))[Math.floor(Math.random() * (allPilots.length - 1))];
     if (!fakePilot) return;
@@ -6884,13 +7059,12 @@ async function publishSigningRumors(realPilot, realTeam, offer) {
       try {
         const ch = await client.channels.fetch(RACE_CHANNEL);
         if (!ch) return;
-        const wrongLines = [
-          \`🔄 **Rumeur — Paddock Whispers** : **${fakePilot.name}** serait sur le point de rejoindre **${realTeam.emoji} ${realTeam.name}**. Nos sources sont formelles.\`,
-          \`📡 **Pitlane Insider** — C'est **${fakePilot.name}** qui serait la priorité de **${realTeam.emoji} ${realTeam.name}** pour la prochaine saison. Dossier en cours.\`,
-          \`🗞️ Selon plusieurs sources concordantes, **${realTeam.emoji} ${realTeam.name}** aurait jeté son dévolu sur **${fakePilot.name}**. L'officialisation se ferait dans les prochains jours.\`,
+        const msgs = [
+          `🔄 **Rumeur — Paddock Whispers** : **${fakePilot.name}** serait sur le point de rejoindre **${realTeam.emoji} ${realTeam.name}**. Nos sources sont formelles.`,
+          `📡 **Pitlane Insider** — C'est **${fakePilot.name}** qui serait la priorité de **${realTeam.emoji} ${realTeam.name}** pour la prochaine saison. Dossier en cours.`,
+          `🗞️ Selon plusieurs sources concordantes, **${realTeam.emoji} ${realTeam.name}** aurait jeté son dévolu sur **${fakePilot.name}**. L'officialisation se ferait dans les prochains jours.`,
         ];
-        await ch.send(wrongLines[Math.floor(Math.random() * wrongLines.length)]);
-        // Pas de correction — les fans devront attendre le /reveal_grille pour la vérité
+        await ch.send(msgs[Math.floor(Math.random() * msgs.length)]);
       } catch(e) { console.error('Signing distraction rumor error:', e.message); }
     }, delay);
   }
@@ -6904,7 +7078,6 @@ async function revealFinalGrid(season, channel) {
   const allTeams  = await Team.find();
   const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
 
-  // Grouper par équipe
   const byTeam = new Map();
   for (const pilot of allPilots) {
     const tid = String(pilot.teamId);
@@ -6919,26 +7092,34 @@ async function revealFinalGrid(season, channel) {
     const pilotStr = pilots.map(p => {
       const ov   = overallRating(p);
       const tier = ratingTier(ov);
-      return \`${tier.badge} **${p.name}** *(${ov})*\`;
+      return `${tier.badge} **${p.name}** *(${ov})*`;
     }).join(' · ');
-    gridDesc += \`${team.emoji} **${team.name}** — ${pilotStr}\n\`;
+    gridDesc += `${team.emoji} **${team.name}** — ${pilotStr}
+`;
   }
 
   const freePilots = await Pilot.find({ teamId: null });
   if (freePilots.length) {
-    gridDesc += \`\n⚠️ *Pilote(s) sans écurie : ${freePilots.map(p => p.name).join(', ')}*\`;
+    gridDesc += `
+⚠️ *Pilote(s) sans écurie : ${freePilots.map(p => p.name).join(', ')}*`;
   }
 
   const embed = new EmbedBuilder()
-    .setTitle(\`🏁 GRILLE OFFICIELLE — Saison ${season.year + 1}\`)
+    .setTitle(`🏁 GRILLE OFFICIELLE — Saison ${season.year + 1}`)
     .setColor('#FFD700')
     .setDescription(
-      \`La grille est complète. Voici le line-up officiel pour la prochaine saison !\n\n\` + gridDesc
+      `La grille est complète. Voici le line-up officiel pour la prochaine saison !
+
+` + gridDesc
     )
     .setFooter({ text: 'Bonne chance à tous les pilotes. Que le meilleur gagne. 🏆' });
 
   await channel.send({ embeds: [embed] });
+
+  // Bilan mercato juste après la révélation de grille
+  await generateMercatoBilan(season, channel).catch(e => console.error('MercatoBilan error:', e.message));
 }
+
 
 async function startTransferPeriod() {
   const season = await getActiveSeason();
@@ -7516,6 +7697,9 @@ const commands = [
   new SlashCommandBuilder().setName('admin_grille_next')
     .setDescription('[ADMIN] Voir la grille réelle de la prochaine saison (contrats signés + pilotes libres)'),
 
+  new SlashCommandBuilder().setName('valeur_marche')
+    .setDescription('Classement de valeur marchande — les pilotes les plus convoités du mercato'),
+
   new SlashCommandBuilder().setName('reveal_grille')
     .setDescription('[ADMIN] Révèle la grille complète de la prochaine saison'),
 
@@ -7914,6 +8098,8 @@ async function handleInteraction(interaction) {
 
     if (action === 'reject') {
       await TransferOffer.findByIdAndUpdate(offerId, { status: 'rejected' });
+      // Réaction paddock : chance d'article de news sur le refus
+      publishRefusalReaction(pilot, offer).catch(() => {});
       return interaction.update({ content: '🚫 Offre refusée.', embeds: [], components: [] });
     }
 
@@ -7967,7 +8153,7 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_second_wave', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race', 'reveal_grille', 'admin_grille_next'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_second_wave', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race', 'reveal_grille', 'admin_grille_next', 'valeur_marche'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
@@ -8901,6 +9087,7 @@ async function handleInteraction(interaction) {
     if (!pilotForRefuse || pilotForRefuse.discordId !== interaction.user.id)
       return interaction.editReply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'rejected' });
+    publishRefusalReaction(pilotForRefuse, offer).catch(() => {});
     return interaction.editReply({ content: `🚫 Offre refusée pour **${pilotForRefuse.name}**.`, ephemeral: true });
   }
 
@@ -9814,6 +10001,13 @@ async function handleInteraction(interaction) {
     try {
       const season = await createNewSeason();
       await interaction.editReply(`✅ Saison **${season.year}** créée ! ${CIRCUITS.length} GP au calendrier.`);
+      // Conf de presse pré-saison : envoyée 30 secondes après la création pour ne pas noyer le message
+      const ch = interaction.channel;
+      if (ch) {
+        setTimeout(() => {
+          generatePreseasonPressConf(season, ch).catch(e => console.error('PreseasonPress error:', e.message));
+        }, 30000);
+      }
     } catch(e) { await interaction.editReply(`❌ ${e.message}`); }
   }
 
@@ -10207,47 +10401,91 @@ async function handleInteraction(interaction) {
       }
     }
 
-    let desc = '';
+    const lines2 = [];
     for (const { team, pilots } of byTeam.values()) {
       if (!pilots.length) {
-        desc += `${team.emoji} **${team.name}** — ⚠️ *Aucun pilote signé*
-`;
+        lines2.push(team.emoji + ' **' + team.name + '** — ⚠️ *Aucun pilote signé*');
         continue;
       }
-      const pilotLines = await Promise.all(pilots.map(async p => {
+      lines2.push(team.emoji + ' **' + team.name + '**');
+      for (const p of pilots) {
         const contract = await Contract.findOne({ pilotId: p._id, active: true }).lean();
-        const ov = overallRating(p);
+        const ov   = overallRating(p);
         const tier = ratingTier(ov);
-        const sal  = contract ? `${contract.salaireBase}🪙/course` : '*sans contrat actif*';
-        const dur  = contract ? `${contract.seasonsRemaining} saison(s)` : '';
-        return `  ${tier.badge} **${p.name}** *(${ov})* — ${sal}${dur ? ' · ' + dur : ''}`;
-      }));
-      desc += `${team.emoji} **${team.name}**
-${pilotLines.join('
-')}
-`;
+        const sal  = contract ? contract.salaireBase + '🪙/course' : '*sans contrat actif*';
+        const dur  = contract ? contract.seasonsRemaining + ' saison(s)' : '';
+        lines2.push('  ' + tier.badge + ' **' + p.name + '** *(' + ov + ')* — ' + sal + (dur ? ' · ' + dur : ''));
+      }
     }
 
     if (freePilots.length) {
-      desc += `
-⚠️ **Pilotes libres (${freePilots.length}) :**
-`;
+      lines2.push('\\n⚠️ **Pilotes libres (' + freePilots.length + ') :**');
       for (const p of freePilots) {
-        const ov = overallRating(p);
-        const tier = ratingTier(ov);
+        const ov      = overallRating(p);
+        const tier    = ratingTier(ov);
         const pending = await TransferOffer.countDocuments({ pilotId: p._id, status: 'pending' });
-        desc += `  ${tier.badge} **${p.name}** *(${ov})* — ${pending} offre(s) pending
-`;
+        lines2.push('  ' + tier.badge + ' **' + p.name + '** *(' + ov + ')* — ' + pending + ' offre(s) pending');
       }
     }
 
-    // Envoyer en éphémère admin seulement
     const embed = new EmbedBuilder()
       .setTitle('🔒 [ADMIN] Grille réelle — Prochaine saison')
       .setColor('#444444')
-      .setDescription(desc.slice(0, 4000) || 'Aucune donnée')
+      .setDescription(lines2.join('\n').slice(0, 4000) || 'Aucune donnée')
       .setFooter({ text: 'Visible admins uniquement — ne pas divulguer avant /reveal_grille' });
     return interaction.editReply({ embeds: [embed], ephemeral: true });
+  }
+
+  // ── /valeur_marche ───────────────────────────────────────
+  // Classement des pilotes par nombre d'offres reçues — visible seulement pendant le mercato
+  if (commandName === 'valeur_marche') {
+    const season = await getActiveSeason();
+    const isTransfer = season && season.status === 'transfer';
+
+    // Compter les offres reçues par pilote (toutes statuts confondus sauf expired automatique)
+    const allOffers = await TransferOffer.find({ status: { $in: ['pending', 'rejected', 'accepted'] } }).lean();
+    const countByPilot = {};
+    for (const o of allOffers) {
+      const key = String(o.pilotId);
+      countByPilot[key] = (countByPilot[key] || 0) + 1;
+    }
+
+    if (!Object.keys(countByPilot).length) {
+      return interaction.editReply({ content: '📭 Aucune offre enregistrée ce mercato. Revenez plus tard.', ephemeral: false });
+    }
+
+    // Trier par nombre d'offres desc
+    const ranked = Object.entries(countByPilot)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+
+    const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+    const lines2 = [];
+    for (let i = 0; i < ranked.length; i++) {
+      const [pilotId, count] = ranked[i];
+      const pilot = await Pilot.findById(pilotId).lean();
+      if (!pilot) continue;
+      const ov   = overallRating(pilot);
+      const tier = ratingTier(ov);
+      // Flou sur le nb exact d'offres : on donne une fourchette pour garder le mystère
+      const flouLabel = count >= 4 ? 'Très convoité 🔥' : count === 3 ? 'Courtisé 📬' : count === 2 ? 'Approché 📩' : 'En discussions 🤝';
+      const teamLine  = pilot.teamId
+        ? '' // signé — pas de team révélée avant reveal_grille
+        : ' *(libre)*';
+      lines2.push(medals[i] + ' ' + tier.badge + ' **' + pilot.name + '**' + teamLine + ' — ' + flouLabel);
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('💰 Valeur Marchande — Mercato ' + (season?.year || ''))
+      .setColor('#C0392B')
+      .setDescription(
+        '*Les pilotes les plus convoites de cette fenetre de transferts.*\n' +
+        '*(Classement base sur les approches recues — les destinations restent secretes.)*\n\n' +
+        lines2.join('\n')
+      )
+      .setFooter({ text: isTransfer ? 'Mercato en cours — classement temps réel' : 'Mercato terminé — classement final' });
+
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /pilotes_libres ──────────────────────────────────────
