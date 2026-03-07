@@ -4726,6 +4726,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     const overtakeMentioned = new Set(); // pilotes déjà narratés comme attaquant OU passé ce tour
     const lapDnfs      = []; // DNFs survenus CE tour — pour expliquer le SC
     const lapIncidents = []; // incidents ce tour pour SC logic
+    // let — mis à jour après résolution SC plus bas dans le tour
+    let scActive = scState.state !== 'NONE';
 
     // ── Changement de météo dynamique ───────────────────────
     if (lap === nextWeatherChangeLap && lap < totalLaps - 5) {
@@ -5014,7 +5016,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     // ── Safety Car (APRÈS les incidents — on peut citer la cause) ──
     const prevScState = scState.state;
     scState = resolveSafetyCar(scState, lapIncidents);
-    const scActive = scState.state !== 'NONE';
+    // Mettre à jour scActive après résolution SC
+    scActive = scState.state !== 'NONE';
 
     // ── Bunching SC : au DÉCLENCHEMENT, resserrer les écarts ──
     if (scState.state !== 'NONE' && prevScState === 'NONE') {
