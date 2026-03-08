@@ -13037,15 +13037,18 @@ async function handleInteraction(interaction) {
 
     // ── PUBLISH (force-post pour articles orphelins après redémarrage) ──
     if (sub === 'publish') {
+      console.log(`[admin_queue publish] Demande de publication forcée — shortId reçu : "${interaction.options.getString('id')}"`);
       const shortId = interaction.options.getString('id').trim().toUpperCase();
 
       try {
         const queued = await NewsArticle.find({ queued: true }).lean();
+        console.log(`[admin_queue publish] ${queued.length} article(s) en file — recherche ID ${shortId}`);
         const match  = queued.find(a => String(a._id).slice(-6).toUpperCase() === shortId);
 
         if (!match) {
           return interaction.editReply({
             content: `❌ Aucun article en file avec l'ID \`${shortId}\`. Vérifie avec \`/admin_queue list\`.`,
+            ephemeral: true,
           });
         }
 
@@ -13059,7 +13062,7 @@ async function handleInteraction(interaction) {
         // Récupérer le channel de news
         const ch = RACE_CHANNEL ? await client.channels.fetch(RACE_CHANNEL).catch(() => null) : null;
         if (!ch) {
-          return interaction.editReply({ content: '❌ Channel de news introuvable (RACE_CHANNEL_ID manquant ou invalide).' });
+          return interaction.editReply({ content: '❌ Channel de news introuvable (RACE_CHANNEL_ID manquant ou invalide).', ephemeral: true });
         }
 
         // Marquer comme publié en BDD
@@ -13077,20 +13080,23 @@ async function handleInteraction(interaction) {
         const pilotsStr = pilots.map(p => p.name).join(' vs ');
         const wasOrphan = !existingTimer ? ' *(timer perdu — article orphelin récupéré)*' : '';
 
+        console.log(`[admin_queue publish] ✅ Article ${shortId} publié avec succès.`);
         return interaction.editReply({
           content: [
             `📤 Article \`${shortId}\` **publié immédiatement**.${wasOrphan}`,
             `📰 *${match.headline.slice(0, 80)}${match.headline.length > 80 ? '…' : ''}*`,
             `👥 Pilotes : **${pilotsStr}**`,
           ].join('\n'),
+          ephemeral: true,
         });
       } catch(e) {
         console.error('[admin_queue publish]', e);
-        return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
+        return interaction.editReply({ content: `❌ Erreur : ${e.message}`, ephemeral: true });
       }
     }
 
-    return interaction.editReply({ content: '❌ Sous-commande inconnue.' });
+    console.warn(`[admin_queue] ⚠️ Sous-commande inconnue reçue : "${sub}"`);
+    return interaction.editReply({ content: `❌ Sous-commande inconnue : \`${sub}\``, ephemeral: true });
   }
 
   if (commandName === 'admin_fix_emojis') {
