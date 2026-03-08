@@ -12818,8 +12818,9 @@ async function handleInteraction(interaction) {
   // ================================================================
   if (commandName === 'admin_queue') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
+    await interaction.deferReply({ ephemeral: true });
     const sub = interaction.options.getSubcommand();
 
     // ── LIST ──────────────────────────────────────────────────
