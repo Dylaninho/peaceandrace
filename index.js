@@ -6855,6 +6855,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     const overtakeMentioned = new Set(); // pilotes déjà narratés comme attaquant OU passé ce tour
     const lapDnfs      = []; // DNFs survenus CE tour — pour expliquer le SC
     const lapIncidents = []; // incidents ce tour pour SC logic
+    let trafficEscapeAnnouncedThisLap = false; // max 1 message "se dégage du trafic" par tour
     // let — mis à jour après résolution SC plus bas dans le tour
     let scActive = scState.state !== 'NONE';
 
@@ -7271,9 +7272,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         if ((driver.trafficLapsLeft || 0) > 0) {
           lt += 1500 + randInt(0, 1000);
           driver.trafficLapsLeft--;
-          if (driver.trafficLapsLeft === 0) {
-            events.push({ priority: 3, text:
-              `🚦 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** se dégage du trafic ! Les pneus frais peuvent maintenant faire la différence.`
+          // Max 1 message "se dégage du trafic" par tour — évite le spam multi-pilotes
+          if (driver.trafficLapsLeft === 0 && !trafficEscapeAnnouncedThisLap) {
+            trafficEscapeAnnouncedThisLap = true;
+            events.push({ priority: 2, text:
+              `🚦 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** parvient à se dégager du trafic après son arrêt.`
             });
           }
         }
@@ -8217,18 +8220,37 @@ const exitNeighborStr = neighborAhead && neighborBehind
   // Snapshot des positions AVANT pénalités pour détecter les changements
   const posBefore = new Map(drivers.filter(d => !d.dnf).map(d => [String(d.pilot._id), d.pos]));
 
-  for (const inv of pendingInvestigations) {
+  // Dédupliquer : max 1 investigation jugée par attaquant (la plus grave = dernier contact)
+  const dedupInvestigations = [];
+  const seenAttackers = new Set();
+  for (const inv of [...pendingInvestigations].reverse()) {
+    if (!seenAttackers.has(inv.attackerId)) {
+      dedupInvestigations.push(inv);
+      seenAttackers.add(inv.attackerId);
+    }
+  }
+
+  for (const inv of dedupInvestigations) {
     if (Math.random() < 0.55) { // 55% de chance de pénalité post-course
-      const penSec = pick([5, 5, 10, 10, 10]);
+      const penSec = pick([5, 5, 10]);  // max 10s par incident, plus de 20s
       const penMs  = penSec * 1000;
       const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
       const vic = drivers.find(d => String(d.pilot._id) === inv.victimId);
       if (atk && !atk.dnf) {
-        atk.totalTime += penMs;
-        atk.totalPenalties = (atk.totalPenalties || 0) + penSec;
-        racePenalties.push({ pilotId: inv.attackerId, seconds: penSec, reason: 'investigation_post', lap: inv.lap });
+        // Cap total pénalités à 10s par pilote sur toute la course
+        const alreadyPenalised = atk.totalPenalties || 0;
+        if (alreadyPenalised >= 10) {
+          if (vic) postRacePenaltyMsgs.push(
+            `✅ *Aucune sanction supplémentaire* — ${atk.team.emoji}**${atk.pilot.name}** déjà pénalisé ce GP.`
+          );
+          continue;
+        }
+        const effectivePen = Math.min(penSec, 10 - alreadyPenalised);
+        atk.totalTime += effectivePen * 1000;
+        atk.totalPenalties = alreadyPenalised + effectivePen;
+        racePenalties.push({ pilotId: inv.attackerId, seconds: effectivePen, reason: 'investigation_post', lap: inv.lap });
         if (vic) postRacePenaltyMsgs.push(
-          `⚖️ **+${penSec}s** → ${atk.team.emoji}**${atk.pilot.name}** | Contact T${inv.lap} avec ${vic.team.emoji}**${vic.pilot.name}**`
+          `⚖️ **+${effectivePen}s** → ${atk.team.emoji}**${atk.pilot.name}** | Contact T${inv.lap} avec ${vic.team.emoji}**${vic.pilot.name}**`
         );
       }
     } else {
