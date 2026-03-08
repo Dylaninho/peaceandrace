@@ -12600,9 +12600,11 @@ async function handleInteraction(interaction) {
         const ch = interaction.channel;
         const QUEUE_COOLDOWN_MS = 60 * 60 * 1000; // 1 heure
 
-        // Chercher le dernier article paddock publié, tous auteurs confondus (triggered: 'player_action')
+        // Chercher le dernier article paddock PUBLIÉ (exclure les articles en attente)
         const lastPaddockArticle = await NewsArticle.findOne({
           triggered: 'player_action',
+          queued: { $ne: true },          // ignorer les articles en file d'attente
+          _id: { $ne: saved._id },        // ignorer l'article qu'on vient de créer
         }).sort({ publishedAt: -1 }).lean();
 
         const now = Date.now();
@@ -12611,7 +12613,7 @@ async function handleInteraction(interaction) {
           : 0;
         const elapsed = now - lastPublishedMs;
 
-        // Si pas d'article ou dernier article > 1h : publier immédiatement
+        // Si pas d'article publié ou dernier > 1h : publier immédiatement
         if (!lastPaddockArticle || elapsed >= QUEUE_COOLDOWN_MS) {
           // OK : publier immédiatement
           const confirmMsg =
@@ -12623,15 +12625,13 @@ async function handleInteraction(interaction) {
           // Trop tôt : délai = heure du DERNIER article publié + 1h
           const delay = QUEUE_COOLDOWN_MS - elapsed;
           const pubTime = new Date(lastPublishedMs + QUEUE_COOLDOWN_MS);
-          const hh = pubTime.getHours().toString().padStart(2,'0');
-          const mm = pubTime.getMinutes().toString().padStart(2,'0');
+          const pubTs = `<t:${Math.floor(pubTime.getTime() / 1000)}:t>`; // timestamp Discord auto-timezone
           const confirmMsg =
             `✅ **${pilot.name}** ${lbl.queued} **${target.name}**${targetNick}. Action enregistrée.\n` +
             `${affinityLine}\n` +
-            `⏳ Un article paddock a été publié récemment — le tien apparaîtra à **${hh}:${mm}** (1h d'écart minimum).`;
+            `⏳ Un article paddock a été publié récemment — le tien apparaîtra à ${pubTs} (1h d'écart minimum).`;
           await interaction.editReply({ content: confirmMsg, ephemeral: true });
 
-          // Publier exactement 1h après le dernier article paddock publié
           // Marquer l'article comme "en file d'attente" en BDD
           const scheduledFor = pubTime;
           await NewsArticle.findByIdAndUpdate(saved._id, {
@@ -12641,8 +12641,7 @@ async function handleInteraction(interaction) {
 
           // Stocker le timeoutId dans la Map globale pour pouvoir l'annuler
           const timeoutId = setTimeout(async () => {
-            paddockQueue.delete(String(saved._id)); // retirer de la map
-            // Vérifier que l'article n'a pas été annulé entre temps
+            paddockQueue.delete(String(saved._id));
             const stillQueued = await NewsArticle.findById(saved._id).lean();
             if (!stillQueued || stillQueued.queued === false) {
               console.log('[action_paddock queue] Article annulé, publication ignorée:', saved._id);
@@ -12817,10 +12816,11 @@ async function handleInteraction(interaction) {
   // /admin_queue — file d'attente des articles paddock
   // ================================================================
   if (commandName === 'admin_queue') {
-    if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-
     await interaction.deferReply({ ephemeral: true });
+
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
+
     const sub = interaction.options.getSubcommand();
 
     // ── LIST ──────────────────────────────────────────────────
@@ -12843,7 +12843,7 @@ async function handleInteraction(interaction) {
           const shortId  = String(art._id).slice(-6).toUpperCase();
           const pilotsStr = art.pilotIds.map(id => pilotMap.get(String(id)) || '?').join(' vs ');
           const scheduledTs = art.scheduledFor
-            ? `<t:${Math.floor(new Date(art.scheduledFor).getTime() / 1000)}:t>`
+            ? `<t:${Math.floor(new Date(art.scheduledFor).getTime() / 1000)}:t> (<t:${Math.floor(new Date(art.scheduledFor).getTime() / 1000)}:R>)`
             : '(heure inconnue)';
           const inMemory   = paddockQueue.has(String(art._id)) ? '🟢' : '🔴';
           const triggeredBy = art.queuedBy ? `<@${art.queuedBy}>` : 'auto';
