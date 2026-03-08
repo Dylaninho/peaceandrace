@@ -283,10 +283,20 @@ const NewsArticleSchema = new mongoose.Schema({
   raceId     : { type: mongoose.Schema.Types.ObjectId, ref: 'Race', default: null },
   seasonYear : { type: Number },
   publishedAt: { type: Date, default: Date.now },
-  triggered  : { type: String, default: 'auto' }, // 'post_race' | 'scheduled' | 'manual'
+  triggered  : { type: String, default: 'auto' }, // 'post_race' | 'scheduled' | 'manual' | 'player_action'
+  // ── File d'attente paddock ─────────────────────────────────
+  queued       : { type: Boolean, default: false },   // true = en attente de publication
+  scheduledFor : { type: Date,    default: null  },   // heure de publication prévue
+  queuedBy     : { type: String,  default: null  },   // discordId du joueur qui a déclenché l'action
 });
 NewsArticleSchema.index({ publishedAt: -1 });
+NewsArticleSchema.index({ queued: 1, scheduledFor: 1 });
 const NewsArticle = mongoose.model('NewsArticle', NewsArticleSchema);
+
+// ── File d'attente paddock (in-memory) ────────────────────────
+// Map<articleId (string) → timeoutId>
+// Permet d'annuler un setTimeout en attente via admin_queue cancel
+const paddockQueue = new Map();
 
 // ── Team ───────────────────────────────────────────────────
 const TeamSchema = new mongoose.Schema({
@@ -3597,13 +3607,205 @@ async function generateLegacyCohabitationNews(season, channel) {
 // 🎭  ACTION PADDOCK — articles générés par les joueurs
 // 8 types d'actions avec contenu original et impact affinité
 // ============================================================
-function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, seasonYear, isTeammate, isRival) {
+function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, seasonYear, isTeammate, isRival, recentCtx = {}) {
   const source = pick(['paddock_whispers', 'pitlane_insider', 'pl_racing_news', 'f1_weekly']);
   const tSrcStr = tSrc ? `${tSrc.emoji} ${tSrc.name}` : '?';
   const tTgtStr = tTgt ? `${tTgt.emoji} ${tTgt.name}` : '?';
   const nickTgt = pTgt.nickname ? ` — alias ${pTgt.nickname}` : '';
-  const archSrc = pSrc.personality?.archetype || 'guerrier';
+  const archSrc     = pSrc.personality?.archetype     || 'guerrier';
+  const archTgt     = pTgt.personality?.archetype     || 'guerrier';
   const pressureSrc = pSrc.personality?.pressureLevel || 0;
+  const highPressure = pressureSrc >= 60;
+
+  // ── Contexte récent ──────────────────────────────────────────
+  const tgtDnf     = recentCtx.tgtDnf    || false;
+  const tgtWon     = recentCtx.tgtWon    || false;
+  const tgtPodium  = recentCtx.tgtPodium || false;
+  const tgtPos     = recentCtx.tgtPos    || null;
+  const circuit    = recentCtx.circuit   || null;
+  const circuitStr = circuit ? ` à ${circuit}` : '';
+  const dnfReason  = recentCtx.tgtDnfReason || null;
+  const srcPos     = recentCtx.srcPos    || null;
+  const srcDnf     = recentCtx.srcDnf    || false;
+
+  // Classement au championnat
+  const srcChampPos = recentCtx.srcChampPos ?? null;
+  const tgtChampPos = recentCtx.tgtChampPos ?? null;
+  const srcChampPts = recentCtx.srcChampPts ?? null;
+  const tgtChampPts = recentCtx.tgtChampPts ?? null;
+  const champGap    = recentCtx.champGap    ?? null;
+
+  const srcAheadInChamp = srcChampPos !== null && tgtChampPos !== null && srcChampPos < tgtChampPos;
+  const sameChampZone   = srcChampPos !== null && tgtChampPos !== null && Math.abs(srcChampPos - tgtChampPos) <= 2;
+
+  const champCtxLine = (() => {
+    if (srcChampPos === null || tgtChampPos === null) return null;
+    if (srcChampPos === 1)
+      return `Au classement, **${pSrc.name}** mène le championnat — **${pTgt.name}** pointe à P${tgtChampPos}${srcChampPts !== null && tgtChampPts !== null ? ` avec ${srcChampPts - tgtChampPts} pts d'écart` : ''}.`;
+    if (tgtChampPos === 1)
+      return `**${pTgt.name}** est leader du championnat — **${pSrc.name}** le suit à P${srcChampPos}${champGap !== null ? `, à ${Math.abs(champGap)} pts` : ''}.`;
+    if (sameChampZone)
+      return `Au championnat, tout se joue entre eux : P${Math.min(srcChampPos,tgtChampPos)} et P${Math.max(srcChampPos,tgtChampPos)}, séparés de ${champGap !== null ? Math.abs(champGap) + ' pts' : 'peu de points'}.`;
+    if (srcAheadInChamp)
+      return `**${pSrc.name}** devance **${pTgt.name}** au championnat (P${srcChampPos} vs P${tgtChampPos}${champGap !== null ? `, +${Math.abs(champGap)} pts` : ''}).`;
+    return `**${pTgt.name}** devance **${pSrc.name}** au championnat (P${tgtChampPos} vs P${srcChampPos}${champGap !== null ? `, ${Math.abs(champGap)} pts d'écart` : ''}).`;
+  })();
+
+  // ── Helpers contexte course ──────────────────────────────────
+  const dnfCtxLine = tgtDnf ? pick([
+    `Son abandon${circuitStr}${dnfReason ? ` (${dnfReason})` : ''} est encore frais dans les mémoires.`,
+    `Après le DNF${circuitStr}, la pression avait déjà commencé à monter autour de **${pTgt.name}**.`,
+    `Le dernier GP${circuitStr} n'a pas été tendre avec **${pTgt.name}** — et ${pSrc.name} n'a pas oublié.`,
+  ]) : null;
+
+  const winCtxLine = tgtWon ? pick([
+    `Sa victoire${circuitStr} lui avait pourtant offert un capital confiance solide.`,
+    `Quelques jours après sa victoire${circuitStr}, le contexte change vite dans ce paddock.`,
+    `Malgré la victoire${circuitStr}, tout le monde n'est pas prêt à lui remettre les clés du championnat.`,
+  ]) : null;
+
+  const podCtxLine = (!tgtWon && tgtPodium && tgtPos) ? pick([
+    `Son P${tgtPos}${circuitStr} lui avait valu quelques éloges. Tous ne partagent pas cet avis.`,
+    `Après un podium${circuitStr}, on aurait pu croire les critiques muselées. On avait tort.`,
+  ]) : null;
+
+  const ctxHook = dnfCtxLine || winCtxLine || podCtxLine || champCtxLine || '';
+
+  // ── Citations par archétype de la SOURCE ─────────────────────
+  // Chaque archétype a un style de prise de parole distinct :
+  // guerrier = direct, émotionnel, impulsif
+  // icone = calibré, diplomatique, jamais agressif ouvertement
+  // bad_boy = sarcastique, punchline courte, dédaigneux
+  // calculateur = froid, factuel, statistiques
+  // vieux_sage = ironique, détaché, sous-entendu
+  // rookie_ambitieux = sincère, parfois maladroit dans l'audace
+  const QUOTES = {
+    trash_talk: {
+      guerrier:         tgtDnf ? `"Le DNF${circuitStr} ? Je ne vais pas faire semblant que ça n'existe pas. On perd des points à cause de lui. Moi je donne tout. Ce n'est pas toujours réciproque."`
+                                : `"${pTgt.name} ? Je dis ce que tout le monde pense tout bas. Il n'est pas au niveau. Point."`,
+      icone:            tgtDnf ? `"Je préfère ne pas trop commenter le GP${circuitStr}. Mais les chiffres sont là. Et ils ne mentent pas."`
+                                : `"${pTgt.name} a de belles qualités. Mais entre la réputation et la réalité, il y a parfois un écart. On l'a vu."`,
+      bad_boy:          tgtDnf ? `"Son abandon${circuitStr} ? Choquant. Vraiment. Enfin... pas tant que ça."`
+                                : `"${pTgt.name} surévalué ? Je dirais juste... correctement évalué par les mauvaises personnes."`,
+      calculateur:      tgtDnf ? `"Le DNF${circuitStr} représente des points perdus pour l'écurie. Ce n'est pas un incident isolé. C'est une tendance."`
+                                : `"Si on regarde les données objectivement, ${pTgt.name} sous-performe sur circuits techniques. Ce n'est pas une opinion, c'est un constat."`,
+      vieux_sage:       tgtDnf ? `"J'ai vu beaucoup de DNFs dans ma carrière. Certains arrivent. Certains se provoquent. Je ne dis pas lequel est le cas ici."`
+                                : `"${pTgt.name} est bon. Mais le paddock a la mémoire courte. Moi, non."`,
+      rookie_ambitieux: tgtDnf ? `"Je... le DNF${circuitStr} c'est dur à regarder. Je ne comprends pas comment on arrive là."`
+                                : `"Peut-être que je n'aurais pas dû le dire, mais ${pTgt.name} ne fait pas ce qu'on lui reproche. Il fait mieux — pour lui."`,
+    },
+    vanne: {
+      guerrier:         tgtDnf ? `"Un DNF${circuitStr}... Je ne veux pas me moquer. Mais si quelqu'un pouvait lui expliquer comment on finit une course..."`
+                                : `"${pTgt.name} ? Il est régulier. Régulièrement... là. Quelque part entre P8 et 'on le cherche encore'."`,
+      icone:            tgtDnf ? `"Je ne vais pas commenter le GP de ${pTgt.name}. Ce serait indélicat." *Pause.* "Disons juste que je dormais mieux que lui dimanche soir."`
+                                : `"${pTgt.name} fait un travail solide. Vraiment." *Sourire.* "Pour son budget."`,
+      bad_boy:          tgtDnf ? `"Son abandon${circuitStr} ? Je suis trop gentil pour commenter. Alors je ne dis rien." *Sourire.*`
+                                : `"${pTgt.name} est fantastique. Pour un pilote de simulation."`,
+      calculateur:      tgtDnf ? `"Statistiquement, le taux d'abandon de ${pTgt.name} cette saison est au-dessus de la moyenne. Je dis juste que les chiffres sont là."`
+                                : `"Si je devais modéliser le pilote moyen de ce championnat, ${pTgt.name} serait une bonne référence. C'est objectif."`,
+      vieux_sage:       tgtDnf ? `"Après un certain âge, on arrête d'être surpris par ce genre de chose. ${pTgt.name} me fait me sentir très, très vieux."`
+                                : `"${pTgt.name} me rappelle quelqu'un que j'ai croisé il y a vingt ans. Je ne me souviens plus de son nom. C'est tout dire."`,
+      rookie_ambitieux: tgtDnf ? `"Je ne veux pas me moquer de son DNF${circuitStr}. Enfin... à ce stade de la saison, on sait plus si c'est de la malchance ou..."`
+                                : `"${pTgt.name} c'est vraiment bien ! Pour quelqu'un qui fait ce qu'il fait. Vous voyez ce que je veux dire ?"`,
+    },
+    eloge: {
+      guerrier:         tgtWon ? `"Sa victoire${circuitStr} ? Méritée. Dur à dire, mais méritée. Je reviendrai."`
+                                : `"${pTgt.name} se bat vraiment. Je n'aime pas perdre contre lui. Mais je respecte comment il se bat."`,
+      icone:            tgtWon ? `"${pTgt.name} a livré une course impeccable${circuitStr}. L'écurie, la stratégie, le pilote — tout s'est aligné. Chapeau."`
+                                : `"${pTgt.name} apporte quelque chose de particulier à ce sport. La régularité, la cohérence. C'est rare, et ça mérite d'être dit."`,
+      bad_boy:          tgtWon ? `"Ok, il a gagné${circuitStr}. C'était propre. Je déteste admettre ça, mais c'était propre."`
+                                : `"${pTgt.name} ? Il ne me déçoit jamais. Et je ne dis pas ça souvent. Profitez-en."`,
+      calculateur:      tgtWon ? `"La gestion de ${pTgt.name}${circuitStr} était optimale. Pneus, dégradation, timing aux stands — chaque décision était correcte. Du pilotage intelligent."`
+                                : `"D'un point de vue analytique, ${pTgt.name} est sous-estimé. Ses données de secteur sont parmi les meilleures de la grille."`,
+      vieux_sage:       tgtWon ? `"Il a gagné${circuitStr} comme quelqu'un qui sait ce qu'il fait. Pas de bruit. Pas d'esbroufe. Juste de la vitesse au bon moment."`
+                                : `"J'observe ${pTgt.name} depuis quelques saisons. Il grandit bien. Très bien, même. Ce n'est pas rien, dans ce paddock."`,
+      rookie_ambitieux: tgtWon ? `"INCROYABLE sa course${circuitStr} !! J'ai regardé ses données — comment il a géré ses pneus ?? Je veux être à ce niveau."`
+                                : `"${pTgt.name} est quelqu'un que j'admire vraiment. Sa façon de travailler, de ne jamais lâcher — c'est ce que j'essaie de construire aussi."`,
+    },
+    trahison: {
+      guerrier:         `"Je n'aurais peut-être pas dû dire ça. Mais je suis comme ça — je dis ce que je pense. ${pTgt.name} a dit des choses. Maintenant tout le monde le sait."`,
+      icone:            `"Il y a un moment où la loyauté devient de la complicité. Ce que ${pTgt.name} a dit en privé méritait d'être su."`,
+      bad_boy:          `"${pTgt.name} voulait garder ça pour lui. Dommage. Moi je garde rien pour moi."`,
+      calculateur:      `"Je livre ces informations parce qu'elles sont factuelles et vérifiables. Ce que ${pTgt.name} a dit en interne devait être connu."`,
+      vieux_sage:       `"Dans ce sport, les secrets ont une durée de vie limitée. Autant qu'ils sortent maintenant, et bien, plutôt que plus tard, et mal."`,
+      rookie_ambitieux: `"Je sais que ça va faire du bruit. Mais ce que ${pTgt.name} a dit, c'est pas normal. Les gens doivent savoir."`,
+    },
+    dementir: {
+      guerrier:         tgtDnf ? `"Un DNF ne définit pas un pilote. Ceux qui profitent de ça pour lui tomber dessus n'ont jamais rien construit."`
+                                : `"Ce qui circule sur ${pTgt.name}, c'est des conneries. Je l'ai vu bosser. Laissez-le tranquille."`,
+      icone:            tgtDnf ? `"Je préférerais qu'on juge ${pTgt.name} sur l'ensemble de sa saison. Ce serait plus juste — et plus intelligent."`
+                                : `"Les rumeurs sur ${pTgt.name} sont inexactes. Je le dis clairement, en mon nom propre."`,
+      bad_boy:          tgtDnf ? `"Tout le monde tape sur ${pTgt.name} après son abandon${circuitStr}. Facile. Très courageux." *Applaudissements lents.*`
+                                : `"${pTgt.name} n'a pas besoin que je le défende. Mais je le fais quand même. Parce que ce qu'on dit sur lui, c'est nul."`,
+      calculateur:      tgtDnf ? `"Un DNF peut avoir de nombreuses causes. Conclure sur les capacités de ${pTgt.name} serait une erreur d'analyse."`
+                                : `"Les informations qui circulent sur ${pTgt.name} ne correspondent pas aux données que j'observe."`,
+      vieux_sage:       tgtDnf ? `"J'ai eu des DNFs dans ma carrière. Ceux qui ne l'ont jamais vécu devraient peser leurs mots."`
+                                : `"Ce que j'entends sur ${pTgt.name}... Le paddock a toujours aimé les histoires simples. La réalité est rarement aussi simple."`,
+      rookie_ambitieux: tgtDnf ? `"C'est dur de voir tout le monde s'acharner. Un DNF ça arrive à n'importe qui. Vraiment. N'importe qui."`
+                                : `"Je trouve vraiment injuste ce qu'on dit sur ${pTgt.name}. Il bosse dur, il mérite mieux que ça."`,
+    },
+    defi: {
+      guerrier:         tgtWon  ? `"Sa victoire${circuitStr} ? Bien joué. La prochaine fois, je serai là pour l'empêcher."`
+                      : tgtChampPos === 1 ? `"Il mène le championnat. Très bien. Moi je le chasse. Et je chasse bien."`
+                                : `"${pTgt.name} et moi, on va se retrouver sur la piste. Et j'attends de voir s'il est aussi fort que ça."`,
+      icone:            tgtWon  ? `"${pTgt.name} a montré ce dont il est capable${circuitStr}. Je prends note. Le prochain GP sera intéressant."`
+                      : tgtChampPos === 1 ? `"Mener le championnat ne signifie pas le gagner. Je reste là. Et j'ai la patience qu'il faut."`
+                                : `"Je fais confiance à la piste pour répondre à toutes les questions. Je n'ai rien de plus à dire — sauf que je serai prêt."`,
+      bad_boy:          tgtWon  ? `"Bravo${circuitStr}. Sérieusement. Profite. La prochaine fois je suis là et je n'aurai pas autant de sportivité."`
+                      : tgtChampPos === 1 ? `"Leader du championnat ? Pour l'instant. Le classement, ça change vite. Demandez-lui."`
+                                : `"${pTgt.name} veut se battre ? Avec plaisir. Il sait où me trouver."`,
+      calculateur:      tgtWon  ? `"La victoire de ${pTgt.name}${circuitStr} m'a fourni des données utiles. Je sais maintenant exactement où gagner du temps sur lui."`
+                      : tgtChampPos === 1 ? `"P${tgtChampPos} au championnat, P${srcChampPos || '?'} pour moi. L'écart se comble. C'est mathématique."`
+                                : `"${pTgt.name} et moi avons des trajectoires qui convergent. Sur la piste, la question se résoudra d'elle-même."`,
+      vieux_sage:       tgtWon  ? `"Il a gagné${circuitStr}. À son âge, c'est bien. À mon expérience, c'est instructif. On verra la suite."`
+                      : tgtChampPos === 1 ? `"Mener un championnat, c'est aussi apprendre à être chassé. Bienvenue dans la vraie course, ${pTgt.name}."`
+                                : `"Je ne crie pas mes intentions. Je les montre sur la piste. ${pTgt.name} comprendra le message en temps voulu."`,
+      rookie_ambitieux: tgtWon  ? `"Sa victoire${circuitStr} était incroyable. Mais je veux être là moi aussi. Et je vais y arriver."`
+                      : tgtChampPos === 1 ? `"Il est P${tgtChampPos}, moi P${srcChampPos || '?'}. L'objectif c'est de le rattraper. Je n'abandonne pas."`
+                                : `"Je ne prétends pas être meilleur que ${pTgt.name}. Mais je vais tout donner pour le prouver."`,
+    },
+    secret: {
+      guerrier:         `"Je n'aurais peut-être pas dû dire ça. Mais je suis comme ça. ${pTgt.name} peut s'expliquer maintenant."`,
+      icone:            `"Je comprends que ce que je révèle sur ${pTgt.name} puisse choquer. Mais la transparence a un coût. Je le paye volontiers."`,
+      bad_boy:          `"${pTgt.name} voulait garder ça pour lui ? C'est mignon. Les secrets, c'est fait pour sortir. Je suis juste le messager."`,
+      calculateur:      `"Ces informations étaient connues d'un petit cercle. Je les rends publiques parce qu'elles ont une incidence sur ce sport."`,
+      vieux_sage:       `"Ce que je dis sur ${pTgt.name} ? Ce n'est pas une trahison. C'est juste la réalité qui refait surface."`,
+      rookie_ambitieux: `"Je sais que ça va créer des problèmes. Mais ce que ${pTgt.name} a dit — ou fait — ça ne peut pas rester caché."`,
+    },
+    // Rumeur = anonyme, on adapte le descripteur de la source selon l'archétype de pSrc
+    rumeur: {
+      guerrier:         `un proche du paddock, visiblement excédé`,
+      icone:            `une source bien informée, qui a souhaité rester anonyme`,
+      bad_boy:          `quelqu'un qui "n'a rien à perdre", selon ses propres mots`,
+      calculateur:      `une source interne, qui parle de "données préoccupantes"`,
+      vieux_sage:       `une figure expérimentée du paddock, qui "en a vu d'autres"`,
+      rookie_ambitieux: `une source surprise elle-même par ce qu'elle a appris`,
+    },
+  };
+
+  const srcQuote = QUOTES[type]?.[archSrc] || null;
+
+  // ── Introductions narratives par archétype de la SOURCE ──────
+  const INTROS = {
+    guerrier:         [`**${pSrc.name}** n'a pas pris de gants.`, `**${pSrc.name}** a attendu la question. Et quand elle est venue, il a répondu sans filtre.`, `Personne dans ce paddock ne parle comme **${pSrc.name}** quand il est décidé à dire quelque chose.`],
+    icone:            [`**${pSrc.name}** a choisi ses mots avec soin. Mais aucun ne laisse de place au doute.`, `La conférence avait commencé comme toutes les autres. Jusqu'à ce que **${pSrc.name}** prenne la parole.`, `Il y a une manière de dire les choses sans avoir l'air de les dire. **${pSrc.name}** la maîtrise parfaitement.`],
+    bad_boy:          [`**${pSrc.name}** n'a pas préparé de discours. Ce n'est pas son style.`, `Trois secondes. C'est le temps qu'il a fallu à **${pSrc.name}** pour lâcher ce que tout le paddock retient.`, `**${pSrc.name}** a souri avant de parler. Ce n'était pas bon signe pour ${pTgt.name}.`],
+    calculateur:      [`**${pSrc.name}** ne parle pas souvent en dehors de la piste. Quand il le fait, c'est calculé.`, `Les mots de **${pSrc.name}** étaient mesurés, précis, et d'autant plus dévastateurs.`, `**${pSrc.name}** a attendu d'avoir les données. Maintenant il parle.`],
+    vieux_sage:       [`**${pSrc.name}** a l'habitude de laisser les résultats parler. Cette fois, il a parlé lui-même.`, `Rares sont les fois où **${pSrc.name}** sort de sa réserve. Aujourd'hui, il l'a fait.`, `Quelqu'un a posé la bonne question à **${pSrc.name}**. Ou la mauvaise, selon le point de vue.`],
+    rookie_ambitieux: [`**${pSrc.name}** n'a probablement pas pesé chaque mot. Mais l'impact est réel.`, `C'est le genre de déclaration qu'on fait quand on est encore un peu naïf — ou très courageux. **${pSrc.name}** a pris la parole.`, `**${pSrc.name}** apprend vite. Peut-être trop vite, pour certains dans le paddock.`],
+  };
+  const srcIntro = pick(INTROS[archSrc] || INTROS.guerrier);
+
+  // ── Réactions de la CIBLE selon son archétype ───────────────
+  const TGT_REACTIONS = {
+    guerrier:         pick([`${pTgt.name} n'a pas tardé à réagir — et ça ne devrait surprendre personne.`, `${pTgt.name} ne laisse jamais ce genre de chose sans réponse. Le paddock attend.`]),
+    icone:            pick([`${pTgt.name} a transmis un communiqué mesuré. Mais le message était clair.`, `L'entourage de ${pTgt.name} a *"pris note"*. Traduction : rien n'est oublié.`]),
+    bad_boy:          pick([`${pTgt.name} a posté trois mots sur ses réseaux. Tout le monde a compris.`, `${pTgt.name} n'a pas répondu officiellement. Ce silence-là est presque plus bruyant que des mots.`]),
+    calculateur:      pick([`${pTgt.name} n'a fait aucun commentaire public. Il enregistre. Il répondra sur la piste.`, `L'entourage de ${pTgt.name} parle de *"déclarations non étayées"*. Froid. Précis. Prévisible.`]),
+    vieux_sage:       pick([`${pTgt.name} a souri quand on lui a rapporté les propos. *"Intéressant"*, c'est tout ce qu'il a dit.`, `${pTgt.name} a entendu pire. Il ne s'en émeut pas. Ce calme, c'est parfois la réponse la plus efficace.`]),
+    rookie_ambitieux: pick([`${pTgt.name} a répondu rapidement, peut-être trop — on sentait l'émotion dans les mots.`, `${pTgt.name} n'a pas réussi à cacher sa surprise. Le paddock a regardé ça avec curiosité.`]),
+  };
+  const tgtReaction = TGT_REACTIONS[archTgt] || TGT_REACTIONS.guerrier;
 
   const templates = {
 
@@ -3611,37 +3813,38 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
     trash_talk: {
       type: 'drama',
       headlines: isTeammate ? [
-        `${pSrc.name} sur son coéquipier ${pTgt.name}${nickTgt} : les mots qui brûlent`,
+        tgtDnf
+          ? `${pSrc.name} sur le DNF${circuitStr} de son coéquipier ${pTgt.name}${nickTgt} : les mots qui brûlent`
+          : `${pSrc.name} sur son coéquipier ${pTgt.name}${nickTgt} : les mots qui brûlent`,
         `${tSrcStr} : ${pSrc.name} ne retient plus ses coups contre ${pTgt.name}`,
         `"${pTgt.name} ? Honnêtement..." — ${pSrc.name} lâche tout en public`,
         `Guerre interne chez ${tSrcStr} : ${pSrc.name} s'en prend ouvertement à ${pTgt.name}`,
       ] : [
-        `${pSrc.name} descend ${pTgt.name}${nickTgt} en conférence — le paddock se lève`,
+        tgtDnf   ? `Après le DNF${circuitStr} — ${pSrc.name} n'attendait que ça pour parler de ${pTgt.name}`
+        : tgtWon ? `Même après sa victoire${circuitStr}, ${pTgt.name} n'échappe pas aux critiques de ${pSrc.name}`
+                 : `${pSrc.name} descend ${pTgt.name}${nickTgt} en conférence — le paddock se lève`,
         `"${pTgt.name} est surévalué" — ${pSrc.name} sans filtre`,
         `La déclaration de ${pSrc.name} sur ${pTgt.name} qui va faire parler`,
         `${tSrcStr} vs ${tTgtStr} : ${pSrc.name} ouvre le feu sur ${pTgt.name}`,
       ],
       bodies: isTeammate ? [
         `Il y a des choses qu'on ne dit pas en public dans ce paddock. **${pSrc.name}** vient de les dire.\n\n` +
-        `Devant les caméras, sans hésitation : *"Je ne vais pas mentir — **${pTgt.name}** n'est pas au niveau où on a besoin qu'il soit. Moi je donne tout, chaque tour. Ce n'est pas toujours réciproque."*\n\n` +
+        `*${srcQuote || (tgtDnf ? `"Le DNF${circuitStr} ? Je ne vais pas faire semblant. Moi je donne tout, chaque tour. Ce n'est pas toujours réciproque."` : `"Je ne vais pas mentir — **${pTgt.name}** n'est pas au niveau où on a besoin qu'il soit."`) }*\n\n` +
         pick([
           `${tSrcStr} a refusé de commenter. ${pTgt.name} non plus. Le silence, parfois, répond mieux que les mots.`,
-          `Le management de ${tSrcStr} a été prévenu. Il devrait y avoir une réunion dans les 48h. On vous tient au courant.`,
+          `Le management de ${tSrcStr} a été prévenu. Il devrait y avoir une réunion dans les 48h.`,
           `Dans les couloirs du paddock, personne n'est surpris. *"Ça couvait depuis des semaines"*, confie une source proche.`,
         ]),
-        `**${pSrc.name}** a attendu la bonne question pour lâcher la bombe. Et elle a explosé.\n\n` +
-        `*"Mon coéquipier ?"* Une pause. Un sourire. *"Je ne vais pas commenter chaque course de **${pTgt.name}**. Je préfère me concentrer sur la mienne — et les résultats parlent d'eux-mêmes."*\n\n` +
-        `Ce qui n'est pas dit est souvent ce qui fait le plus mal. Le paddock a parfaitement compris.`,
+        `${srcIntro}\n\n` +
+        `*${srcQuote || `"Mon coéquipier ?"* Une pause. Un sourire. *"Je ne vais pas commenter chaque course de **${pTgt.name}**. Les résultats parlent d'eux-mêmes."`}*\n\n` +
+        `${tgtReaction}`,
       ] : [
-        `La conférence de presse avait commencé normalement. Jusqu'à ce que quelqu'un pose la question sur **${pTgt.name}**.\n\n` +
-        `**${pSrc.name}** : *"Surévalué ? Je ne dirais pas ça. Je dirais... soutenu. Très soutenu par les circonstances. Mais le talent brut ? Je laisse les chronos répondre."*\n\n` +
-        pick([
-          `${pTgt.name} n'a pas encore répondu. Son entourage parle de *"commentaires irrespectueux"*. La suite promet.`,
-          `${tTgtStr} a transmis un communiqué laconique : *"Nous ne commentons pas les provocations."* Traduction : ils ont vu.`,
-          `Dans le paddock, certains applaudissent l'honnêteté. D'autres se demandent si ${pSrc.name} sait ce qu'il vient d'allumer.`,
-        ]),
-        `"${pTgt.name} a de bons résultats quand tout va bien. Mais enlève-lui une belle voiture sous lui, et qu'est-ce qu'il reste ?" **${pSrc.name}** a dit ça calmement, comme si c'était une évidence.\n\n` +
-        `Ce n'est pas ce qu'on dit publiquement dans ce sport. C'est ce qu'on murmure dans les couloirs. ${pSrc.name} vient de le crier.`,
+        `${srcIntro}\n\n` +
+        `*${srcQuote || (tgtDnf ? `"Un DNF${circuitStr}... Vous voulez mon avis honnête ? Ce n'est pas un accident."` : tgtWon ? `"Sa victoire${circuitStr} ? Les conditions étaient favorables. Ce n'est pas la même chose que de gagner quand ça résiste."` : `"Surévalué ? Je dirais... soutenu par les circonstances. Mais le talent brut ? Les chronos répondent."`) }*\n\n` +
+        `${tgtReaction}`,
+        `${ctxHook ? ctxHook + '\n\n' : ''}${srcIntro}\n\n` +
+        `*${srcQuote || `"${pTgt.name} a de bons résultats quand tout va bien. Mais enlève-lui une belle voiture, et qu'est-ce qu'il reste ?"` }*\n\n` +
+        `${champCtxLine && !ctxHook ? champCtxLine + '\n\n' : ''}Ce n'est pas ce qu'on dit publiquement dans ce sport. C'est ce qu'on murmure dans les couloirs. ${pSrc.name} vient de le crier.`,
       ],
     },
 
@@ -3649,25 +3852,29 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
     rumeur: {
       type: 'transfer_rumor',
       headlines: [
-        `Rumeur paddock : ${pTgt.name}${nickTgt} bientôt à la porte ?`,
+        tgtDnf      ? `Après le DNF${circuitStr} — la rumeur sur ${pTgt.name}${nickTgt} prend de l'ampleur`
+        : tgtChampPos === 1 ? `Le leader du championnat ${pTgt.name}${nickTgt} dans la tourmente — la rumeur qui circule`
+                    : `Rumeur paddock : ${pTgt.name}${nickTgt} bientôt à la porte ?`,
         `Coulisses : ce que ${pTgt.name} aurait dit — et qu'il ne voulait pas voir partir`,
         `Source anonyme : *"${pTgt.name} n'est plus en odeur de sainteté ici"*`,
         `Whispers paddock : la situation de ${pTgt.name} serait plus fragile qu'annoncé`,
-        `La rumeur qui court sur ${pTgt.name} depuis ${tTgtStr ? tTgtStr : 'son écurie'}...`,
       ],
       bodies: [
-        `Une source proche du paddock, qui souhaite garder l'anonymat, a fait circuler une information qui commence à faire le tour des garages.\n\n` +
-        `Selon elle, **${pTgt.name}** ne serait *"pas aussi intouchable que son entourage veut bien le laisser croire"*. Sans plus de détails — mais avec un timing qui questionne.\n\n` +
+        `Une information circule depuis quelques heures dans le paddock. Elle vient de ${QUOTES.rumeur[archSrc] || 'une source anonyme'}.\n\n` +
+        (tgtDnf   ? `Son timing n'est pas anodin : le DNF de **${pTgt.name}**${circuitStr} aurait *"ravivé des discussions internes qu'on croyait closes"*.\n\n`
+        : tgtWon  ? `Paradoxalement, c'est la victoire${circuitStr} de **${pTgt.name}** qui aurait *"relancé l'intérêt d'autres écuries"*.\n\n`
+                  : `Selon cette source, **${pTgt.name}** ne serait *"pas aussi intouchable que son entourage veut bien le laisser croire"*.\n\n`) +
         pick([
           `Aucune confirmation officielle. Mais dans ce sport, les rumeurs naissent rarement de rien.`,
-          `${tTgtStr ? `${tTgtStr} n'a pas commenté.` : ''} Le silence a parfois la valeur d'une réponse.`,
+          `${tTgtStr ? tTgtStr + ' n\'a pas commenté.' : ''} Le silence a parfois la valeur d'une réponse.`,
           `Plusieurs personnes dans le paddock affirment avoir entendu la même version. Ce n'est plus une rumeur isolée.`,
         ]),
-        `Le paddock bruisse. Quelqu'un a parlé.\n\n` +
-        `Ce qui circule sur **${pTgt.name}** ? Que ses relations en interne seraient *"tendues"*, que certains résultats auraient créé des *"questions"*, et que la situation mérite d'être suivie de près.\n\n` +
+        `Le paddock bruisse. Quelqu'un a parlé — ${QUOTES.rumeur[archSrc] || 'une source qui a souhaité rester anonyme'}.\n\n` +
+        `${ctxHook ? ctxHook + ' ' : ''}Ce qui circule sur **${pTgt.name}** ? Que ses relations en interne seraient *"tendues"*, que certains résultats auraient créé des *"questions"*.\n\n` +
         `On attend la version officielle. Elle viendra peut-être. Ou pas.`,
-        `*"Il y a ce qu'on voit sur la piste, et ce qui se passe vraiment derrière les portes fermées."* — La phrase d'une source anonyme à propos de **${pTgt.name}**.\n\n` +
-        `Impossible de vérifier. Difficile d'ignorer complètement. La rumeur a maintenant un deuxième souffle.`,
+        `*"Il y a ce qu'on voit sur la piste, et ce qui se passe vraiment derrière les portes fermées."*\n\n` +
+        `${QUOTES.rumeur[archSrc] ? `La formule vient de ${QUOTES.rumeur[archSrc]}` : `La source, anonyme`}, qui évoque la situation de **${pTgt.name}** avec une franchise inhabituelle.\n\n` +
+        `Impossible de vérifier. Difficile d'ignorer.`,
       ],
     },
 
@@ -3675,26 +3882,31 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
     eloge: {
       type: 'friendship',
       headlines: isTeammate ? [
-        `${pSrc.name} sur ${pTgt.name}${nickTgt} : "C'est le meilleur coéquipier que j'ai eu"`,
+        tgtWon ? `${pSrc.name} après la victoire${circuitStr} de ${pTgt.name}${nickTgt} : "C'est le meilleur coéquipier que j'ai eu"`
+               : `${pSrc.name} sur ${pTgt.name}${nickTgt} : "C'est le meilleur coéquipier que j'ai eu"`,
         `${tSrcStr} : quand ${pSrc.name} défend publiquement ${pTgt.name}`,
         `"Il m'a rendu meilleur" — l'éloge surprise de ${pSrc.name} pour ${pTgt.name}`,
       ] : [
-        `${pSrc.name} et son respect public pour ${pTgt.name}${nickTgt} — inattendu`,
+        tgtWon      ? `${pSrc.name} reconnaît la victoire${circuitStr} de ${pTgt.name}${nickTgt} — respect public inattendu`
+        : tgtPodium ? `P${tgtPos}${circuitStr} — ${pSrc.name} rend hommage à la course de ${pTgt.name}${nickTgt}`
+        : tgtChampPos === 1 ? `Le leader ${pTgt.name}${nickTgt} encensé par son rival ${pSrc.name} — personne n'attendait ça`
+                    : `${pSrc.name} et son respect public pour ${pTgt.name}${nickTgt} — inattendu`,
         `"Il mérite plus de reconnaissance" — ${pSrc.name} sur ${pTgt.name}`,
         `${tSrcStr} vs ${tTgtStr} : quand la rivalité laisse place au respect`,
         `${pSrc.name} sort du lot : son message à ${pTgt.name} touche le paddock`,
       ],
       bodies: isTeammate ? [
         `Dans un sport où les coéquipiers se ménagent rarement, **${pSrc.name}** a choisi la transparence.\n\n` +
-        `*"${pTgt.name} ? Franchement, j'ai travaillé avec beaucoup de pilotes. Il est à part. Son regard sur la voiture, sa façon d'aider l'équipe — pas juste pour lui, pour tout le monde. C'est rare."*\n\n` +
+        `*${srcQuote || (tgtWon ? `"Sa victoire${circuitStr}, ce n'est pas un accident. Il a géré la course parfaitement."` : `"${pTgt.name} est à part. Son regard sur la voiture, sa façon d'aider l'équipe. C'est rare."`) }*\n\n` +
         pick([
           `${pTgt.name} a répondu avec un simple : *"Ça compte."* Deux mots. Suffisants.`,
-          `Le vestiaire a applaudi. Pas fort. Juste ce qu'il fallait pour que tout le monde comprenne que c'était sincère.`,
+          `Le vestiaire a applaudi. Pas fort. Juste ce qu'il fallait.`,
           `${tSrcStr} a posté la citation sur ses réseaux. Stratégie d'image, ou reconnaissance authentique ? Les deux ne s'excluent pas.`,
         ]),
       ] : [
-        `On ne s'y attendait pas. **${pSrc.name}** non plus, peut-être. Mais ça lui a échappé — ou il a choisi de le dire.\n\n` +
-        `*"${pTgt.name} est l'un des pilotes les plus complets de cette grille. Il ne reçoit pas ce qu'il mérite. Voilà — je l'ai dit."*\n\n` +
+        `${srcIntro}\n\n` +
+        `*${srcQuote || (tgtWon ? `"Sa course${circuitStr} ? Pas une erreur. Pas un dixième gaspillé. Il mérite tout le crédit."` : tgtPodium ? `"Son P${tgtPos}${circuitStr} a peut-être été oublié vite. Pour moi il ne l'est pas."` : tgtChampPos === 1 ? `"Il mène le championnat — ce n'est pas par accident. Je le dis en adversaire direct."` : `"${pTgt.name} est l'un des pilotes les plus complets de cette grille. Il ne reçoit pas ce qu'il mérite."`) }*\n\n` +
+        `${champCtxLine && !tgtWon && !tgtPodium ? champCtxLine + '\n\n' : ''}` +
         pick([
           `Le paddock a sourcillé. Une déclaration de respect entre rivaux, ça dérange toujours un peu les narratives habituelles.`,
           `${pTgt.name} a répondu depuis ses réseaux : *"Du respect, ça se mérite. Merci ${pSrc.name}."* Court. Classe.`,
@@ -3707,7 +3919,8 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
     trahison: {
       type: 'drama',
       headlines: [
-        `Exclusif : ${pSrc.name} révèle ce que ${pTgt.name}${nickTgt} aurait dit en privé`,
+        tgtDnf ? `Après le DNF${circuitStr}, ${pSrc.name} sort ce que ${pTgt.name}${nickTgt} voulait taire`
+               : `Exclusif : ${pSrc.name} révèle ce que ${pTgt.name}${nickTgt} aurait dit en privé`,
         `${pSrc.name} sort de la réserve et expose ${pTgt.name} — le paddock choqué`,
         `"Je ne devais pas le dire" — mais ${pSrc.name} l'a quand même dit, sur ${pTgt.name}`,
         `La sortie de piste médiatique de ${pSrc.name} contre ${pTgt.name}`,
@@ -3715,15 +3928,16 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
       bodies: [
         `Il y a une règle non écrite dans ce paddock : ce qui se dit dans le vestiaire reste dans le vestiaire.\n\n` +
         `**${pSrc.name}** vient de la briser.\n\n` +
-        `*"Je n'aurais peut-être pas dû dire ça"* — il l'a dit quand même. Ce que **${pTgt.name}** aurait confié sur sa situation, ses doutes, ses envies de départ — rien n'y échappe.\n\n` +
+        `*${srcQuote || '"Je n\'aurais peut-être pas dû dire ça." — il l\'a dit quand même.' }*\n\n` +
         pick([
           `L'entourage de ${pTgt.name} parle de *"trahison"*. Le mot est fort. Il est peut-être exact.`,
-          `Plusieurs pilotes dans le paddock ont réagi avec malaise. *"On ne fait pas ça"* revient souvent. ${pSrc.name} a l'air de s'en ficher.`,
+          `Plusieurs pilotes dans le paddock ont réagi avec malaise. *"On ne fait pas ça"* revient souvent.`,
           `Depuis cette déclaration, la relation entre les deux camps est officiellement dans le rouge.`,
         ]),
-        `La conférence de presse a dégénéré tranquillement. **${pSrc.name}** avait préparé son coup.\n\n` +
-        `Item après item, il a exposé ce que **${pTgt.name}** ne voulait pas voir rendu public. Ses demandes internes. Ses tensions avec le management. Ses commentaires sur l'équipe.\n\n` +
-        `*"S'il a quelque chose à dire, qu'il le dise lui-même"*. Sauf que maintenant, ${pSrc.name} l'a dit à sa place.`,
+        `${srcIntro}\n\n` +
+        `Ce que **${pTgt.name}** ne voulait pas voir rendu public — ses doutes internes, ses tensions avec le management, ses commentaires sur ${isTeammate ? "l'équipe" : "sa situation"} — est maintenant dans la nature.\n\n` +
+        `*${srcQuote || '"S\'il a quelque chose à dire, qu\'il le dise lui-même." Sauf que maintenant, c\'est fait.' }*\n\n` +
+        `${tgtReaction}`,
       ],
     },
 
@@ -3731,22 +3945,24 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
     vanne: {
       type: 'driver_interview',
       headlines: [
-        `${pSrc.name} régale le paddock avec sa vanne sur ${pTgt.name}${nickTgt}`,
+        tgtDnf  ? `${pSrc.name} et sa pique sur le DNF${circuitStr} de ${pTgt.name}${nickTgt} — le paddock rit jaune`
+        : tgtWon ? `Même après sa victoire${circuitStr}, ${pTgt.name}${nickTgt} n'échappe pas à la vanne de ${pSrc.name}`
+                 : `${pSrc.name} régale le paddock avec sa pique sur ${pTgt.name}${nickTgt}`,
         `"${pTgt.name} et moi on s'entend bien... enfin, moi j'essaie" — ${pSrc.name} en mode stand-up`,
         `La pique (très) remarquée de ${pSrc.name} sur ${pTgt.name}`,
         `${pSrc.name} : "Je plaisante avec ${pTgt.name}. Surtout quand il n'est pas là."`,
       ],
       bodies: [
-        `Quelqu'un a demandé à **${pSrc.name}** ce qu'il pensait des performances de **${pTgt.name}** cette saison.\n\n` +
-        `Il a pris une seconde. A regardé vers le ciel. Et a répondu : *"${pTgt.name} ? Il est régulier. Régulièrement… là."*\n\n` +
+        `${srcIntro}\n\n` +
+        `*${srcQuote || (tgtDnf ? `"Je ne veux pas me moquer. Mais si quelqu'un pouvait lui expliquer comment on finit une course..."` : `"${pTgt.name} ? Il est régulier. Régulièrement… là."`) }*\n\n` +
         pick([
           `Rires dans la salle. Sourire en coin de ${pSrc.name}. ${pTgt.name} n'était pas là pour entendre ça. Il lira les comptes-rendus.`,
           `On a demandé à ${pSrc.name} s'il plaisantait. *"Évidemment. Mais les meilleures vannes ont toujours un fond de vrai."* Et il est parti.`,
-          `La pique va circuler. Ce genre de phrase finit toujours dans les timelines. ${pTgt.name} a déjà été notifié, selon nos sources.`,
+          `La pique va circuler. Ce genre de phrase finit toujours dans les timelines.`,
         ]),
         `Le paddock cherche parfois la légèreté. **${pSrc.name}** l'a trouvée — aux dépens de **${pTgt.name}**.\n\n` +
-        `*"Je l'adore, hein. C'est juste que quand je le regarde dans les stands, j'apprends à ne pas répéter ses erreurs. C'est une forme de respect."*\n\n` +
-        `${pTgt.name}${nickTgt} a eu le droit à un clip de 12 secondes dans tous les paddock shows du week-end. Ce n'était pas prévu. ${pSrc.name} en a lui-même ri.`,
+        `*${srcQuote || (tgtDnf ? `"Je ne suis pas là pour lui taper dessus. Mais il faut avouer que les images... ça aurait pu être une belle journée." Une pause. "Pour lui."` : `"Je l'adore, hein. C'est juste que quand je le regarde dans les stands, j'apprends à ne pas répéter ses erreurs."`) }*\n\n` +
+        `${tgtReaction}`,
       ],
     },
 
@@ -3754,22 +3970,24 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
     dementir: {
       type: 'driver_interview',
       headlines: [
-        `${pSrc.name} prend la défense de ${pTgt.name}${nickTgt} : "Ces rumeurs sont fausses"`,
+        tgtDnf ? `Après le DNF${circuitStr}, ${pSrc.name} prend la défense de ${pTgt.name}${nickTgt} : "Laissez-le respirer"`
+               : `${pSrc.name} prend la défense de ${pTgt.name}${nickTgt} : "Ces rumeurs sont fausses"`,
         `${pSrc.name} sort du silence pour défendre ${pTgt.name} — surprise`,
         `"Laissez ${pTgt.name} tranquille" — la prise de position inattendue de ${pSrc.name}`,
         `${pSrc.name} coupe court aux rumeurs sur ${pTgt.name}`,
       ],
       bodies: [
         `On ne l'attendait pas là. **${pSrc.name}** a pris la parole pour mettre fin à ce qui circule sur **${pTgt.name}**.\n\n` +
-        `*"Ce que j'entends sur lui, c'est du bruit. Je l'ai côtoyé${isTeammate ? ' dans ce garage' : ''}. Ce n'est pas ce que vous croyez."*\n\n` +
+        `*${srcQuote || (tgtDnf ? `"Son abandon${circuitStr}, c'est la course. Ce que j'entends depuis, c'est du bruit. Un DNF ne définit pas un pilote."` : `"Ce que j'entends sur lui, c'est du bruit. Ce n'est pas ce que vous croyez."`) }*\n\n` +
         pick([
-          `Ce soutien public a surpris. Dans ce paddock, défendre quelqu'un qu'on affronte sur la piste, ça ne se fait pas souvent. ${pSrc.name} l'a fait quand même.`,
+          `Ce soutien public a surpris. Dans ce paddock, défendre quelqu'un qu'on affronte sur la piste, ça ne se fait pas souvent.`,
           `${pTgt.name} a répondu en privé, selon une source. *"Il n'avait pas à faire ça. Mais il l'a fait."*`,
           `La déclaration a immédiatement fait retomber la pression autour de ${pTgt.name}. Pour l'instant.`,
         ]),
-        `**${pSrc.name}** a attendu la bonne occasion. Elle s'est présentée lors du media pen de ce week-end.\n\n` +
-        `*"${pTgt.name} a ses défauts. On en a tous. Mais ce qu'on raconte sur lui en ce moment — c'est exagéré, c'est injuste, et honnêtement, ça me fatigue d'entendre ça."*\n\n` +
-        `Pas un grand discours. Juste quelqu'un qui a décidé de dire la vérité telle qu'il la voit.`,
+        `${srcIntro}\n\n` +
+        `*${srcQuote || `"${pTgt.name} a ses défauts. On en a tous. Mais ce qu'on raconte sur lui en ce moment — c'est exagéré, c'est injuste."` }*\n\n` +
+        `Pas un grand discours. Juste quelqu'un qui a décidé de dire la vérité telle qu'il la voit.\n\n` +
+        `${tgtReaction}`,
       ],
     },
 
@@ -3777,22 +3995,27 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
     defi: {
       type: 'rivalry',
       headlines: [
-        `${pSrc.name} lance un défi public à ${pTgt.name}${nickTgt} : "Qu'il me réponde sur la piste"`,
+        tgtWon      ? `Après la victoire${circuitStr}, ${pSrc.name} lance un défi public à ${pTgt.name}${nickTgt} : "Qu'il recommence"`
+        : tgtDnf    ? `DNF${circuitStr} ou pas, ${pSrc.name} attend ${pTgt.name}${nickTgt} sur la piste`
+        : tgtChampPos === 1 ? `${pSrc.name} défie le leader ${pTgt.name}${nickTgt} : "Ce classement ne durera pas"`
+        : srcChampPos === 1 ? `Le leader ${pSrc.name} fixe son suivant ${pTgt.name}${nickTgt} : "Viens me chercher"`
+                    : `${pSrc.name} lance un défi public à ${pTgt.name}${nickTgt} : "Qu'il me réponde sur la piste"`,
         `Défi ouvert : ${pSrc.name} fixe le niveau — c'est maintenant ${pTgt.name} qui doit répondre`,
         `"Je veux voir ce qu'il a vraiment dans le ventre" — ${pSrc.name} sur ${pTgt.name}`,
-        `${tSrcStr} provoque ${tTgtStr ? tTgtStr : 'l\'adversaire'} : le message de ${pSrc.name} ne laisse rien dans l'ombre`,
+        `${tSrcStr} provoque ${tTgtStr || "l'adversaire"} : le message de ${pSrc.name} ne laisse rien dans l'ombre`,
       ],
       bodies: [
-        `On peut appeler ça comme on veut. **${pSrc.name}** appelle ça *"parler franchement"*.\n\n` +
-        `*"${pTgt.name} et moi, on va se retrouver sur la piste. Et j'attends de voir si ce qu'il dit en dehors se traduit en tour de chrono. Moi je suis prêt. Lui, à lui de répondre."*\n\n` +
+        `${srcIntro}\n\n` +
+        `*${srcQuote || (tgtWon ? `"Sa victoire${circuitStr} ? Bien. On va se retrouver sur la piste — et cette fois, je serai celui qui franchit la ligne en premier."` : tgtDnf ? `"L'abandon${circuitStr} ? Je ne vais pas danser là-dessus. Ce que je veux, c'est le battre quand il est à 100%."` : `"${pTgt.name} et moi, on va se retrouver sur la piste. Moi je suis prêt."`) }*\n\n` +
         pick([
-          `${pTgt.name} n'a pas encore répondu officiellement. Son absence de commentaire est peut-être sa réponse.`,
+          `${pTgt.name} n'a pas encore répondu officiellement.`,
           `L'équipe de ${pTgt.name} a *"pris note"*. Traduction paddock : la guerre est acceptée.`,
-          `Dans le garage de ${tTgtStr || 'l\'adversaire'}, on a regardé les télés avec attention. Les sourires en disaient long.`,
+          `Dans le garage de ${tTgtStr || "l'adversaire"}, on a regardé les télés avec attention.`,
         ]),
         `**${pSrc.name}** a décidé de forcer le duel.\n\n` +
-        `*"Je lui pose la question directement : t'es où, ${pTgt.name}${nickTgt} ? Parce que sur la piste, je ne te vois pas souvent là où tu prétends être. Viens me montrer."*\n\n` +
-        `La provocation est directe. Elle restera. Et les prochains GPs auront un sous-texte que tout le paddock a maintenant en tête.`,
+        `*${srcQuote || `"Je lui pose la question directement : t'es où, ${pTgt.name}${nickTgt} ? Sur la piste, je ne te vois pas souvent là où tu prétends être. Viens me montrer."` }*\n\n` +
+        `${ctxHook ? ctxHook + '\n\n' : champCtxLine ? champCtxLine + '\n\n' : ''}La provocation est directe. Elle restera. Et les prochains GPs auront un sous-texte que tout le paddock a maintenant en tête.\n\n` +
+        `${tgtReaction}`,
       ],
     },
 
@@ -3807,15 +4030,18 @@ function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, se
       ],
       bodies: [
         `Ça n'était pas supposé sortir. **${pSrc.name}** a décidé autrement.\n\n` +
-        `Selon lui, **${pTgt.name}** aurait exprimé — en privé, lors d'un briefing — des doutes profonds sur ${isTeammate ? `la direction de ${tSrcStr || 'l\'équipe'}` : 'sa propre situation'} *"que personne dans le public ne devrait entendre"*.\n\n` +
+        `Selon lui, **${pTgt.name}** aurait exprimé — en privé, lors d'un briefing — des doutes profonds sur ${isTeammate ? `la direction de ${tSrcStr || "l'équipe"}` : 'sa propre situation'}.\n\n` +
+        `*${srcQuote || '"Je sais que je brûle un pont là. Mais certaines choses méritent d\'être dites." — ' + pSrc.name }*\n\n` +
         pick([
-          `*"Je sais que je brûle un pont là. Mais certaines choses méritent d'être dites."* — ${pSrc.name}, sans une once de regret apparent.`,
-          `L'entourage de ${pTgt.name} qualifie ça de *"violation de confiance grave"*. C'est leur droit. Et la sortie de ${pSrc.name} n'en est pas moins réelle.`,
+          `L'entourage de ${pTgt.name} qualifie ça de *"violation de confiance grave"*. C'est leur droit.`,
           `Ce qui est dit ne peut pas être non-dit. Le paddock retient maintenant quelque chose de ${pTgt.name} qu'il n'avait pas choisi de montrer.`,
         ]),
+        `${srcIntro}\n\n` +
         `Il y a une éthique non formulée dans ce sport : ce qu'on confie dans un vestiaire ne sort pas du vestiaire.\n\n` +
         `**${pSrc.name}** vient de la faire voler en éclats.\n\n` +
-        `Les détails sur **${pTgt.name}** qu'il a livrés — ses vraies intentions, ses frustrations internes, les conversations qu'il croyait protégées — sont maintenant dans la nature. Et ils vont y rester.`,
+        `*${srcQuote || `"${pTgt.name} peut s'expliquer maintenant. C'est son droit."` }*\n\n` +
+        `Les détails livrés — vraies intentions, frustrations internes, conversations privées — sont maintenant dans la nature. Et ils vont y rester.\n\n` +
+        `${tgtReaction}`,
       ],
     },
 
@@ -9670,19 +9896,31 @@ const commands = [
       .setDescription('Type d\'action')
       .setRequired(true)
       .addChoices(
-        { name: '🗡️ Trash talk — critique publique acide',              value: 'trash_talk'     },
-        { name: '💣 Rumeur — fuite anonyme au paddock',                  value: 'rumeur'         },
-        { name: '🤝 Éloge — compliment public inattendu',                value: 'eloge'          },
-        { name: '🔪 Trahison — sortie de couverture en conf',            value: 'trahison'       },
-        { name: '😂 Vanne — moquerie légère et publique',                value: 'vanne'          },
-        { name: '🤐 Démentir — contrer une rumeur sur l\'autre',         value: 'dementir'       },
-        { name: '⚔️ Défi — provoquer ouvertement l\'autre pilote',       value: 'defi'           },
-        { name: '💔 Trahison intime — révéler un secret de vestiaire',   value: 'secret'         },
+        { name: '🗡️ Trash talk — attaque publique, affecte sa réputation',      value: 'trash_talk' },
+        { name: '💣 Rumeur — fuite anonyme, tu restes dans l\'ombre mais ça circule', value: 'rumeur'     },
+        { name: '🤝 Éloge — reconnaissance publique, booste son image',           value: 'eloge'      },
+        { name: '🔪 Trahison — tu révèles ce qu\'il a dit en conf privée',        value: 'trahison'   },
+        { name: '😂 Vanne — pique humoristique, ambiance mais ça pique quand même', value: 'vanne'    },
+        { name: '🤐 Démentir — tu prends sa défense contre une rumeur',           value: 'dementir'   },
+        { name: '⚔️ Défi — tu le provoques ouvertement sur la piste',             value: 'defi'       },
+        { name: '💔 Secret — tu révèles quelque chose qu\'il voulait garder caché', value: 'secret'   },
       )
     )
     .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2)),
   new SlashCommandBuilder().setName('admin_stop_race')
     .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
+  new SlashCommandBuilder().setName('admin_queue')
+    .setDescription('[ADMIN] Gère la file d\'attente des articles paddock en attente de publication')
+    .addSubcommand(sub => sub
+      .setName('list')
+      .setDescription('Voir tous les articles en attente de publication'))
+    .addSubcommand(sub => sub
+      .setName('cancel')
+      .setDescription('Annuler un article en attente (le supprime définitivement)')
+      .addStringOption(o => o
+        .setName('id')
+        .setDescription('ID court de l\'article (affiché dans /admin_queue list)')
+        .setRequired(true))),
   new SlashCommandBuilder().setName('admin_fix_slots')
     .setDescription('[ADMIN] Recalcule les slots matin/soir des GP de la saison active.'),
   new SlashCommandBuilder().setName('admin_fix_emojis')
@@ -10240,7 +10478,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-    'action_paddock'].includes(commandName);
+    'action_paddock', 'admin_queue'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -12232,6 +12470,53 @@ async function handleInteraction(interaction) {
     const pilotTeam  = teamMap.get(String(pilot.teamId));
     const targetTeam = teamMap.get(String(target.teamId));
 
+    // ── Contexte récent : dernier GP + classement pilotes ────
+    let recentCtx = {};
+    try {
+      const lastRace = season
+        ? await Race.findOne({ seasonId: season._id, status: 'done' }).sort({ index: -1 }).lean()
+        : null;
+
+      // Classement pilotes — positions au championnat
+      let srcChampPos = null, tgtChampPos = null, srcChampPts = null, tgtChampPts = null;
+      if (season) {
+        const allStandings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+        allStandings.forEach((s, i) => {
+          if (String(s.pilotId) === String(pilot._id))  { srcChampPos = i + 1; srcChampPts = s.points; }
+          if (String(s.pilotId) === String(target._id)) { tgtChampPos = i + 1; tgtChampPts = s.points; }
+        });
+      }
+
+      if (lastRace && lastRace.raceResults && lastRace.raceResults.length) {
+        const tgtResult = lastRace.raceResults.find(r => String(r.pilotId) === String(target._id));
+        const srcResult = lastRace.raceResults.find(r => String(r.pilotId) === String(pilot._id));
+        if (tgtResult) {
+          recentCtx = {
+            circuit       : lastRace.circuit || null,
+            tgtDnf        : tgtResult.dnf === true,
+            tgtDnfReason  : tgtResult.dnfReason || null,
+            tgtWon        : !tgtResult.dnf && tgtResult.pos === 1,
+            tgtPodium     : !tgtResult.dnf && tgtResult.pos <= 3,
+            tgtPos        : tgtResult.dnf ? null : tgtResult.pos,
+            srcPos        : srcResult && !srcResult.dnf ? srcResult.pos : null,
+            srcDnf        : srcResult?.dnf === true,
+            // Classement au championnat
+            srcChampPos, srcChampPts,
+            tgtChampPos, tgtChampPts,
+            // Écart au championnat
+            champGap      : (srcChampPts !== null && tgtChampPts !== null) ? srcChampPts - tgtChampPts : null,
+          };
+        } else {
+          // Pas de résultat course pour la cible mais on a quand même le classement
+          recentCtx = { srcChampPos, srcChampPts, tgtChampPos, tgtChampPts,
+            champGap: (srcChampPts !== null && tgtChampPts !== null) ? srcChampPts - tgtChampPts : null };
+        }
+      } else {
+        recentCtx = { srcChampPos, srcChampPts, tgtChampPos, tgtChampPts,
+          champGap: (srcChampPts !== null && tgtChampPts !== null) ? srcChampPts - tgtChampPts : null };
+      }
+    } catch(e) { console.error('[action_paddock recentCtx]', e.message); }
+
     // ── Configs par action ────────────────────────────────────
     // affinityDelta : impact sur la relation
     // public : l'article sort dans le channel principal (true) ou reste discret (false)
@@ -12248,7 +12533,7 @@ async function handleInteraction(interaction) {
     const cfg = ACTION_CONFIG[actionType];
 
     // ── Générer l'article ────────────────────────────────────
-    const article = generatePaddockAction(pilot, target, pilotTeam, targetTeam, actionType, rel.affinity, season?.year || 2025, isTeammate, isRival);
+    const article = generatePaddockAction(pilot, target, pilotTeam, targetTeam, actionType, rel.affinity, season?.year || 2025, isTeammate, isRival, recentCtx);
     if (!article) return interaction.editReply({ content: '❌ Impossible de générer cet article.', ephemeral: true });
 
     // ── Sauvegarder et publier ────────────────────────────────
@@ -12256,6 +12541,7 @@ async function handleInteraction(interaction) {
       ...article,
       triggered: 'player_action',
       publishedAt: new Date(),
+      queuedBy: interaction.user.id,  // discord ID du joueur
     });
 
     // ── Mettre à jour l'affinité ─────────────────────────────
@@ -12292,52 +12578,89 @@ async function handleInteraction(interaction) {
     // ── Publier dans le channel si public ───────────────────
     const targetNick = target.nickname ? ` *(${target.nickname})*` : '';
 
+    // Labels d'action pour les messages de confirmation (sans "bombe" générique)
+    const ACTION_LABELS = {
+      trash_talk : { sent: `a pris la parole publiquement sur`,  queued: `a déclaré la guerre à`       },
+      rumeur     : { sent: `a fait circuler une rumeur sur`,     queued: `a fait circuler une rumeur sur` },
+      eloge      : { sent: `a rendu hommage à`,                  queued: `a rendu hommage à`             },
+      trahison   : { sent: `a exposé publiquement`,              queued: `a brisé la confiance de`      },
+      vanne      : { sent: `a sorti une pique sur`,              queued: `a sorti une pique sur`        },
+      dementir   : { sent: `a pris la défense de`,               queued: `a pris la défense de`         },
+      defi       : { sent: `a lancé un défi ouvert à`,           queued: `a lancé un défi à`            },
+      secret     : { sent: `a révélé un secret sur`,             queued: `a révélé un secret sur`       },
+    };
+    const lbl = ACTION_LABELS[actionType] || { sent: `a agi sur`, queued: `a agi sur` };
+    const affinityLine = delta >= 0
+      ? `📈 Affinité : **+${delta}** → *${rel.type}*`
+      : `📉 Affinité : **${delta}** → *${rel.type}*`;
+
     // Publier dans le channel principal (avec file d'attente anti-flood 1h)
     if (cfg.public) {
       try {
         const ch = interaction.channel;
         const QUEUE_COOLDOWN_MS = 60 * 60 * 1000; // 1 heure
 
-        // Vérifier le dernier article action_paddock publié
-        const lastPaddockArticle = await NewsArticle.findOne({ triggered: 'player_action' })
-          .sort({ publishedAt: -1 });
+        // Chercher le dernier article paddock publié, tous auteurs confondus (triggered: 'player_action')
+        const lastPaddockArticle = await NewsArticle.findOne({
+          triggered: 'player_action',
+        }).sort({ publishedAt: -1 }).lean();
 
         const now = Date.now();
-        const lastPublishedAt = lastPaddockArticle?.publishedAt
+        const lastPublishedMs = lastPaddockArticle?.publishedAt
           ? new Date(lastPaddockArticle.publishedAt).getTime()
           : 0;
-        const elapsed = now - lastPublishedAt;
+        const elapsed = now - lastPublishedMs;
 
-        if (elapsed < QUEUE_COOLDOWN_MS) {
-          // Trop tôt : programmer la publication après le délai restant
-          const delay = QUEUE_COOLDOWN_MS - elapsed;
-          const pubTime = new Date(now + delay);
-          const hh = pubTime.getHours().toString().padStart(2,'0');
-          const mm = pubTime.getMinutes().toString().padStart(2,'0');
-          const confirmMsg = delta >= 0
-            ? `✅ **${pilot.name}** a pris la parole sur **${target.name}**${targetNick}.\n📈 Affinité : **${delta >= 0 ? '+' : ''}${delta}** → *${rel.type}*\n⏳ L'article paraîtra bientôt — publication programmée à **${hh}:${mm}** pour éviter le flood.`
-            : `✅ **${pilot.name}** a lâché une bombe sur **${target.name}**${targetNick}.\n📉 Affinité : **${delta}** → *${rel.type}*\n⏳ L'article paraîtra bientôt — publication programmée à **${hh}:${mm}** pour éviter le flood.`;
-          await interaction.editReply({ content: confirmMsg, ephemeral: true });
-
-          // Publier après le délai
-          setTimeout(async () => {
-            try { await publishNews(saved, ch); }
-            catch(e) { console.error('[action_paddock publish delayed]', e.message); }
-          }, delay);
-        } else {
+        // Si pas d'article ou dernier article > 1h : publier immédiatement
+        if (!lastPaddockArticle || elapsed >= QUEUE_COOLDOWN_MS) {
           // OK : publier immédiatement
-          const confirmMsg = delta >= 0
-            ? `✅ **${pilot.name}** a pris la parole sur **${target.name}**${targetNick}. L'article sort maintenant.\n📈 Affinité : **${delta >= 0 ? '+' : ''}${delta}** → *${rel.type}*`
-            : `✅ **${pilot.name}** a lâché une bombe sur **${target.name}**${targetNick}. Article publié dans le channel.\n📉 Affinité : **${delta}** → *${rel.type}*`;
+          const confirmMsg =
+            `✅ **${pilot.name}** ${lbl.sent} **${target.name}**${targetNick}. L'article sort maintenant.\n` +
+            `${affinityLine}`;
           await interaction.editReply({ content: confirmMsg, ephemeral: true });
           await publishNews(saved, ch);
+        } else {
+          // Trop tôt : délai = heure du DERNIER article publié + 1h
+          const delay = QUEUE_COOLDOWN_MS - elapsed;
+          const pubTime = new Date(lastPublishedMs + QUEUE_COOLDOWN_MS);
+          const hh = pubTime.getHours().toString().padStart(2,'0');
+          const mm = pubTime.getMinutes().toString().padStart(2,'0');
+          const confirmMsg =
+            `✅ **${pilot.name}** ${lbl.queued} **${target.name}**${targetNick}. Action enregistrée.\n` +
+            `${affinityLine}\n` +
+            `⏳ Un article paddock a été publié récemment — le tien apparaîtra à **${hh}:${mm}** (1h d'écart minimum).`;
+          await interaction.editReply({ content: confirmMsg, ephemeral: true });
+
+          // Publier exactement 1h après le dernier article paddock publié
+          // Marquer l'article comme "en file d'attente" en BDD
+          const scheduledFor = pubTime;
+          await NewsArticle.findByIdAndUpdate(saved._id, {
+            queued: true,
+            scheduledFor,
+          });
+
+          // Stocker le timeoutId dans la Map globale pour pouvoir l'annuler
+          const timeoutId = setTimeout(async () => {
+            paddockQueue.delete(String(saved._id)); // retirer de la map
+            // Vérifier que l'article n'a pas été annulé entre temps
+            const stillQueued = await NewsArticle.findById(saved._id).lean();
+            if (!stillQueued || stillQueued.queued === false) {
+              console.log('[action_paddock queue] Article annulé, publication ignorée:', saved._id);
+              return;
+            }
+            try {
+              await NewsArticle.findByIdAndUpdate(saved._id, { queued: false, scheduledFor: null });
+              await publishNews(saved, ch);
+            } catch(e) { console.error('[action_paddock publish delayed]', e.message); }
+          }, delay);
+          paddockQueue.set(String(saved._id), timeoutId);
         }
       } catch(e) { console.error('[action_paddock publish]', e.message); }
     } else {
-      // Action non-publique (rumeur) : confirmer discrètement
-      const confirmMsg = delta >= 0
-        ? `✅ **${pilot.name}** a pris la parole sur **${target.name}**${targetNick}. L'article sort maintenant.\n📈 Affinité : **${delta >= 0 ? '+' : ''}${delta}** → *${rel.type}*`
-        : `✅ **${pilot.name}** a lâché une bombe sur **${target.name}**${targetNick}. Action enregistrée discrètement.\n📉 Affinité : **${delta}** → *${rel.type}*`;
+      // Action non-publique (rumeur) : confirmer discrètement sans publier dans le channel
+      const confirmMsg =
+        `✅ **${pilot.name}** ${lbl.sent} **${target.name}**${targetNick}. La rumeur circule discrètement.\n` +
+        `${affinityLine}`;
       await interaction.editReply({ content: confirmMsg, ephemeral: true });
     }
 
@@ -12490,6 +12813,110 @@ async function handleInteraction(interaction) {
     }
     return;
   }
+  // ================================================================
+  // /admin_queue — file d'attente des articles paddock
+  // ================================================================
+  if (commandName === 'admin_queue') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const sub = interaction.options.getSubcommand();
+
+    // ── LIST ──────────────────────────────────────────────────
+    if (sub === 'list') {
+      try {
+        const queued = await NewsArticle.find({ queued: true })
+          .sort({ scheduledFor: 1 })
+          .lean();
+
+        if (!queued.length) {
+          return interaction.editReply({ content: '✅ Aucun article en file d\'attente.', ephemeral: true });
+        }
+
+        // Enrichir avec les noms des pilotes impliqués
+        const allPilotIds = [...new Set(queued.flatMap(a => a.pilotIds.map(String)))];
+        const pilots = await Pilot.find({ _id: { $in: allPilotIds } }).lean();
+        const pilotMap = new Map(pilots.map(p => [String(p._id), p.name]));
+
+        const lines = queued.map((art, i) => {
+          const shortId  = String(art._id).slice(-6).toUpperCase();
+          const pilotsStr = art.pilotIds.map(id => pilotMap.get(String(id)) || '?').join(' vs ');
+          const scheduledTs = art.scheduledFor
+            ? `<t:${Math.floor(new Date(art.scheduledFor).getTime() / 1000)}:t>`
+            : '(heure inconnue)';
+          const inMemory   = paddockQueue.has(String(art._id)) ? '🟢' : '🔴';
+          const triggeredBy = art.queuedBy ? `<@${art.queuedBy}>` : 'auto';
+          return [
+            `**[${i+1}]** \`${shortId}\` — *${art.headline.slice(0, 60)}${art.headline.length > 60 ? '…' : ''}*`,
+            `   📰 Pilotes : **${pilotsStr}** · Type : \`${art.type}\``,
+            `   ⏰ Publication prévue : ${scheduledTs} · Timer actif : ${inMemory}`,
+            `   👤 Déclenché par : ${triggeredBy}`,
+          ].join('\n');
+        });
+
+        const embed = new EmbedBuilder()
+          .setTitle(`⏳ File d'attente paddock — ${queued.length} article(s)`)
+          .setDescription(lines.join('\n\n'))
+          .setColor('#F5A623')
+          .setFooter({ text: 'Pour annuler : /admin_queue cancel id:<ID court>' });
+
+        return interaction.editReply({ embeds: [embed], ephemeral: true });
+      } catch(e) {
+        console.error('[admin_queue list]', e);
+        return interaction.editReply({ content: `❌ Erreur : ${e.message}`, ephemeral: true });
+      }
+    }
+
+    // ── CANCEL ────────────────────────────────────────────────
+    if (sub === 'cancel') {
+      const shortId = interaction.options.getString('id').trim().toUpperCase();
+
+      try {
+        // Chercher l'article dont l'ID se termine par le shortId (6 derniers chars)
+        const queued = await NewsArticle.find({ queued: true }).lean();
+        const match  = queued.find(a => String(a._id).slice(-6).toUpperCase() === shortId);
+
+        if (!match) {
+          return interaction.editReply({
+            content: `❌ Aucun article en file avec l'ID \`${shortId}\`. Vérife avec \`/admin_queue list\`.`,
+            ephemeral: true,
+          });
+        }
+
+        // Annuler le setTimeout en mémoire s'il existe encore
+        const timeoutId = paddockQueue.get(String(match._id));
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          paddockQueue.delete(String(match._id));
+        }
+
+        // Marquer comme annulé en BDD (queued:false empêche la publication si le timer a déjà expiré)
+        await NewsArticle.findByIdAndDelete(match._id);
+
+        const pilotsIds = match.pilotIds.map(String);
+        const pilots    = await Pilot.find({ _id: { $in: pilotsIds } }).lean();
+        const pilotsStr = pilots.map(p => p.name).join(' vs ');
+        const triggeredBy = match.queuedBy ? `<@${match.queuedBy}>` : 'inconnu';
+
+        return interaction.editReply({
+          content: [
+            `🗑️ Article \`${shortId}\` **supprimé et publication annulée**.`,
+            `📰 *${match.headline.slice(0, 80)}${match.headline.length > 80 ? '…' : ''}*`,
+            `👥 Pilotes : **${pilotsStr}**`,
+            `👤 Déclenché par : ${triggeredBy}`,
+            timeoutId ? `✅ Timer en mémoire effacé.` : `⚠️ Aucun timer en mémoire (le bot a peut-être redémarré).`,
+          ].join('\n'),
+          ephemeral: true,
+        });
+      } catch(e) {
+        console.error('[admin_queue cancel]', e);
+        return interaction.editReply({ content: `❌ Erreur : ${e.message}`, ephemeral: true });
+      }
+    }
+
+    return interaction.editReply({ content: '❌ Sous-commande inconnue.', ephemeral: true });
+  }
+
   if (commandName === 'admin_fix_emojis') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
