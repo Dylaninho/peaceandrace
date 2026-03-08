@@ -488,6 +488,48 @@ const BASE_STAT_VALUE  = 40;
 const TOTAL_STAT_POOL  = 70;
 const MAX_STAT_BONUS   = 30;   // bonus max par stat lors de la création
 
+// ── Mapping nationalité → pays de GP à domicile ──────────
+// Clé = emoji du drapeau (premier mot de la nationalité), valeurs = country[] des circuits
+const HOME_GP_MAP = {
+  '🇧🇭': ['Bahreïn'],
+  '🇸🇦': ['Arabie Saoudite'],
+  '🇦🇺': ['Australie'],
+  '🇯🇵': ['Japon'],
+  '🇨🇳': ['Chine'],
+  '🇺🇸': ['États-Unis'],
+  '🇲🇨': ['Monaco'],
+  '🇨🇦': ['Canada'],
+  '🇪🇸': ['Espagne'],
+  '🇦🇹': ['Autriche'],
+  '🇬🇧': ['Royaume-Uni'],
+  '🇭🇺': ['Hongrie'],
+  '🇧🇪': ['Belgique'],
+  '🇳🇱': ['Pays-Bas'],
+  '🇮🇹': ['Italie'],          // Emilia Romagna + Italian GP
+  '🇦🇿': ['Azerbaïdjan'],
+  '🇸🇬': ['Singapour'],
+  '🇲🇽': ['Mexique'],
+  '🇧🇷': ['Brésil'],
+  '🇶🇦': ['Qatar'],
+  '🇦🇪': ['Abu Dhabi'],
+  // Nationalités sans GP direct — pas de home GP
+  '🇫🇷': [],  '🇩🇪': [],  '🇨🇭': [],  '🇫🇮': [],  '🇵🇱': [],
+  '🇵🇹': [],  '🇦🇷': [],  '🇨🇴': [],  '🇨🇮': [],  '🇨🇬': [],
+  '🇸🇳': [],  '🇨🇲': [],  '🇲🇦': [],  '🇿🇦': [],
+};
+
+/**
+ * Retourne true si le pilote court à son GP à domicile.
+ * @param {Object} pilot — doc Pilot avec .nationality
+ * @param {Object} race  — doc Race avec .country
+ */
+function isHomeGP(pilot, race) {
+  if (!pilot?.nationality || !race?.country) return false;
+  const flag = pilot.nationality.split(' ')[0];
+  const homeCountries = HOME_GP_MAP[flag] || [];
+  return homeCountries.some(c => race.country === c);
+}
+
 // Nationalités disponibles (drapeau + label)
 // ⚠️ Discord limite à 25 choix max dans addChoices — liste triée avec équilibre Europe/Amériques/Afrique/Asie
 const NATIONALITIES = [
@@ -1024,7 +1066,7 @@ function pilotScore(pilot, gpStyle) {
 }
 
 // ─── Calcul du lap time ───────────────────────────────────
-function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0) {
+function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0, homeGPF = 1.0) {
   const BASE = 90_000;
   const w = GP_STYLE_WEIGHTS[gpStyle] || GP_STYLE_WEIGHTS['mixte'];
 
@@ -1112,7 +1154,7 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const slickInInter = ['SOFT','MEDIUM','HARD'].includes(tireCompound) && weather === 'INTER';
   const wetInDry    = ['WET','INTER'].includes(tireCompound) && (weather === 'DRY' || weather === 'HOT');
   const mismatchF   = slickInWet ? 1.10 : slickInInter ? 1.04 : wetInDry ? 1.06 : 1.0;
-  return Math.round(BASE * carF * pilotF * specF * formF * tireF * dirtyAirF * trackF * randF * weatherF * mismatchF);
+  return Math.round(BASE * carF * pilotF * specF * formF * tireF * dirtyAirF * trackF * randF * weatherF * mismatchF * homeGPF);
 }
 
 // ─── Calcul Q time (tour lancé, pneus neufs) ──────────────
@@ -2218,6 +2260,19 @@ if (finishedSorted[0]) {
     confSubjects.push({ result: dnfTop3[0], angle: 'dnf_drama' });
   }
 
+  // Pilote à domicile — angle spécial si pas déjà dans la liste
+  for (const r of finalResults) {
+    if (confSubjects.length >= 3) break;
+    const p = pilotMap.get(String(r.pilotId));
+    if (!p) continue;
+    if (!isHomeGP(p, raceDoc)) continue;
+    const alreadyIn = confSubjects.some(s => String(s.result.pilotId) === String(r.pilotId));
+    if (!alreadyIn) {
+      confSubjects.push({ result: r, angle: r.dnf ? 'home_dnf' : 'home_gp' });
+      break;
+    }
+  }
+
   // Leader du championnat s'il n'est pas déjà dans la liste (s'il a fini P4+)
   if (champLeaderPilot) {
     const alreadyIn = confSubjects.some(s => String(s.result.pilotId) === String(champLeaderPilot._id));
@@ -2813,9 +2868,56 @@ function buildPressBlock(ctx, angle) {
   return null;
 }
 
+// ── Angles GP à domicile ──────────────────────────────────
+function buildHomeGPBlock(ctx, angle) {
+  const { name, emoji, pos, dnf, circuit, nationality } = ctx;
+  const flag = nationality?.split(' ')[0] || '🏠';
+
+  if (angle === 'home_gp') {
+    const isWin    = pos === 1 && !dnf;
+    const isPodium = pos <= 3 && !dnf;
+    if (isWin) {
+      return pick([
+        `🏠 **${emoji} ${name} — Victoire à domicile ! ${flag} ${circuit}**\n"Vous ne savez pas ce que ça représente. Ici, avec ce public... c'est différent. Chaque course ici est spéciale, mais gagner ici..." — il n'a pas terminé sa phrase. La salle non plus.`,
+        `🏠 **${flag} ${name} gagne chez lui — ${circuit}**\nLes tribunes ont commencé à fêter avant le drapeau à damiers. "${name} le sait. Son équipe aussi. *Je dédie cette victoire à tous ceux qui se sont déplacés aujourd'hui. Vous m'avez porté.*"`,
+        `🏠 **Victoire nationale — ${emoji} ${name}, P1 à ${circuit}**\n"P1 devant mon public. Il y a des journées dans une carrière qui valent plus que des points. Celle-là en fait partie." Les yeux brillants, mais la voix ferme.`,
+      ]);
+    }
+    if (isPodium) {
+      return pick([
+        `🏠 **${flag} ${name} — Podium à domicile (P${pos}), ${circuit}**\n"P${pos} ici, ça compte double. Le public m'a poussé à chaque tour. Je les entendais." Un podium construit sous les yeux de ceux qui comptent le plus.`,
+        `🏠 **${emoji} ${name} — P${pos} sur ses terres, ${circuit}**\n"Je ne vais pas mentir — il y a une pression particulière ici. Mais quand le drapeau est tombé... ça valait tout." Podium et larmes retenues.`,
+      ]);
+    }
+    if (pos <= 10) {
+      return pick([
+        `🏠 **${flag} ${name} — P${pos} à domicile, ${circuit}**\n"P${pos}. Je voulais tellement mieux pour ce public. Ils méritaient plus. Mais je les remercie — ils ont été incroyables jusqu'au bout."`,
+        `🏠 **${emoji} ${name} — P${pos} à ${circuit}**\n"C'est compliqué à expliquer. Tu veux tellement performer ici... parfois ça joue contre toi. P${pos}, on prend, on analyse, on revient."`,
+      ]);
+    }
+    return pick([
+      `🏠 **${flag} ${name} — Week-end difficile à domicile (P${pos}), ${circuit}**\n"Ce n'était pas notre week-end. Devant mon public, c'est encore plus dur à accepter. Mais c'est la course." Bref. Digne.`,
+    ]);
+  }
+
+  if (angle === 'home_dnf') {
+    return pick([
+      `🏠 **${flag} ${name} — Abandon à domicile, ${circuit}**\nDevant son public. L'une des images les plus difficiles du sport automobile : un pilote qui se gare chez lui. "*Je suis désolé pour eux. Ils se sont déplacés pour ça.*" Puis il s'est levé et a salué les tribunes.`,
+      `🏠 **${emoji} ${name} — DNF sous les regards de son pays, ${circuit}**\n"Je n'ai pas les mots. Mais leurs applaudissements quand je me suis garé... disaient tout." ${name} a mis du temps à quitter sa monoplace.`,
+      `🏠 **Abandon cruel pour ${flag} ${name} devant ses supporters, ${circuit}**\n"La course s'est arrêtée trop tôt. Mais le public a été fantastique. Je reviendrai."`,
+    ]);
+  }
+
+  return null;
+}
+
 
 // ── buildPressBlockWithPersonality ────────────────────────────
 function buildPressBlockWithPersonality(ctx, angle, pilot) {
+  // Les angles home GP ont leur propre builder (pas de filtre personnalité dessus — trop émotionnel)
+  if (angle === 'home_gp' || angle === 'home_dnf') {
+    return buildHomeGPBlock({ ...ctx, nationality: pilot?.nationality }, angle);
+  }
   let base = buildPressBlock(ctx, angle);
   if (!base) return null;
   if (!pilot?.personality) return base;
@@ -3415,11 +3517,37 @@ async function generateLegacyCohabitationNews(season, channel) {
         processed.add(pairKey);
 
         const [sA, sB] = [String(pilot._id), String(tm._id)].sort();
-        const rel = await PilotRelation.findOne({ pilotA: sA, pilotB: sB });
-        if (!rel || rel.affinity >= -20) continue; // seulement les tensions réelles
+        let rel = await PilotRelation.findOne({ pilotA: sA, pilotB: sB });
+        if (!rel) rel = new PilotRelation({ pilotA: sA, pilotB: sB, affinity: 0, type: 'neutre', history: [] });
+
+        // ── Incrémenter sharedTeamSeasons ──────────────────────
+        // Ce compteur trace depuis combien de saisons ces deux pilotes sont coéquipiers.
+        // Il est lu dans les articles cohabitation et les confs de presse pour enrichir les narratives.
+        rel.sharedTeamSeasons = (rel.sharedTeamSeasons || 0) + 1;
+        await rel.save();
 
         const team = teamMap.get(tid);
         if (!team) continue;
+
+        // ── Duo long terme (≥ 2 saisons ensemble) ──────────────
+        // Indépendamment de l'affinité : un duo qui dure génère toujours un article
+        // Tons très différents selon que c'est de l'amitié ou de la haine
+        if (rel.sharedTeamSeasons >= 2 && Math.random() < 0.60) {
+          const worstEvent2 = rel.history
+            .filter(h => ['contact_course', 'duel_interne'].includes(h.event))
+            .sort((a, b) => (a.delta || 0) - (b.delta || 0))[0];
+          const yearsAgo2 = worstEvent2?.seasonYear ? season.year - worstEvent2.seasonYear : rel.sharedTeamSeasons;
+          const article2 = genLongTermDuoArticle(pilot, tm, team, rel, season.year);
+          if (article2 && channel) {
+            try {
+              const art = await NewsArticle.create({ ...article2, triggered: 'preseason', publishedAt: new Date() });
+              await sleep(3000);
+              await publishNews(art, channel);
+            } catch(e) { console.error('[long term duo]', e.message); }
+          }
+        }
+
+        if (rel.affinity >= -20) continue; // articles de tension seulement si tensions réelles
 
         // Trouver l'événement le plus marquant de leur histoire commune
         const worstEvent = rel.history
@@ -3441,6 +3569,62 @@ async function generateLegacyCohabitationNews(season, channel) {
     }
     console.log('[Legacy] Analyse cohabitation forcée terminée.');
   } catch(e) { console.error('[generateLegacyCohabitationNews]', e.message); }
+}
+
+// ── Duo longue durée (sharedTeamSeasons ≥ 2) ─────────────────
+// Génère un article "contexte historique" sur un duo qui dure.
+// Ton radicalement différent selon affinité : légende vs guerre froide.
+function genLongTermDuoArticle(pA, pB, team, rel, seasonYear) {
+  const source   = pick(['pitlane_insider', 'f1_weekly', 'paddock_whispers', 'pl_racing_news']);
+  const seasons  = rel.sharedTeamSeasons || 2;
+  const isAlly   = rel.affinity >= 40;
+  const isEnemy  = rel.affinity < -40;
+  const seasonsStr = seasons === 2 ? '2ème saison consécutive' : seasons === 3 ? '3ème saison ensemble' : `${seasons} saisons de suite`;
+
+  if (isAlly) {
+    const headlines = [
+      `${pA.name} / ${pB.name} — ${seasonsStr} chez ${team.emoji} ${team.name} : la recette d'un duo rare`,
+      `${team.emoji} ${team.name} mise à nouveau sur son binôme de luxe`,
+      `${pA.name} et ${pB.name} : ${seasonsStr}, et l'entente reste intacte — comment ?`,
+    ];
+    const body =
+      `Rares sont les duos qui traversent les saisons sans se déchirer. **${pA.name}** et **${pB.name}** entament leur **${seasonsStr}** chez ${team.emoji} **${team.name}**, et le paddock observe avec curiosité.\n\n` +
+      pick([
+        `"On se connaît maintenant. On sait comment l'autre travaille, ce qui l'énerve, ce qui le motive." L'un d'eux, lors d'une interview hivernale. L'autre aurait dit pareil.`,
+        `La recette semble simple : respect mutuel, ligne de démarcation claire côté ingénieurs, et une compétition saine mais jamais toxique. En apparence du moins.`,
+        `Deux saisons à partager un garage, des données, des défaites et des victoires. Ça soude — ou ça détruit. Dans leur cas, l'équation penche clairement dans le bon sens.`,
+      ]) +
+      `\n\nLe management de ${team.name} ne cache pas sa satisfaction. *"Un duo stable, c'est un avantage concurrentiel. On n'en change pas pour changer."*`;
+    return { type: 'friendship', source, headline: pick(headlines), body, pilotIds: [pA._id, pB._id], teamIds: [team._id], seasonYear };
+  }
+
+  if (isEnemy) {
+    const headlines = [
+      `${team.emoji} ${team.name} : **${seasonsStr}** avec ${pA.name} et ${pB.name} — jusqu'à quand ?`,
+      `La guerre froide ${pA.name}/${pB.name} entre dans sa **${seasonsStr}** — et personne ne comprend pourquoi`,
+      `${pA.name} vs ${pB.name} : ${seasons} saisons de tension. ${team.emoji} ${team.name} joue avec le feu.`,
+    ];
+    const body =
+      `**${seasons} saisons.** C'est le temps que dure la cohabitation sous tension entre **${pA.name}** et **${pB.name}** chez ${team.emoji} **${team.name}**.\n\n` +
+      pick([
+        `Ce qui était une friction est devenu une atmosphère. Les mécaniciens travaillent en deux camps distincts. Les briefings collectifs sont tendus. Et le management fait semblant que tout va bien.`,
+        `La question n'est plus "pourquoi ne s'entendent-ils pas" — elle est "pourquoi ${team.name} ne fait rien". ${seasons} saisons. Le paddock n'est plus surpris, juste intrigué par l'inaction.`,
+        `Les deux pilotes performent malgré tout. Ou peut-être à cause de tout. Certains fonctionnent sous tension. Mais combien de temps ?`,
+      ]) +
+      `\n\n*Nos sources internes parlent d'une \"situation gérée mais surveillée\". Ce qui, dans le paddock, signifie rarement que tout va bien.*`;
+    return { type: 'drama', source, headline: pick(headlines), body, pilotIds: [pA._id, pB._id], teamIds: [team._id], seasonYear };
+  }
+
+  // Affinité neutre — duo qui dure sans grand relief
+  const headlines = [
+    `${pA.name} et ${pB.name} : ${seasonsStr} de cohabitation — le calme après le calme`,
+    `${team.emoji} ${team.name} reconduit son binôme pour la ${seasonsStr}`,
+  ];
+  const body =
+    `Pas de grande déclaration, pas de rupture annoncée. **${pA.name}** et **${pB.name}** entament leur **${seasonsStr}** chez ${team.emoji} **${team.name}** avec la même discrétion que les précédentes.\n\n` +
+    `Certains y voient une force — la stabilité, la connaissance mutuelle. D'autres se demandent si l'absence de friction n'est pas aussi l'absence de feu. Dans ce sport, les duos trop confortables ont parfois du mal à se challenger l'un l'autre.\n\n` +
+    `La saison dira qui avait raison.`;
+  return { type: 'driver_interview', source, headline: pick(headlines), body, pilotIds: [pA._id, pB._id], teamIds: [team._id], seasonYear };
 }
 
 function genLegacyCohabitationArticle(pA, pB, team, rel, worstEvent, yearsAgo, seasonYear) {
@@ -5850,6 +6034,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       pendingRepair   : null,   // 'aileron' | 'suspension'
       drsActive       : false,
       damagedCar      : null,   // { lapPenalty: ms } — pénalité de rythme par tour après collision
+      homeGP          : isHomeGP(pilot, race), // true si le pilote court à domicile ce GP
     };
   }).filter(Boolean);
 
@@ -5862,7 +6047,41 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     d.pitStrategy = stratRoll > (1 - twoStopBias) ? 'two_stop' : 'one_stop';
   }
 
-  let scState          = { state: 'NONE', lapsLeft: 0 };
+  // ── GP à domicile — annonce + boost pression ──────────────
+  // Identifier les pilotes qui courent chez eux ce weekend.
+  // Effets : léger bonus de rythme en course (~-180ms/tour via homeGPF)
+  //          + montée de pression immédiate (foule, attentes)
+  //          + article "local hero" avant le départ
+  const homePilots = drivers.filter(d => d.homeGP);
+  if (homePilots.length > 0 && channel) {
+    try {
+      const homeLines = homePilots.map(d => {
+        const flag = d.pilot.nationality?.split(' ')[0] || '🏁';
+        return `${d.team.emoji} **${d.pilot.name}** ${flag} — part depuis la P${d.startPos}`;
+      });
+      const homeEmbed = new EmbedBuilder()
+        .setTitle(`🏠 GP à DOMICILE — ${race.emoji} ${race.circuit}`)
+        .setColor('#FFD700')
+        .setDescription(
+          `**${homePilots.length === 1 ? 'Un pilote' : `${homePilots.length} pilotes`} courent devant leur public ce weekend :**\n\n` +
+          homeLines.join('\n') +
+          `\n\n*La pression du public, l'énergie de la foule — et une pression supplémentaire à gérer.*`
+        );
+      await channel.send({ embeds: [homeEmbed] });
+      await sleep(3000);
+    } catch(e) { console.error('[HomeGP announce]', e.message); }
+
+    // Montée de pression : la foule et les attentes augmentent le pressureLevel
+    for (const d of homePilots) {
+      try {
+        const currentPressure = d.pilot.personality?.pressureLevel || 0;
+        const newPressure = Math.min(100, currentPressure + 15);
+        await Pilot.findByIdAndUpdate(d.pilot._id, { 'personality.pressureLevel': newPressure });
+        d.pilot.personality = d.pilot.personality || {};
+        d.pilot.personality.pressureLevel = newPressure;
+      } catch(e) { /* silencieux */ }
+    }
+  }
   let scCooldown       = 0;
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
@@ -6425,7 +6644,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           driver.pilot, driver.team,
           driver.tireCompound, driver.tireWear,
           weather, trackEvo, gpStyle, driver.pos,
-          scCooldown
+          scCooldown,
+          driver.homeGP ? 0.9980 : 1.0   // GP à domicile : ~-180ms/tour (0.2% plus rapide)
         );
 
         // ── DRS réaliste : bonus si < 1.2s du pilote devant ──
@@ -10753,7 +10973,8 @@ async function handleInteraction(interaction) {
       const tier = ratingTier(ov);
       const team = pilot.teamId ? teamMap.get(String(pilot.teamId)) : null;
       const rank = medals[i] || ('**'+(i+1)+'.**');
-      desc += rank+' '+tier.badge+' **'+ov+'** '+tier.label.padEnd(9)+' — **'+pilot.name+'** '+(team ? team.emoji+' '+team.name : '🔴 *Libre*')+'\n';
+      const flag = pilot.nationality?.split(' ')[0] || '';
+      desc += rank+' '+tier.badge+' **'+ov+'** '+tier.label.padEnd(9)+' — '+flag+' **'+pilot.name+'** '+(team ? team.emoji+' '+team.name : '🔴 *Libre*')+'\n';
     }
     return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🏎️ Classement Pilotes — Note Générale').setColor('#FF1801').setDescription(desc.slice(0,4000)||'Aucun').setFooter({ text: sorted.length+' pilote(s) · Poids: Freinage 17% · Contrôle 17% · Dépassement 15%...' })] });
   }
