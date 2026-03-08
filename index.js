@@ -339,6 +339,9 @@ const TransferOfferSchema = new mongoose.Schema({
   primePodium      : { type: Number, default: 0 },
   salaireBase      : { type: Number, default: 100 },
   seasons          : { type: Number, default: 1 },
+  // Statut proposé dans le contrat : 'numero1' = pilote leader, 'numero2' = second pilote
+  // Le salaire proposé tient déjà compte de ce statut (numero1 ≈ +20%)
+  driverStatus     : { type: String, enum: ['numero1', 'numero2', null], default: null },
   status           : { type: String, enum: ['pending','accepted','rejected','expired'], default: 'pending' },
   expiresAt        : Date,
 });
@@ -1298,7 +1301,9 @@ function resolveSafetyCar(scState, lapIncidents) {
 
 // ─── Incidents ────────────────────────────────────────────
 // Les réactions et le controle réduisent le risque d'accident
-function checkIncident(pilot, team, lap = 1, totalLaps = 50) {
+// reliabilityMalus : multiplicateur additionnel sur reliabF (ex: 0.15 = +15% de risque mécanique)
+//                    Calculé depuis la chimie d'écurie (mécaniciens démotivés)
+function checkIncident(pilot, team, lap = 1, totalLaps = 50, reliabilityMalus = 0) {
   const roll = Math.random();
 
   // ── Fiabilité mécanique progressive ──────────────────────────────────────
@@ -1313,7 +1318,8 @@ function checkIncident(pilot, team, lap = 1, totalLaps = 50) {
                       : lap <= 15 ? 0.55
                       : 0.70 + lapProgress * 0.50;
 
-  const reliabF  = (100 - team.refroidissement) / 100 * 0.007 * lapMultiplier;
+  // reliabilityMalus appliqué sur la probabilité mécanique uniquement (mécaniciens, pas les pilotes)
+  const reliabF  = (100 - team.refroidissement) / 100 * 0.007 * lapMultiplier * (1 + reliabilityMalus);
   const crashF   = ((100 - pilot.controle) / 100 * 0.003) + ((100 - pilot.reactions) / 100 * 0.002);
   if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
   if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
@@ -2298,6 +2304,91 @@ if (finishedSorted[0]) {
     const block = buildPressBlockWithPersonality(ctx, angle, pilot);
     if (block) blocks.push({ block, photoUrl: pilot.photoUrl || null });
   }
+
+  // ── TRAHISON MÉDIATIQUE ────────────────────────────────────
+  // Un pilote bad_boy (ou guerrier sous extrême pression) peut "lâcher" une
+  // critique de son coéquipier en conf de presse si pression >= 80.
+  // Déclenche : article immédiat + chute affinité + réaction en chaîne garantie.
+  try {
+    for (const pilot of allPilots) {
+      const arch     = pilot.personality?.archetype;
+      const pressure = pilot.personality?.pressureLevel || 0;
+      // Condition : bad_boy ou guerrier, pression >= 80, et 40% de chance
+      if (!['bad_boy', 'guerrier'].includes(arch)) continue;
+      if (pressure < 80) continue;
+      if (Math.random() > 0.40) continue;
+
+      const teammate = allPilots.find(p =>
+        String(p.teamId) === String(pilot.teamId) &&
+        String(p._id) !== String(pilot._id)
+      );
+      if (!teammate) continue;
+
+      const team = allTeams.find(t => String(t._id) === String(pilot.teamId));
+      if (!team) continue;
+
+      // Générer la critique
+      const betrayalLines = {
+        bad_boy: [
+          `En conf de presse, **${pilot.name}** n'a pas mâché ses mots : *"Honnêtement ? Je ne suis pas sûr qu'on tire dans la même direction. ${teammate.name} et moi, on n'a pas la même lecture des choses."*`,
+          `**${pilot.name}** a lâché une bombe en conférence : *"${teammate.name} fait son travail. Mais si on veut vraiment se battre pour quelque chose, il faudra que tout le monde hausse son niveau — moi le premier, lui aussi."*`,
+          `Ambiance électrique dans le box ${team.emoji} **${team.name}** — **${pilot.name}** a déclaré publiquement : *"Je ne vais pas mentir, il y a des tensions. Ce n'est pas un secret."*`,
+        ],
+        guerrier: [
+          `Sous tension maximale, **${pilot.name}** a craqué en conf de presse : *"Je vais être direct — je ne vois pas **${teammate.name}** pousser comme moi en ce moment. C'est frustrant."*`,
+          `**${pilot.name}** n'a plus retenu ses frustrations : *"Si on veut performer, il faut que tout le monde soit à 100%. Je ne peux pas porter l'écurie seul."* — Une pique directe vers **${teammate.name}**.`,
+        ],
+      };
+      const pool = betrayalLines[arch] || betrayalLines.bad_boy;
+      const betrayalText = pool[Math.floor(Math.random() * pool.length)];
+
+      // Créer l'article de trahison
+      const article = await NewsArticle.create({
+        type: 'drama',
+        source: 'paddock_whispers',
+        headline: `${pilot.name} critique publiquement son coéquipier ${teammate.name}`,
+        body: betrayalText,
+        pilotIds: [pilot._id, teammate._id],
+        teamIds: [team._id],
+        raceId: raceDoc._id,
+        seasonYear: season.year,
+        triggered: 'media_betrayal',
+        publishedAt: new Date(),
+      });
+
+      // Chute d'affinité immédiate
+      const [sA, sB] = [String(pilot._id), String(teammate._id)].sort();
+      let rel = await PilotRelation.findOne({ pilotA: sA, pilotB: sB });
+      if (!rel) rel = new PilotRelation({ pilotA: sA, pilotB: sB, affinity: 0, type: 'neutre', history: [] });
+      const affinityDrop = -15;
+      rel.affinity = Math.max(-100, Math.min(100, rel.affinity + affinityDrop));
+      rel.type = rel.affinity >= 60 ? 'amis' : rel.affinity >= 20 ? 'respect' : rel.affinity > -20 ? 'neutre' : rel.affinity > -60 ? 'tension' : 'ennemis';
+      rel.history = rel.history || [];
+      rel.history.push({ event: 'trahison_medias', delta: affinityDrop, date: new Date(), circuit: raceDoc.circuit, seasonYear: season.year });
+      // Réaction en chaîne GARANTIE (pendingReply forcé)
+      rel.pendingReply = true;
+      rel.pendingReplyCtx = {
+        responderId:      String(teammate._id),
+        citedId:          String(pilot._id),
+        originalHeadline: article.headline,
+        triggerType:      'media_betrayal',
+      };
+      await rel.save();
+
+      // Monter la pression du pilote trahi
+      await Pilot.findByIdAndUpdate(teammate._id, {
+        $inc: { 'personality.pressureLevel': 20 },
+      });
+
+      // Publier dans le channel
+      if (channel) {
+        try { await channel.send({ content: `🎙️ **CONF DE PRESSE — INCIDENT**\n${betrayalText}` }); } catch(e) {}
+        await sleep(3000);
+        await publishNews(article, channel);
+      }
+      blocks.push({ block: betrayalText, photoUrl: pilot.photoUrl || null });
+    }
+  } catch(e) { console.error('[TrahisonMédiatique]', e.message); }
 
   return blocks;
 }
@@ -5658,6 +5749,25 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const totalLaps = race.laps;
   const gpStyle   = race.gpStyle;
 
+  // ── Chimie d'écurie — pré-calcul avant la course ─────────
+  // Calcule la moyenne des affinités coéquipiers pour chaque écurie.
+  // Si la moyenne est négative → les mécaniciens sont démotivés → malus de fiabilité.
+  // Si la moyenne est très positive → bonus de devPoints via evolveCarStats.
+  const teamChemistryMalusMap = new Map(); // teamId → reliabilityMalus (0.0–0.25)
+  for (const team of teams) {
+    const teamPilots = pilots.filter(p => String(p.teamId) === String(team._id));
+    if (teamPilots.length < 2) { teamChemistryMalusMap.set(String(team._id), 0); continue; }
+    const [sA, sB] = [String(teamPilots[0]._id), String(teamPilots[1]._id)].sort();
+    try {
+      const rel = await PilotRelation.findOne({ pilotA: sA, pilotB: sB }).lean();
+      const avgAff = rel ? rel.affinity : 0;
+      // Malus actif seulement si affinité moyenne négative
+      // Plage : affinity -100 → malus 0.25 (max) | affinity 0 → malus 0 | positif → 0
+      const malus = avgAff < 0 ? Math.min(0.25, Math.abs(avgAff) / 400) : 0;
+      teamChemistryMalusMap.set(String(team._id), malus);
+    } catch(e) { teamChemistryMalusMap.set(String(team._id), 0); }
+  }
+
   // ── Météo dynamique ───────────────────────────────────────
   // Météo de départ (pondérée vers DRY)
   let weather = pick(['DRY','DRY','DRY','DRY','WET','INTER','HOT']);
@@ -6073,7 +6183,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
     // ── Incidents ───────────────────────────────────────────
     for (const driver of alive) {
-      const incident = checkIncident(driver.pilot, driver.team, lap, totalLaps);
+      // Récupérer le malus de fiabilité de la chimie d'écurie (pré-calculé avant la course)
+      const teamReliabilityMalus = teamChemistryMalusMap.get(String(driver.team._id)) || 0;
+      const incident = checkIncident(driver.pilot, driver.team, lap, totalLaps, teamReliabilityMalus);
       if (!incident) continue;
       if (scActive && (incident.type === 'CRASH' || incident.type === 'PUNCTURE')) continue;
 
@@ -7660,7 +7772,25 @@ async function evolveCarStats(raceResults, teams) {
     const lowWageBonusDev = totalSalaire < 150 ? 3 : 0;
 
     const devGained = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3 - salaryPenalty + lowWageBonusDev);
-    const newDevPts = team.devPoints + Math.max(1, devGained); // toujours au moins 1 devPt gagné
+
+    // ── Bonus de développement — bonne chimie d'écurie ───────
+    // Si les deux coéquipiers s'entendent bien (affinité ≥ 40), les mécaniciens
+    // travaillent mieux ensemble → bonus de +3 devPts/course.
+    // Si l'affinité est très haute (≥ 70) → +5 devPts.
+    let chemDevBonus = 0;
+    try {
+      const teamPilotsForDev = await Pilot.find({ teamId: team._id }).lean();
+      if (teamPilotsForDev.length >= 2) {
+        const [sdA, sdB] = [String(teamPilotsForDev[0]._id), String(teamPilotsForDev[1]._id)].sort();
+        const devRel = await PilotRelation.findOne({ pilotA: sdA, pilotB: sdB }).lean();
+        if (devRel) {
+          if (devRel.affinity >= 70) chemDevBonus = 5;
+          else if (devRel.affinity >= 40) chemDevBonus = 3;
+        }
+      }
+    } catch(e) { /* silencieux */ }
+
+    const newDevPts = team.devPoints + Math.max(1, devGained + chemDevBonus);
 
     // ── Seuil abaissé : 30 devPts = 1 point de stat ─────────
     // Avant : 50 → le bas de grille ne progressait presque jamais
@@ -8549,6 +8679,31 @@ async function startTransferPeriod() {
       else if (ov < 65 && prefersYoungTalent)     seasons = 3; // pari sur un jeune, on verrouille
       else                                         seasons = 2;
 
+      // ── Statut proposé : pilote 1 ou 2 ──────────────────────
+      // L'écurie propose le statut en fonction du rang du candidat dans son évaluation :
+      // - Le candidat le mieux scoré pour un slot libre = statut Pilote 1
+      // - Les suivants = statut Pilote 2
+      // - Si l'écurie a déjà un pilote en place classé higher ov → statut 2 pour les nouveaux
+      const existingPilots = await Pilot.find({ teamId: team._id }).lean();
+      let offeredStatus = null;
+      if (slotsAvailable >= 2) {
+        // 2 slots libres : le top candidat reçoit statut 1, les autres statut 2
+        const isTopCandidate = targets[0] && String(targets[0].pilot._id) === String(pilot._id);
+        offeredStatus = isTopCandidate ? 'numero1' : 'numero2';
+      } else if (slotsAvailable === 1) {
+        // 1 slot libre : statut déterminé par comparaison avec le pilote déjà là
+        if (existingPilots.length === 1) {
+          const existingOv = overallRating(existingPilots[0]);
+          offeredStatus = ov >= existingOv ? 'numero1' : 'numero2';
+        } else {
+          offeredStatus = 'numero1'; // premier pilote = leader par défaut
+        }
+      }
+
+      // Bonus salarial pour un statut Pilote 1 (+20% sur le salaire de base)
+      const statusSalaryMultiplier = offeredStatus === 'numero1' ? 1.20 : 1.0;
+      const finalSalaireBase = Math.round(salaireBase * statusSalaryMultiplier);
+
       // Expiration de l'offre : 7 jours
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
@@ -8561,8 +8716,9 @@ async function startTransferPeriod() {
         coinMultiplier,
         primeVictoire: Math.max(0, primeVictoire),
         primePodium:   Math.max(0, primePodium),
-        salaireBase:   Math.max(50, salaireBase),
+        salaireBase:   Math.max(50, finalSalaireBase),
         seasons,
+        driverStatus: offeredStatus,
         status: 'pending',
         expiresAt,
       });
@@ -8714,13 +8870,26 @@ async function startSecondTransferWave(channel) {
       // Expiration plus courte : 4 jours seulement
       const expiresAt = new Date(Date.now() + 4 * 24 * 60 * 60 * 1000);
 
+      // Statut 2ème vague : comparaison avec pilote existant dans l'écurie
+      const existingPilots2 = await Pilot.find({ teamId: team._id }).lean();
+      let offeredStatus2 = null;
+      if (existingPilots2.length === 1) {
+        const existingOv2 = overallRating(existingPilots2[0]);
+        offeredStatus2 = ov >= existingOv2 ? 'numero1' : 'numero2';
+      } else {
+        offeredStatus2 = 'numero1';
+      }
+      // En 2ème vague, légère réduction supplémentaire si on propose le statut 1 (urgence)
+      const statusMul2 = offeredStatus2 === 'numero1' ? 1.15 : 1.0;
+
       await TransferOffer.create({
         teamId: team._id, pilotId: pilot._id,
         coinMultiplier,
         primeVictoire: Math.max(0, primeVictoire),
         primePodium:   Math.max(0, primePodium),
-        salaireBase:   Math.max(40, salaireBase),
+        salaireBase:   Math.max(40, Math.round(salaireBase * statusMul2)),
         seasons: 1,  // toujours 1 saison en 2ème vague
+        driverStatus: offeredStatus2,
         status: 'pending',
         expiresAt,
       });
@@ -9202,8 +9371,7 @@ async function handleAffinites(interaction) {
   const name = interaction.options.getString('pilote');
   const pilot = await Pilot.findOne({ name: { $regex: name, $options: 'i' } });
   if (!pilot) return interaction.editReply(`❌ Pilote introuvable : \`${name}\``);
-  const arch = pilot.personality?.archetype || '?';
-  const tone = pilot.personality?.tone || '?';
+  // arch et tone délibérément cachés : les users découvrent la personnalité via les actions en jeu
   const pres = pilot.personality?.pressureLevel || 0;
   const pressBar = '🔴'.repeat(Math.round(pres/20)) + '⚪'.repeat(5-Math.round(pres/20));
   const rels = await PilotRelation.find({$or:[{pilotA:String(pilot._id)},{pilotB:String(pilot._id)}]}).sort({affinity:-1}).limit(8);
@@ -9217,9 +9385,9 @@ async function handleAffinites(interaction) {
     lines.push(`${bar} **${other.name}** (${r.affinity>0?'+':''}${r.affinity}) · *${r.type}*${last?' · '+last.event:''}`);
   }
   await interaction.editReply({ embeds: [new EmbedBuilder()
-    .setTitle(`🎭 ${pilot.name} — Personnalité & Relations`)
+    .setTitle(`🎭 ${pilot.name} — Relations & Pression`)
     .setColor('#FF6B35')
-    .setDescription(`**Archétype :** ${arch}  |  **Tone :** ${tone}\n**Pression :** ${pressBar} (${pres}/100)\n\n`+(lines.length?`**Relations :**\n${lines.join('\n')}`:'*Aucune relation enregistrée.*'))] });
+    .setDescription(`**Pression :** ${pressBar} (${pres}/100)\n\n`+(lines.length?`**Relations :**\n${lines.join('\n')}`:'*Aucune relation enregistrée.*'))] });
 }
 
 async function handleInteraction(interaction) {
@@ -9384,7 +9552,10 @@ async function handleInteraction(interaction) {
 
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
     await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
-    await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id });
+    // Appliquer le statut pilote proposé dans l'offre (numero1 / numero2)
+    const pilotStatusUpdate = { teamId: team._id };
+    if (offer.driverStatus) pilotStatusUpdate.teamStatus = offer.driverStatus;
+    await Pilot.findByIdAndUpdate(pilot._id, pilotStatusUpdate);
     await Contract.create({
       pilotId: pilot._id, teamId: team._id,
       seasonsDuration:  offer.seasons, seasonsRemaining: offer.seasons,
@@ -10245,6 +10416,11 @@ async function handleInteraction(interaction) {
           ? Math.max(0, Math.floor((new Date(o.expiresAt) - Date.now()) / (1000 * 60 * 60)))
           : null;
         const expiryStr = expiresIn !== null ? `⏳ Expire dans ~${expiresIn}h` : '';
+        const statusStr = o.driverStatus === 'numero1'
+          ? '\n🔴 **Statut proposé : Pilote N°1** *(leader d\'écurie — salaire inclut la prime de statut)*'
+          : o.driverStatus === 'numero2'
+            ? '\n🔵 **Statut proposé : Pilote N°2** *(second pilote)*'
+            : '';
         const embed = new EmbedBuilder()
           .setTitle(`${team.emoji} ${team.name} — Offre de contrat`)
           .setColor(team.color)
@@ -10252,6 +10428,7 @@ async function handleInteraction(interaction) {
             `×**${o.coinMultiplier}** coins | **${o.seasons}** saison(s)\n` +
             `💰 Salaire : **${o.salaireBase} 🪙**/course\n` +
             `🏆 Prime V : **${o.primeVictoire} 🪙** | 🥉 Prime P : **${o.primePodium} 🪙**` +
+            statusStr +
             (expiryStr ? `\n${expiryStr}` : '')
           )
           .setFooter({ text: `ID de secours : ${o._id}` });
@@ -10323,7 +10500,10 @@ async function handleInteraction(interaction) {
 
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
     await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
-    await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id });
+    // Appliquer le statut pilote proposé dans l'offre
+    const pilotStatusUpdate2 = { teamId: team._id };
+    if (offer.driverStatus) pilotStatusUpdate2.teamStatus = offer.driverStatus;
+    await Pilot.findByIdAndUpdate(pilot._id, pilotStatusUpdate2);
     await Contract.create({
       pilotId: pilot._id, teamId: team._id,
       seasonsDuration:   offer.seasons, seasonsRemaining: offer.seasons,
