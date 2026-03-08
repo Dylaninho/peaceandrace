@@ -6837,6 +6837,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const raceKey = String(race._id);
   global.activeRaces.set(raceKey, { abort: () => { raceAborted = true; } });
 
+  // ── Safety Car state — initialisé avant la boucle ──────────
+  let scState = { state: 'NONE', lapsLeft: 0 };
+
   for (let lap = 1; lap <= totalLaps; lap++) {
     if (raceAborted) {
       if (channel) await channel.send('🛑 **COURSE ARRÊTÉE PAR UN ADMINISTRATEUR.** Les résultats actuels ne seront pas comptabilisés.');
