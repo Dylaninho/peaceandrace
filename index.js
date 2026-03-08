@@ -8684,7 +8684,7 @@ async function getAllPilotsWithTeams() {
   return { pilots, teams };
 }
 
-async function applyRaceResults(raceResults, raceId, season, collisions = []) {
+async function applyRaceResults(raceResults, raceId, season, collisions = [], channel = null) {
   const teams = await Team.find();
   console.log(`[applyRaceResults] Début — ${raceResults.length} résultats, seasonId=${season._id}, raceId=${raceId}`);
 
@@ -14565,7 +14565,7 @@ async function runRace(override, gpIndex = null) {
   }
 
   const { results, collisions, penalties } = await simulateRace(race, grid, pilots, teams, contracts, channel, season);
-  await applyRaceResults(results, race._id, season, collisions);
+  await applyRaceResults(results, race._id, season, collisions, channel);
 
   // ── Annonce rivalités nouvellement déclarées ─────────────
   // On n'annonce que si la rivalité vient d'être créée CE GP (rivalDeclaredAt === race.index)
