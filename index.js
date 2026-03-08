@@ -12600,46 +12600,62 @@ async function handleInteraction(interaction) {
         const ch = interaction.channel;
         const QUEUE_COOLDOWN_MS = 60 * 60 * 1000; // 1 heure
 
-        // Chercher le dernier article paddock PUBLIÉ (exclure les articles en attente)
-        const lastPaddockArticle = await NewsArticle.findOne({
+        // Dernier article publié (hors file d'attente)
+        const lastPublished = await NewsArticle.findOne({
           triggered: 'player_action',
-          queued: { $ne: true },          // ignorer les articles en file d'attente
-          _id: { $ne: saved._id },        // ignorer l'article qu'on vient de créer
+          queued: { $ne: true },
+          _id: { $ne: saved._id },
         }).sort({ publishedAt: -1 }).lean();
 
-        const now = Date.now();
-        const lastPublishedMs = lastPaddockArticle?.publishedAt
-          ? new Date(lastPaddockArticle.publishedAt).getTime()
-          : 0;
-        const elapsed = now - lastPublishedMs;
+        // Dernier slot occupé en file d'attente (scheduledFor le plus tardif)
+        const lastQueued = await NewsArticle.findOne({
+          triggered: 'player_action',
+          queued: true,
+          _id: { $ne: saved._id },
+        }).sort({ scheduledFor: -1 }).lean();
 
-        // Si pas d'article publié ou dernier > 1h : publier immédiatement
-        if (!lastPaddockArticle || elapsed >= QUEUE_COOLDOWN_MS) {
-          // OK : publier immédiatement
+        const now = Date.now();
+
+        const lastPublishedMs = lastPublished?.publishedAt
+          ? new Date(lastPublished.publishedAt).getTime()
+          : 0;
+
+        const lastQueuedMs = lastQueued?.scheduledFor
+          ? new Date(lastQueued.scheduledFor).getTime()
+          : 0;
+
+        // Référence = le slot le plus tardif (publié ou en file)
+        const lastSlotMs = Math.max(lastPublishedMs, lastQueuedMs);
+        const elapsed    = now - lastSlotMs;
+
+        // Si aucun slot récent ou dernier slot > 1h : publier immédiatement
+        if (lastSlotMs === 0 || elapsed >= QUEUE_COOLDOWN_MS) {
           const confirmMsg =
             `✅ **${pilot.name}** ${lbl.sent} **${target.name}**${targetNick}. L'article sort maintenant.\n` +
             `${affinityLine}`;
           await interaction.editReply({ content: confirmMsg, ephemeral: true });
           await publishNews(saved, ch);
         } else {
-          // Trop tôt : délai = heure du DERNIER article publié + 1h
-          const delay = QUEUE_COOLDOWN_MS - elapsed;
-          const pubTime = new Date(lastPublishedMs + QUEUE_COOLDOWN_MS);
-          const pubTs = `<t:${Math.floor(pubTime.getTime() / 1000)}:t>`; // timestamp Discord auto-timezone
+          // Slot = lastSlotMs + 1h (s'enchaîne après le dernier article publié ou en file)
+          const delay   = QUEUE_COOLDOWN_MS - elapsed;
+          const pubTime = new Date(lastSlotMs + QUEUE_COOLDOWN_MS);
+          const pubTs   = `<t:${Math.floor(pubTime.getTime() / 1000)}:t>`;
+          const posInQueue = lastQueued
+            ? `(position ${await NewsArticle.countDocuments({ triggered: 'player_action', queued: true, _id: { $ne: saved._id } })} en file)`
+            : '';
           const confirmMsg =
             `✅ **${pilot.name}** ${lbl.queued} **${target.name}**${targetNick}. Action enregistrée.\n` +
             `${affinityLine}\n` +
-            `⏳ Un article paddock a été publié récemment — le tien apparaîtra à ${pubTs} (1h d'écart minimum).`;
+            `⏳ Article programmé à ${pubTs} ${posInQueue}`;
           await interaction.editReply({ content: confirmMsg, ephemeral: true });
 
-          // Marquer l'article comme "en file d'attente" en BDD
-          const scheduledFor = pubTime;
+          // Marquer en BDD avec le bon scheduledFor
           await NewsArticle.findByIdAndUpdate(saved._id, {
             queued: true,
-            scheduledFor,
+            scheduledFor: pubTime,
           });
 
-          // Stocker le timeoutId dans la Map globale pour pouvoir l'annuler
+          // Timer précis
           const timeoutId = setTimeout(async () => {
             paddockQueue.delete(String(saved._id));
             const stillQueued = await NewsArticle.findById(saved._id).lean();
