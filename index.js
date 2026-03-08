@@ -189,10 +189,24 @@ const PilotSchema = new mongoose.Schema({
   // Score -1.0 → +1.0 basé sur les 3 derniers GPs, mis à jour après chaque course
   // Influence légèrement le temps au tour (+200ms sur série de DNFs, -200ms sur série de podiums)
   recentFormScore : { type: Number, default: 0 },
+  // ── Surnom ────────────────────────────────────────────────
+  // Donné par un rival ou un coéquipier à un moment-clé.
+  // Repris ponctuellement dans les articles et confs de presse.
+  nickname        : { type: String, default: null },
+  nicknameGivenBy : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
 });
 const Pilot = mongoose.model('Pilot', PilotSchema);
 
-// ── HallOfFame ─────────────────────────────────────────────
+// ── CommandCooldown — anti-spam commandes joueurs ──────────
+const CommandCooldownSchema = new mongoose.Schema({
+  discordId  : { type: String, required: true },
+  command    : { type: String, required: true },
+  pilotId    : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot' },
+  usedAt     : { type: Date, default: Date.now },
+});
+CommandCooldownSchema.index({ discordId: 1, command: 1, pilotId: 1 });
+const CommandCooldown = mongoose.model('CommandCooldown', CommandCooldownSchema);
+
 const HallOfFameSchema = new mongoose.Schema({
   seasonYear       : { type: Number, required: true, unique: true },
   champPilotId     : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot' },
@@ -2342,11 +2356,11 @@ if (finishedSorted[0]) {
       cPos,
       champLeaderName : champLeaderPilot?.name,
       champLeaderPts  : champLeader?.points || 0,
-      teammate   : teammate?.name,
+      teammate   : teammate ? nickOrName(teammate) : undefined,
       teammatePos: teammateResult?.pos,
       teammateDnf: teammateResult?.dnf,
       teamStatus : pilot.teamStatus || null,
-      rival      : rival?.name,
+      rival      : rival ? nickOrName(rival) : undefined,
       rivalPos   : rivalResult?.pos,
       rivalDnf   : rivalResult?.dnf,
       rivalContacts    : pilot.rivalContacts || 0,
@@ -2442,6 +2456,11 @@ if (finishedSorted[0]) {
         await publishNews(article, channel);
       }
       blocks.push({ block: betrayalText, photoUrl: pilot.photoUrl || null });
+
+      // Tentative de surnom : la trahison peut générer un surnom ironique/moqueur
+      if (!teammate.nickname) {
+        await tryAssignNickname(pilot, teammate, 'teammate', 0.25);
+      }
     }
   } catch(e) { console.error('[TrahisonMédiatique]', e.message); }
 
@@ -3574,6 +3593,249 @@ async function generateLegacyCohabitationNews(season, channel) {
 // ── Duo longue durée (sharedTeamSeasons ≥ 2) ─────────────────
 // Génère un article "contexte historique" sur un duo qui dure.
 // Ton radicalement différent selon affinité : légende vs guerre froide.
+// ============================================================
+// 🎭  ACTION PADDOCK — articles générés par les joueurs
+// 8 types d'actions avec contenu original et impact affinité
+// ============================================================
+function generatePaddockAction(pSrc, pTgt, tSrc, tTgt, type, currentAffinity, seasonYear, isTeammate, isRival) {
+  const source = pick(['paddock_whispers', 'pitlane_insider', 'pl_racing_news', 'f1_weekly']);
+  const tSrcStr = tSrc ? `${tSrc.emoji} ${tSrc.name}` : '?';
+  const tTgtStr = tTgt ? `${tTgt.emoji} ${tTgt.name}` : '?';
+  const nickTgt = pTgt.nickname ? ` — alias ${pTgt.nickname}` : '';
+  const archSrc = pSrc.personality?.archetype || 'guerrier';
+  const pressureSrc = pSrc.personality?.pressureLevel || 0;
+
+  const templates = {
+
+    // ─── TRASH TALK ────────────────────────────────────────────
+    trash_talk: {
+      type: 'drama',
+      headlines: isTeammate ? [
+        `${pSrc.name} sur son coéquipier ${pTgt.name}${nickTgt} : les mots qui brûlent`,
+        `${tSrcStr} : ${pSrc.name} ne retient plus ses coups contre ${pTgt.name}`,
+        `"${pTgt.name} ? Honnêtement..." — ${pSrc.name} lâche tout en public`,
+        `Guerre interne chez ${tSrcStr} : ${pSrc.name} s'en prend ouvertement à ${pTgt.name}`,
+      ] : [
+        `${pSrc.name} descend ${pTgt.name}${nickTgt} en conférence — le paddock se lève`,
+        `"${pTgt.name} est surévalué" — ${pSrc.name} sans filtre`,
+        `La déclaration de ${pSrc.name} sur ${pTgt.name} qui va faire parler`,
+        `${tSrcStr} vs ${tTgtStr} : ${pSrc.name} ouvre le feu sur ${pTgt.name}`,
+      ],
+      bodies: isTeammate ? [
+        `Il y a des choses qu'on ne dit pas en public dans ce paddock. **${pSrc.name}** vient de les dire.\n\n` +
+        `Devant les caméras, sans hésitation : *"Je ne vais pas mentir — **${pTgt.name}** n'est pas au niveau où on a besoin qu'il soit. Moi je donne tout, chaque tour. Ce n'est pas toujours réciproque."*\n\n` +
+        pick([
+          `${tSrcStr} a refusé de commenter. ${pTgt.name} non plus. Le silence, parfois, répond mieux que les mots.`,
+          `Le management de ${tSrcStr} a été prévenu. Il devrait y avoir une réunion dans les 48h. On vous tient au courant.`,
+          `Dans les couloirs du paddock, personne n'est surpris. *"Ça couvait depuis des semaines"*, confie une source proche.`,
+        ]),
+        `**${pSrc.name}** a attendu la bonne question pour lâcher la bombe. Et elle a explosé.\n\n` +
+        `*"Mon coéquipier ?"* Une pause. Un sourire. *"Je ne vais pas commenter chaque course de **${pTgt.name}**. Je préfère me concentrer sur la mienne — et les résultats parlent d'eux-mêmes."*\n\n` +
+        `Ce qui n'est pas dit est souvent ce qui fait le plus mal. Le paddock a parfaitement compris.`,
+      ] : [
+        `La conférence de presse avait commencé normalement. Jusqu'à ce que quelqu'un pose la question sur **${pTgt.name}**.\n\n` +
+        `**${pSrc.name}** : *"Surévalué ? Je ne dirais pas ça. Je dirais... soutenu. Très soutenu par les circonstances. Mais le talent brut ? Je laisse les chronos répondre."*\n\n` +
+        pick([
+          `${pTgt.name} n'a pas encore répondu. Son entourage parle de *"commentaires irrespectueux"*. La suite promet.`,
+          `${tTgtStr} a transmis un communiqué laconique : *"Nous ne commentons pas les provocations."* Traduction : ils ont vu.`,
+          `Dans le paddock, certains applaudissent l'honnêteté. D'autres se demandent si ${pSrc.name} sait ce qu'il vient d'allumer.`,
+        ]),
+        `"${pTgt.name} a de bons résultats quand tout va bien. Mais enlève-lui une belle voiture sous lui, et qu'est-ce qu'il reste ?" **${pSrc.name}** a dit ça calmement, comme si c'était une évidence.\n\n` +
+        `Ce n'est pas ce qu'on dit publiquement dans ce sport. C'est ce qu'on murmure dans les couloirs. ${pSrc.name} vient de le crier.`,
+      ],
+    },
+
+    // ─── RUMEUR ────────────────────────────────────────────────
+    rumeur: {
+      type: 'transfer_rumor',
+      headlines: [
+        `Rumeur paddock : ${pTgt.name}${nickTgt} bientôt à la porte ?`,
+        `Coulisses : ce que ${pTgt.name} aurait dit — et qu'il ne voulait pas voir partir`,
+        `Source anonyme : *"${pTgt.name} n'est plus en odeur de sainteté ici"*`,
+        `Whispers paddock : la situation de ${pTgt.name} serait plus fragile qu'annoncé`,
+        `La rumeur qui court sur ${pTgt.name} depuis ${tTgtStr ? tTgtStr : 'son écurie'}...`,
+      ],
+      bodies: [
+        `Une source proche du paddock, qui souhaite garder l'anonymat, a fait circuler une information qui commence à faire le tour des garages.\n\n` +
+        `Selon elle, **${pTgt.name}** ne serait *"pas aussi intouchable que son entourage veut bien le laisser croire"*. Sans plus de détails — mais avec un timing qui questionne.\n\n` +
+        pick([
+          `Aucune confirmation officielle. Mais dans ce sport, les rumeurs naissent rarement de rien.`,
+          `${tTgtStr ? `${tTgtStr} n'a pas commenté.` : ''} Le silence a parfois la valeur d'une réponse.`,
+          `Plusieurs personnes dans le paddock affirment avoir entendu la même version. Ce n'est plus une rumeur isolée.`,
+        ]),
+        `Le paddock bruisse. Quelqu'un a parlé.\n\n` +
+        `Ce qui circule sur **${pTgt.name}** ? Que ses relations en interne seraient *"tendues"*, que certains résultats auraient créé des *"questions"*, et que la situation mérite d'être suivie de près.\n\n` +
+        `On attend la version officielle. Elle viendra peut-être. Ou pas.`,
+        `*"Il y a ce qu'on voit sur la piste, et ce qui se passe vraiment derrière les portes fermées."* — La phrase d'une source anonyme à propos de **${pTgt.name}**.\n\n` +
+        `Impossible de vérifier. Difficile d'ignorer complètement. La rumeur a maintenant un deuxième souffle.`,
+      ],
+    },
+
+    // ─── ÉLOGE ─────────────────────────────────────────────────
+    eloge: {
+      type: 'friendship',
+      headlines: isTeammate ? [
+        `${pSrc.name} sur ${pTgt.name}${nickTgt} : "C'est le meilleur coéquipier que j'ai eu"`,
+        `${tSrcStr} : quand ${pSrc.name} défend publiquement ${pTgt.name}`,
+        `"Il m'a rendu meilleur" — l'éloge surprise de ${pSrc.name} pour ${pTgt.name}`,
+      ] : [
+        `${pSrc.name} et son respect public pour ${pTgt.name}${nickTgt} — inattendu`,
+        `"Il mérite plus de reconnaissance" — ${pSrc.name} sur ${pTgt.name}`,
+        `${tSrcStr} vs ${tTgtStr} : quand la rivalité laisse place au respect`,
+        `${pSrc.name} sort du lot : son message à ${pTgt.name} touche le paddock`,
+      ],
+      bodies: isTeammate ? [
+        `Dans un sport où les coéquipiers se ménagent rarement, **${pSrc.name}** a choisi la transparence.\n\n` +
+        `*"${pTgt.name} ? Franchement, j'ai travaillé avec beaucoup de pilotes. Il est à part. Son regard sur la voiture, sa façon d'aider l'équipe — pas juste pour lui, pour tout le monde. C'est rare."*\n\n` +
+        pick([
+          `${pTgt.name} a répondu avec un simple : *"Ça compte."* Deux mots. Suffisants.`,
+          `Le vestiaire a applaudi. Pas fort. Juste ce qu'il fallait pour que tout le monde comprenne que c'était sincère.`,
+          `${tSrcStr} a posté la citation sur ses réseaux. Stratégie d'image, ou reconnaissance authentique ? Les deux ne s'excluent pas.`,
+        ]),
+      ] : [
+        `On ne s'y attendait pas. **${pSrc.name}** non plus, peut-être. Mais ça lui a échappé — ou il a choisi de le dire.\n\n` +
+        `*"${pTgt.name} est l'un des pilotes les plus complets de cette grille. Il ne reçoit pas ce qu'il mérite. Voilà — je l'ai dit."*\n\n` +
+        pick([
+          `Le paddock a sourcillé. Une déclaration de respect entre rivaux, ça dérange toujours un peu les narratives habituelles.`,
+          `${pTgt.name} a répondu depuis ses réseaux : *"Du respect, ça se mérite. Merci ${pSrc.name}."* Court. Classe.`,
+          `L'équipe de ${pTgt.name} n'a pas masqué sa satisfaction. Dans ce paddock, une validation publique d'un rival vaut son pesant d'or.`,
+        ]),
+      ],
+    },
+
+    // ─── TRAHISON ──────────────────────────────────────────────
+    trahison: {
+      type: 'drama',
+      headlines: [
+        `Exclusif : ${pSrc.name} révèle ce que ${pTgt.name}${nickTgt} aurait dit en privé`,
+        `${pSrc.name} sort de la réserve et expose ${pTgt.name} — le paddock choqué`,
+        `"Je ne devais pas le dire" — mais ${pSrc.name} l'a quand même dit, sur ${pTgt.name}`,
+        `La sortie de piste médiatique de ${pSrc.name} contre ${pTgt.name}`,
+      ],
+      bodies: [
+        `Il y a une règle non écrite dans ce paddock : ce qui se dit dans le vestiaire reste dans le vestiaire.\n\n` +
+        `**${pSrc.name}** vient de la briser.\n\n` +
+        `*"Je n'aurais peut-être pas dû dire ça"* — il l'a dit quand même. Ce que **${pTgt.name}** aurait confié sur sa situation, ses doutes, ses envies de départ — rien n'y échappe.\n\n` +
+        pick([
+          `L'entourage de ${pTgt.name} parle de *"trahison"*. Le mot est fort. Il est peut-être exact.`,
+          `Plusieurs pilotes dans le paddock ont réagi avec malaise. *"On ne fait pas ça"* revient souvent. ${pSrc.name} a l'air de s'en ficher.`,
+          `Depuis cette déclaration, la relation entre les deux camps est officiellement dans le rouge.`,
+        ]),
+        `La conférence de presse a dégénéré tranquillement. **${pSrc.name}** avait préparé son coup.\n\n` +
+        `Item après item, il a exposé ce que **${pTgt.name}** ne voulait pas voir rendu public. Ses demandes internes. Ses tensions avec le management. Ses commentaires sur l'équipe.\n\n` +
+        `*"S'il a quelque chose à dire, qu'il le dise lui-même"*. Sauf que maintenant, ${pSrc.name} l'a dit à sa place.`,
+      ],
+    },
+
+    // ─── VANNE ─────────────────────────────────────────────────
+    vanne: {
+      type: 'driver_interview',
+      headlines: [
+        `${pSrc.name} régale le paddock avec sa vanne sur ${pTgt.name}${nickTgt}`,
+        `"${pTgt.name} et moi on s'entend bien... enfin, moi j'essaie" — ${pSrc.name} en mode stand-up`,
+        `La pique (très) remarquée de ${pSrc.name} sur ${pTgt.name}`,
+        `${pSrc.name} : "Je plaisante avec ${pTgt.name}. Surtout quand il n'est pas là."`,
+      ],
+      bodies: [
+        `Quelqu'un a demandé à **${pSrc.name}** ce qu'il pensait des performances de **${pTgt.name}** cette saison.\n\n` +
+        `Il a pris une seconde. A regardé vers le ciel. Et a répondu : *"${pTgt.name} ? Il est régulier. Régulièrement… là."*\n\n` +
+        pick([
+          `Rires dans la salle. Sourire en coin de ${pSrc.name}. ${pTgt.name} n'était pas là pour entendre ça. Il lira les comptes-rendus.`,
+          `On a demandé à ${pSrc.name} s'il plaisantait. *"Évidemment. Mais les meilleures vannes ont toujours un fond de vrai."* Et il est parti.`,
+          `La pique va circuler. Ce genre de phrase finit toujours dans les timelines. ${pTgt.name} a déjà été notifié, selon nos sources.`,
+        ]),
+        `Le paddock cherche parfois la légèreté. **${pSrc.name}** l'a trouvée — aux dépens de **${pTgt.name}**.\n\n` +
+        `*"Je l'adore, hein. C'est juste que quand je le regarde dans les stands, j'apprends à ne pas répéter ses erreurs. C'est une forme de respect."*\n\n` +
+        `${pTgt.name}${nickTgt} a eu le droit à un clip de 12 secondes dans tous les paddock shows du week-end. Ce n'était pas prévu. ${pSrc.name} en a lui-même ri.`,
+      ],
+    },
+
+    // ─── DÉMENTIR ──────────────────────────────────────────────
+    dementir: {
+      type: 'driver_interview',
+      headlines: [
+        `${pSrc.name} prend la défense de ${pTgt.name}${nickTgt} : "Ces rumeurs sont fausses"`,
+        `${pSrc.name} sort du silence pour défendre ${pTgt.name} — surprise`,
+        `"Laissez ${pTgt.name} tranquille" — la prise de position inattendue de ${pSrc.name}`,
+        `${pSrc.name} coupe court aux rumeurs sur ${pTgt.name}`,
+      ],
+      bodies: [
+        `On ne l'attendait pas là. **${pSrc.name}** a pris la parole pour mettre fin à ce qui circule sur **${pTgt.name}**.\n\n` +
+        `*"Ce que j'entends sur lui, c'est du bruit. Je l'ai côtoyé${isTeammate ? ' dans ce garage' : ''}. Ce n'est pas ce que vous croyez."*\n\n` +
+        pick([
+          `Ce soutien public a surpris. Dans ce paddock, défendre quelqu'un qu'on affronte sur la piste, ça ne se fait pas souvent. ${pSrc.name} l'a fait quand même.`,
+          `${pTgt.name} a répondu en privé, selon une source. *"Il n'avait pas à faire ça. Mais il l'a fait."*`,
+          `La déclaration a immédiatement fait retomber la pression autour de ${pTgt.name}. Pour l'instant.`,
+        ]),
+        `**${pSrc.name}** a attendu la bonne occasion. Elle s'est présentée lors du media pen de ce week-end.\n\n` +
+        `*"${pTgt.name} a ses défauts. On en a tous. Mais ce qu'on raconte sur lui en ce moment — c'est exagéré, c'est injuste, et honnêtement, ça me fatigue d'entendre ça."*\n\n` +
+        `Pas un grand discours. Juste quelqu'un qui a décidé de dire la vérité telle qu'il la voit.`,
+      ],
+    },
+
+    // ─── DÉFI ──────────────────────────────────────────────────
+    defi: {
+      type: 'rivalry',
+      headlines: [
+        `${pSrc.name} lance un défi public à ${pTgt.name}${nickTgt} : "Qu'il me réponde sur la piste"`,
+        `Défi ouvert : ${pSrc.name} fixe le niveau — c'est maintenant ${pTgt.name} qui doit répondre`,
+        `"Je veux voir ce qu'il a vraiment dans le ventre" — ${pSrc.name} sur ${pTgt.name}`,
+        `${tSrcStr} provoque ${tTgtStr ? tTgtStr : 'l\'adversaire'} : le message de ${pSrc.name} ne laisse rien dans l'ombre`,
+      ],
+      bodies: [
+        `On peut appeler ça comme on veut. **${pSrc.name}** appelle ça *"parler franchement"*.\n\n` +
+        `*"${pTgt.name} et moi, on va se retrouver sur la piste. Et j'attends de voir si ce qu'il dit en dehors se traduit en tour de chrono. Moi je suis prêt. Lui, à lui de répondre."*\n\n` +
+        pick([
+          `${pTgt.name} n'a pas encore répondu officiellement. Son absence de commentaire est peut-être sa réponse.`,
+          `L'équipe de ${pTgt.name} a *"pris note"*. Traduction paddock : la guerre est acceptée.`,
+          `Dans le garage de ${tTgtStr || 'l\'adversaire'}, on a regardé les télés avec attention. Les sourires en disaient long.`,
+        ]),
+        `**${pSrc.name}** a décidé de forcer le duel.\n\n` +
+        `*"Je lui pose la question directement : t'es où, ${pTgt.name}${nickTgt} ? Parce que sur la piste, je ne te vois pas souvent là où tu prétends être. Viens me montrer."*\n\n` +
+        `La provocation est directe. Elle restera. Et les prochains GPs auront un sous-texte que tout le paddock a maintenant en tête.`,
+      ],
+    },
+
+    // ─── SECRET DE VESTIAIRE ───────────────────────────────────
+    secret: {
+      type: 'scandal_offtrack',
+      headlines: [
+        `Exclusif — ce que ${pTgt.name}${nickTgt} voulait à tout prix garder secret`,
+        `${pSrc.name} expose : ce qui se disait sur ${pTgt.name} en privé`,
+        `La révélation de ${pSrc.name} sur ${pTgt.name} — le paddock n'était pas prêt`,
+        `Secret de vestiaire brisé : ${pSrc.name} parle, ${pTgt.name} perd le contrôle du récit`,
+      ],
+      bodies: [
+        `Ça n'était pas supposé sortir. **${pSrc.name}** a décidé autrement.\n\n` +
+        `Selon lui, **${pTgt.name}** aurait exprimé — en privé, lors d'un briefing — des doutes profonds sur ${isTeammate ? `la direction de ${tSrcStr || 'l\'équipe'}` : 'sa propre situation'} *"que personne dans le public ne devrait entendre"*.\n\n` +
+        pick([
+          `*"Je sais que je brûle un pont là. Mais certaines choses méritent d'être dites."* — ${pSrc.name}, sans une once de regret apparent.`,
+          `L'entourage de ${pTgt.name} qualifie ça de *"violation de confiance grave"*. C'est leur droit. Et la sortie de ${pSrc.name} n'en est pas moins réelle.`,
+          `Ce qui est dit ne peut pas être non-dit. Le paddock retient maintenant quelque chose de ${pTgt.name} qu'il n'avait pas choisi de montrer.`,
+        ]),
+        `Il y a une éthique non formulée dans ce sport : ce qu'on confie dans un vestiaire ne sort pas du vestiaire.\n\n` +
+        `**${pSrc.name}** vient de la faire voler en éclats.\n\n` +
+        `Les détails sur **${pTgt.name}** qu'il a livrés — ses vraies intentions, ses frustrations internes, les conversations qu'il croyait protégées — sont maintenant dans la nature. Et ils vont y rester.`,
+      ],
+    },
+
+  };
+
+  const tpl = templates[type];
+  if (!tpl) return null;
+
+  return {
+    type: tpl.type,
+    source,
+    headline: pick(tpl.headlines),
+    body: pick(tpl.bodies),
+    pilotIds: [pSrc._id, pTgt._id],
+    teamIds: [tSrc?._id, tTgt?._id].filter(Boolean),
+    seasonYear,
+    raceId: null,
+  };
+}
+
 function genLongTermDuoArticle(pA, pB, team, rel, seasonYear) {
   const source   = pick(['pitlane_insider', 'f1_weekly', 'paddock_whispers', 'pl_racing_news']);
   const seasons  = rel.sharedTeamSeasons || 2;
@@ -3663,6 +3925,99 @@ function genLegacyCohabitationArticle(pA, pB, team, rel, worstEvent, yearsAgo, s
     teamIds: [team._id],
     seasonYear,
   };
+}
+
+// ============================================================
+// 🏷️  SURNOMS — Système de nicknames F1
+// Un pilote peut donner un surnom à un autre à certains moments-clés.
+// Le surnom est stocké sur le pilote cible et réutilisé dans les articles/confs.
+// Déclencheurs : rivalité intense, duel en course, cohabitation tendue, conf de presse.
+// Fréquence : rare (~10-15%) — pour ne pas saturer.
+// ============================================================
+
+// Générateur de surnoms selon le contexte
+// pTarget = le pilote qui reçoit le surnom
+// context = 'rival' | 'teammate' | 'race_duel' | 'domination'
+function generateNickname(pGiver, pTarget, context) {
+  const ov   = overallRating(pTarget);
+  const arch = pGiver.personality?.archetype || 'neutre';
+  const tone = pGiver.personality?.tone      || 'neutre';
+
+  // Surnoms basés sur le style du donneur + contexte
+  const pool = {
+    rival: {
+      bad_boy     : [`"Ce Nul"`, `"Monsieur Miracle"`, `"L'Imposteur en Chef"`, `"Mon Punching-Ball"`, `"Le Bouche-Trou"`, `"Le Fantôme"`, `"Monsieur Deuxième"`],
+      guerrier    : [`"L'Obstacle"`, `"Le Bouclier de Papier"`, `"Mon Pot de Fleurs"`, `"Le Râleur"`, `"La Pieuvre"`, `"Monsieur DNF"`],
+      icone       : [`"Le Prétendant au Trône"`, `"Mon Faire-Valoir"`, `"Le Grand Oublié"`, `"Le Miroir Cassé"`],
+      calculateur : [`"Le Bug du Système"`, `"L'Anomalie"`, `"La Variable Inutile"`, `"Erreur 404"`, `"Le Glitch"`],
+      rookie_ambitieux: [`"Le Kamikaze"`, `"Le Fou Furieux"`, `"L'Acharné du Bac à Sable"`, `"Mini-Moi"`, `"Le Stagiaire Enragé"`],
+      vieux_sage  : [`"L'Impatient"`, `"La Pétoire"`, `"Le Pressé"`, `"Le Bolide en Carton"`, `"Monsieur Toujours-Pressé"`],
+    },
+    teammate: {
+      bad_boy     : [`"Le Boulet"`, `"Mon Boulet de Luxe"`, `"L'Inutile Payé Cher"`, `"Le VRP de l'Écurie"`, `"Mon Handicap"`, `"Madame Délicate"`, `"Le Pot Cassé"`],
+      guerrier    : [`"L'Autre"`, `"Mon Poids Mort"`, `"Le Touriste de Luxe"`, `"Le Freinage Volontaire"`, `"Le Ralenti Humain"`],
+      icone       : [`"Mon Lieutenant (Raté)"`, `"L'Utile Quelquefois"`, `"Le Fiable les Bons Jours"`, `"Mon Faire-Valoir Attitré"`],
+      calculateur : [`"La Donnée Parasitaire"`, `"Le Paramètre Inutile"`, `"Le Benchmark Déprimant"`, `"L'Étalon de Mes Angoisses"`],
+      rookie_ambitieux: [`"Le Dinosaure"`, `"Le Fossil F1"`, `"Grand-Père"`, `"Le Reliquat"`, `"Le Survivant Malgré Lui"`],
+      vieux_sage  : [`"Le Feu Follet"`, `"L'Incontrôlable"`, `"La Fusée sans GPS"`, `"Mon Boulet Imprévisible"`],
+    },
+    race_duel: {
+      bad_boy     : [`"La Punaise sur Roues"`, `"Le Mur Roulant"`, `"Mon Accrocheur Préféré"`, `"Le Dépasse-Jamais"`, `"La Barricade"`],
+      guerrier    : [`"Le Mur"`, `"L'Accrocheur Professionnel"`, `"La Tique"`, `"Le Collant"`, `"L'Implosion à Retardement"`],
+      icone       : [`"Le Challenger"`, `"L'Adversaire Correct"`, `"Le Digne Parfois"`, `"Mon Meilleur Ennemi"`],
+      calculateur : [`"L'Algorithme Défectueux"`, `"Le Calcul Foireux"`, `"Le Scénario Catastrophe"`, `"Le Plan B Raté"`],
+      rookie_ambitieux: [`"Le Roc"`, `"L'Indestructible Momie"`, `"Le Bunker"`, `"Le Monument"`, `"Le Reliquat de Carrière"`],
+      vieux_sage  : [`"La Jeunesse Imprudente"`, `"Le Talent Brut et Non Raffiné"`, `"L'Explosion Contrôlée"`],
+    },
+    domination: {
+      bad_boy     : [`"Le Perdant Magnifique"`, `"L'Éternel Second"`, `"Le Podium Jamais"`, `"Le Grand Décevant"`, `"Monsieur Presque"`],
+      guerrier    : [`"La Référence Triste"`, `"L'Étalon de Médiocrité"`, `"Le Niveau Plancher"`],
+      icone       : [`"Mon Émule Raté"`, `"L'Apprenti Incomplet"`, `"Le Prometteur Perpétuel"`],
+      calculateur : [`"La Constante d'Échec"`, `"Le Résidu"`, `"La Marge d'Erreur"`],
+      rookie_ambitieux: [`"L'Intouchable"`, `"Le Boss (Parait-il)"`, `"La Légende de Son Propre Esprit"`],
+      vieux_sage  : [`"Le Futur Peut-Être"`, `"L'Espoir Conditionnel"`, `"La Relève Hypothétique"`],
+    },
+  };
+
+  const contextPool = pool[context] || pool['rival'];
+  const archPool    = contextPool[arch] || contextPool['guerrier'] || [];
+  if (!archPool.length) return null;
+  return pick(archPool);
+}
+
+/**
+ * Tente de donner un surnom (pGiver → pTarget).
+ * Conditions : pTarget n'a pas déjà de surnom, chance ~12%.
+ * Retourne le surnom si attribué, null sinon.
+ */
+async function tryAssignNickname(pGiver, pTarget, context, chance = 0.12) {
+  if (!pGiver || !pTarget) return null;
+  if (pTarget.nickname) return null; // déjà un surnom — on ne l'écrase pas
+  if (Math.random() > chance) return null;
+
+  const nick = generateNickname(pGiver, pTarget, context);
+  if (!nick) return null;
+
+  await Pilot.findByIdAndUpdate(pTarget._id, {
+    nickname: nick,
+    nicknameGivenBy: pGiver._id,
+  });
+  pTarget.nickname       = nick;
+  pTarget.nicknameGivenBy = pGiver._id;
+  return nick;
+}
+
+/**
+ * Retourne une phrase intégrant le surnom si disponible, sinon juste le nom.
+ * Usage : nickOrName(p) → "Leclerc (alias \"Le Météore\")" ou juste "Leclerc"
+ * Légèreté : ~30% du temps on utilise l'alias, pas à chaque mention
+ */
+function nickOrName(p, { alwaysShowNick = false } = {}) {
+  if (!p?.nickname) return p?.name || '?';
+  if (alwaysShowNick || Math.random() < 0.30) {
+    return `${p.name} *(alias ${p.nickname})*`;
+  }
+  return p.name;
 }
 
 function genRivalryArticle(pA, pB, teamA, teamB, contacts, circuit, seasonYear, rivalHeat = 0) {
@@ -3776,10 +4131,14 @@ function genRivalryArticle(pA, pB, teamA, teamB, contacts, circuit, seasonYear, 
     ],
   }[tier];
 
+  // Utiliser le surnom si disponible — mention légère, pas systématique
+  const nickB = pB.nickname && Math.random() < 0.35 ? ` (${pB.nickname})` : '';
+  const nickA = pA.nickname && Math.random() < 0.35 ? ` (${pA.nickname})` : '';
+
   return {
     type: 'rivalry', source,
-    headline: pick(headlines),
-    body: pick(bodies),
+    headline: pick(headlines).replace(pA.name, pA.name + nickA).replace(pB.name, pB.name + nickB),
+    body: pick(bodies).replace(pB.name, pB.name + nickB),
     pilotIds: [pA._id, pB._id],
     teamIds: [teamA._id, teamB._id],
     seasonYear,
@@ -4542,7 +4901,14 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
       if (postedRivalKeys.has(key)) continue; // déjà annoncé récemment
       const tA = teamMap.get(String(pA.teamId));
       const tB = teamMap.get(String(pB.teamId));
-      if (tA && tB) articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year, pA.rivalHeat || 0));
+      if (tA && tB) {
+        articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year, pA.rivalHeat || 0));
+        // Tentative de surnom — le "donneur" est pA (le pilote le plus actif dans la rivalité)
+        // Condition : rivalité escaladée (contacts ≥ 3 ou heat ≥ 50) + rare
+        if ((pA.rivalContacts >= 3 || (pA.rivalHeat || 0) >= 50) && !pB.nickname) {
+          await tryAssignNickname(pA, pB, 'rival', 0.14);
+        }
+      }
     }
   }
 
@@ -7704,12 +8070,12 @@ const exitNeighborStr = neighborAhead && neighborBehind
     const flPts    = fl && !driver.dnf && driver.pos <= 10 ? 1 : 0;
 
     // Bonus de participation : tout le monde gagne quelque chose même sans point
-    // P1-P10 = 0 bonus (pts F1 suffisent), P11 = 12, P15 = 60, P20 = 120
-    // Cela garantit que les bas de grille peuvent améliorer 1 stat toutes les 1-2 courses
+    // P1-P10 = 0 bonus (pts F1 suffisent), P11+ = 20
+    // ⚠️ pts * 22 → P10 (1pt) = 22 > participBonus 20 — P10 gagne toujours plus que P11
     const participBonus = driver.dnf ? 0 : (driver.pos > 10 ? 20 : 0);
 
     const coins = Math.round(
-      (pts * 12 + (driver.dnf ? 0 : 40) + participBonus) * multi
+      (pts * 22 + (driver.dnf ? 0 : 40) + participBonus) * multi
       + salary + primeV + primeP + (fl ? 30 : 0)
     );
 
@@ -8207,6 +8573,14 @@ async function applyRaceResults(raceResults, raceId, season, collisions = []) {
           $set: { rivalHeat: newHeat },
         });
         rivalCollisionThisRace.add(key);
+
+        // Tentative surnom lors d'un contact rival intense (crash ou multi-contacts)
+        if ((hasCrash || count >= 2) && newHeat >= 40) {
+          const them = await Pilot.findById(theirId);
+          if (them && !them.nickname) {
+            await tryAssignNickname(me, them, 'race_duel', 0.10);
+          }
+        }
       } else if (!currentRival) {
         // Pas encore de rival — si 2+ contacts cette course, déclarer la rivalité
         const newTotal = (me.rivalContacts || 0) + count;
@@ -9288,6 +9662,25 @@ const commands = [
   new SlashCommandBuilder().setName('affinites')
     .setDescription('Voir la personnalité et les relations d\'un pilote')
     .addStringOption(o => o.setName('pilote').setDescription('Nom du pilote').setRequired(true)),
+
+  new SlashCommandBuilder().setName('action_paddock')
+    .setDescription('🎭 Ton pilote prend une initiative dans le paddock — rumeur, éloge, trahison...')
+    .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2))
+    .addStringOption(o => o.setName('cible').setDescription('Nom du pilote ciblé').setRequired(true))
+    .addStringOption(o => o.setName('type')
+      .setDescription('Type d\'action')
+      .setRequired(true)
+      .addChoices(
+        { name: '🗡️ Trash talk — critique publique acide',              value: 'trash_talk'     },
+        { name: '💣 Rumeur — fuite anonyme au paddock',                  value: 'rumeur'         },
+        { name: '🤝 Éloge — compliment public inattendu',                value: 'eloge'          },
+        { name: '🔪 Trahison — sortie de couverture en conf',            value: 'trahison'       },
+        { name: '😂 Vanne — moquerie légère et publique',                value: 'vanne'          },
+        { name: '🤐 Démentir — contrer une rumeur sur l\'autre',         value: 'dementir'       },
+        { name: '⚔️ Défi — provoquer ouvertement l\'autre pilote',       value: 'defi'           },
+        { name: '💔 Trahison intime — révéler un secret de vestiaire',   value: 'secret'         },
+      )
+    ),
   new SlashCommandBuilder().setName('admin_stop_race')
     .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
   new SlashCommandBuilder().setName('admin_fix_slots')
@@ -9846,7 +10239,8 @@ async function handleInteraction(interaction) {
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
-    'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro'].includes(commandName);
+    'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
+    'action_paddock'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -10093,8 +10487,17 @@ async function handleInteraction(interaction) {
       const heat = pilot.rivalHeat || 0;
       const heatBar = heat >= 80 ? '🔴🔴🔴🔴🔴' : heat >= 60 ? '🔴🔴🔴🔴⚫' : heat >= 40 ? '🔴🔴🔴⚫⚫' : heat >= 20 ? '🔴🔴⚫⚫⚫' : '🔴⚫⚫⚫⚫';
       const heatLabel = heat >= 80 ? 'Rivalité EXPLOSIVE' : heat >= 60 ? 'Tension très haute' : heat >= 40 ? 'Tension montante' : heat >= 20 ? 'Rivalité établie' : 'Rivalité naissante';
+      const rivalNickLine = rival?.nickname ? ` — *alias ${rival.nickname}*` : '';
       embed.addFields({ name: '⚔️ Rivalité',
-        value: `${rivalTeam?.emoji || ''} **${rival?.name || '?'}** — ${pilot.rivalContacts || 0} contact(s)\n${heatBar} *${heatLabel}*`,
+        value: `${rivalTeam?.emoji || ''} **${rival?.name || '?'}**${rivalNickLine} — ${pilot.rivalContacts || 0} contact(s)\n${heatBar} *${heatLabel}*`,
+      });
+    }
+
+    // Surnom reçu
+    if (pilot.nickname) {
+      const givenBy = pilot.nicknameGivenBy ? await Pilot.findById(pilot.nicknameGivenBy) : null;
+      embed.addFields({ name: '🏷️ Surnom',
+        value: `${pilot.nickname}${givenBy ? ` *(selon ${givenBy.name})*` : ''}`,
       });
     }
 
@@ -11773,6 +12176,138 @@ async function handleInteraction(interaction) {
     return handleAdminSetPersonalities(interaction);
   }
   if (commandName === 'affinites') return handleAffinites(interaction);
+
+  // ================================================================
+  // /action_paddock — initiative joueur dans le paddock
+  // ================================================================
+  if (commandName === 'action_paddock') {
+    const pilotIndex = interaction.options.getInteger('pilote') || 1;
+    const cibleName  = interaction.options.getString('cible');
+    const actionType = interaction.options.getString('type');
+
+    // ── Récupérer le pilote source ────────────────────────────
+    const pilot = await Pilot.findOne({ discordId: interaction.user.id, pilotIndex });
+    if (!pilot) return interaction.editReply({ content: `❌ Tu n'as pas de pilote n°${pilotIndex}.`, ephemeral: true });
+    if (!pilot.teamId) return interaction.editReply({ content: '❌ Ton pilote doit être dans une écurie pour agir dans le paddock.', ephemeral: true });
+
+    // ── Récupérer la cible ────────────────────────────────────
+    const allPilots = await Pilot.find({ teamId: { $ne: null } });
+    const target = allPilots.find(p =>
+      p.name.toLowerCase().includes(cibleName.toLowerCase()) &&
+      String(p._id) !== String(pilot._id)
+    );
+    if (!target) return interaction.editReply({ content: `❌ Pilote "${cibleName}" introuvable (ou c'est toi-même).`, ephemeral: true });
+
+    // ── Cooldown : 48h par pilote source ─────────────────────
+    const COOLDOWN_MS = 48 * 60 * 60 * 1000;
+    const lastUse = await CommandCooldown.findOne({
+      discordId: interaction.user.id,
+      command: 'action_paddock',
+      pilotId: pilot._id,
+    }).sort({ usedAt: -1 });
+
+    if (lastUse) {
+      const elapsed = Date.now() - lastUse.usedAt.getTime();
+      if (elapsed < COOLDOWN_MS) {
+        const remaining = COOLDOWN_MS - elapsed;
+        const h = Math.floor(remaining / 3600000);
+        const m = Math.floor((remaining % 3600000) / 60000);
+        return interaction.editReply({
+          content: `⏳ **${pilot.name}** doit se calmer. Prochain coup dans **${h}h${m > 0 ? `${m}m` : ''}**.`,
+          ephemeral: true,
+        });
+      }
+    }
+
+    // ── Relation actuelle ────────────────────────────────────
+    const [sA, sB] = [String(pilot._id), String(target._id)].sort();
+    let rel = await PilotRelation.findOne({ pilotA: sA, pilotB: sB });
+    if (!rel) rel = new PilotRelation({ pilotA: sA, pilotB: sB, affinity: 0, type: 'neutre', history: [] });
+
+    const isTeammate = String(pilot.teamId) === String(target.teamId);
+    const isRival    = String(pilot.rivalId) === String(target._id);
+    const season     = await getActiveSeason();
+    const allTeams   = await Team.find();
+    const teamMap    = new Map(allTeams.map(t => [String(t._id), t]));
+    const pilotTeam  = teamMap.get(String(pilot.teamId));
+    const targetTeam = teamMap.get(String(target.teamId));
+
+    // ── Configs par action ────────────────────────────────────
+    // affinityDelta : impact sur la relation
+    // public : l'article sort dans le channel principal (true) ou reste discret (false)
+    const ACTION_CONFIG = {
+      trash_talk : { affinityDelta: -18, public: true,  label: 'Trash talk',         emoji: '🗡️'  },
+      rumeur     : { affinityDelta: -12, public: false, label: 'Rumeur',              emoji: '💣'  },
+      eloge      : { affinityDelta: +15, public: true,  label: 'Éloge public',        emoji: '🤝'  },
+      trahison   : { affinityDelta: -22, public: true,  label: 'Trahison conf',       emoji: '🔪'  },
+      vanne      : { affinityDelta: -8,  public: true,  label: 'Vanne',               emoji: '😂'  },
+      dementir   : { affinityDelta: +10, public: true,  label: 'Démenti',             emoji: '🤐'  },
+      defi       : { affinityDelta: -15, public: true,  label: 'Défi ouvert',         emoji: '⚔️'  },
+      secret     : { affinityDelta: -28, public: true,  label: 'Secret de vestiaire', emoji: '💔'  },
+    };
+    const cfg = ACTION_CONFIG[actionType];
+
+    // ── Générer l'article ────────────────────────────────────
+    const article = generatePaddockAction(pilot, target, pilotTeam, targetTeam, actionType, rel.affinity, season?.year || 2025, isTeammate, isRival);
+    if (!article) return interaction.editReply({ content: '❌ Impossible de générer cet article.', ephemeral: true });
+
+    // ── Sauvegarder et publier ────────────────────────────────
+    const saved = await NewsArticle.create({
+      ...article,
+      triggered: 'player_action',
+      publishedAt: new Date(),
+    });
+
+    // ── Mettre à jour l'affinité ─────────────────────────────
+    const delta = cfg.affinityDelta;
+    rel.affinity = Math.max(-100, Math.min(100, rel.affinity + delta));
+    rel.type = rel.affinity >= 60 ? 'amis' : rel.affinity >= 20 ? 'respect' : rel.affinity > -20 ? 'neutre' : rel.affinity > -60 ? 'tension' : 'ennemis';
+    rel.history = rel.history || [];
+    rel.history.push({ event: `action_paddock_${actionType}`, delta, date: new Date(), seasonYear: season?.year });
+    if (rel.history.length > 30) rel.history = rel.history.slice(-30);
+
+    // Réaction en chaîne si action agressive (la cible répondra)
+    if (delta < -10) {
+      rel.pendingReply = true;
+      rel.pendingReplyCtx = { actionPaddock: true, type: actionType, initiatorName: pilot.name };
+    }
+    await rel.save();
+
+    // ── Pression sur la cible (actions agressives) ───────────
+    if (delta < 0) {
+      const pressureDelta = Math.abs(delta) > 20 ? 18 : 10;
+      await Pilot.findByIdAndUpdate(target._id, {
+        $inc: { 'personality.pressureLevel': pressureDelta },
+      });
+    }
+
+    // ── Enregistrer le cooldown ──────────────────────────────
+    await CommandCooldown.create({
+      discordId: interaction.user.id,
+      command: 'action_paddock',
+      pilotId: pilot._id,
+      usedAt: new Date(),
+    });
+
+    // ── Publier dans le channel si public ───────────────────
+    const targetNick = target.nickname ? ` *(${target.nickname})*` : '';
+    const confirmMsg = delta >= 0
+      ? `✅ **${pilot.name}** a pris la parole sur **${target.name}**${targetNick}. L'article sort maintenant.\n📈 Affinité : **${delta >= 0 ? '+' : ''}${delta}** → *${rel.type}*`
+      : `✅ **${pilot.name}** a lâché une bombe sur **${target.name}**${targetNick}. Article publié dans le channel.\n📉 Affinité : **${delta}** → *${rel.type}*`;
+
+    await interaction.editReply({ content: confirmMsg, ephemeral: true });
+
+    // Publier dans le channel principal
+    if (cfg.public) {
+      try {
+        const ch = interaction.channel;
+        await publishNews(saved, ch);
+      } catch(e) { console.error('[action_paddock publish]', e.message); }
+    }
+
+    return;
+  }
+
   if (commandName === 'admin_stop_race') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
