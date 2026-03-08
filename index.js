@@ -6787,8 +6787,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
       await channel.send({ embeds: [tvEmbed] });
 
-      // ── Pause ~60s pour regarder la vidéo avant la grille ──
-      await sleep(60_000);
+      // ── Courte pause avant la grille ──
+      await sleep(8_000);
     } catch (e) {
       console.warn('[simulateRace] Impossible d\'envoyer l\'intro vidéo :', e.message);
     }
@@ -6831,14 +6831,14 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   // ══════════════════════════════════════════════════════════
   // BOUCLE PRINCIPALE
   // ══════════════════════════════════════════════════════════
+  // ── Safety Car state — initialisé avant la boucle ──────────
+  let scState = { state: 'NONE', lapsLeft: 0 };
+
   // Stocker la référence abort dans un Map global pour que /admin_stop_race puisse l'invoquer
   if (!global.activeRaces) global.activeRaces = new Map();
   let raceAborted = false;
   const raceKey = String(race._id);
   global.activeRaces.set(raceKey, { abort: () => { raceAborted = true; } });
-
-  // ── Safety Car state — initialisé avant la boucle ──────────
-  let scState = { state: 'NONE', lapsLeft: 0 };
 
   for (let lap = 1; lap <= totalLaps; lap++) {
     if (raceAborted) {
@@ -12630,14 +12630,14 @@ async function handleInteraction(interaction) {
     // affinityDelta : impact sur la relation
     // public : l'article sort dans le channel principal (true) ou reste discret (false)
     const ACTION_CONFIG = {
-      trash_talk : { affinityDelta: -8,  public: true,  label: 'Trash talk',         emoji: '🗡️'  },
-      rumeur     : { affinityDelta: -5,  public: false, label: 'Rumeur',              emoji: '💣'  },
-      eloge      : { affinityDelta: +7,  public: true,  label: 'Éloge public',        emoji: '🤝'  },
-      trahison   : { affinityDelta: -10, public: true,  label: 'Trahison conf',       emoji: '🔪'  },
-      vanne      : { affinityDelta: -3,  public: true,  label: 'Vanne',               emoji: '😂'  },
-      dementir   : { affinityDelta: +5,  public: true,  label: 'Démenti',             emoji: '🤐'  },
-      defi       : { affinityDelta: -7,  public: true,  label: 'Défi ouvert',         emoji: '⚔️'  },
-      secret     : { affinityDelta: -13, public: true,  label: 'Secret de vestiaire', emoji: '💔'  },
+      trash_talk : { affinityDelta: -18, public: true,  label: 'Trash talk',         emoji: '🗡️'  },
+      rumeur     : { affinityDelta: -12, public: false, label: 'Rumeur',              emoji: '💣'  },
+      eloge      : { affinityDelta: +15, public: true,  label: 'Éloge public',        emoji: '🤝'  },
+      trahison   : { affinityDelta: -22, public: true,  label: 'Trahison conf',       emoji: '🔪'  },
+      vanne      : { affinityDelta: -8,  public: true,  label: 'Vanne',               emoji: '😂'  },
+      dementir   : { affinityDelta: +10, public: true,  label: 'Démenti',             emoji: '🤐'  },
+      defi       : { affinityDelta: -15, public: true,  label: 'Défi ouvert',         emoji: '⚔️'  },
+      secret     : { affinityDelta: -28, public: true,  label: 'Secret de vestiaire', emoji: '💔'  },
     };
     const cfg = ACTION_CONFIG[actionType];
 
@@ -13040,18 +13040,15 @@ async function handleInteraction(interaction) {
 
     // ── PUBLISH (force-post pour articles orphelins après redémarrage) ──
     if (sub === 'publish') {
-      console.log(`[admin_queue publish] Demande de publication forcée — shortId reçu : "${interaction.options.getString('id')}"`);
       const shortId = interaction.options.getString('id').trim().toUpperCase();
 
       try {
         const queued = await NewsArticle.find({ queued: true }).lean();
-        console.log(`[admin_queue publish] ${queued.length} article(s) en file — recherche ID ${shortId}`);
         const match  = queued.find(a => String(a._id).slice(-6).toUpperCase() === shortId);
 
         if (!match) {
           return interaction.editReply({
             content: `❌ Aucun article en file avec l'ID \`${shortId}\`. Vérifie avec \`/admin_queue list\`.`,
-            ephemeral: true,
           });
         }
 
@@ -13065,7 +13062,7 @@ async function handleInteraction(interaction) {
         // Récupérer le channel de news
         const ch = RACE_CHANNEL ? await client.channels.fetch(RACE_CHANNEL).catch(() => null) : null;
         if (!ch) {
-          return interaction.editReply({ content: '❌ Channel de news introuvable (RACE_CHANNEL_ID manquant ou invalide).', ephemeral: true });
+          return interaction.editReply({ content: '❌ Channel de news introuvable (RACE_CHANNEL_ID manquant ou invalide).' });
         }
 
         // Marquer comme publié en BDD
@@ -13083,23 +13080,20 @@ async function handleInteraction(interaction) {
         const pilotsStr = pilots.map(p => p.name).join(' vs ');
         const wasOrphan = !existingTimer ? ' *(timer perdu — article orphelin récupéré)*' : '';
 
-        console.log(`[admin_queue publish] ✅ Article ${shortId} publié avec succès.`);
         return interaction.editReply({
           content: [
             `📤 Article \`${shortId}\` **publié immédiatement**.${wasOrphan}`,
             `📰 *${match.headline.slice(0, 80)}${match.headline.length > 80 ? '…' : ''}*`,
             `👥 Pilotes : **${pilotsStr}**`,
           ].join('\n'),
-          ephemeral: true,
         });
       } catch(e) {
         console.error('[admin_queue publish]', e);
-        return interaction.editReply({ content: `❌ Erreur : ${e.message}`, ephemeral: true });
+        return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
       }
     }
 
-    console.warn(`[admin_queue] ⚠️ Sous-commande inconnue reçue : "${sub}"`);
-    return interaction.editReply({ content: `❌ Sous-commande inconnue : \`${sub}\``, ephemeral: true });
+    return interaction.editReply({ content: '❌ Sous-commande inconnue.' });
   }
 
   if (commandName === 'admin_fix_emojis') {
@@ -14446,17 +14440,30 @@ async function sendSeasonCeremony(season, channel) {
 }
 
 async function runRace(override, gpIndex = null) {
-  const season = await getActiveSeason(); if (!season) return;
+  const season = await getActiveSeason();
+  if (!season) { console.log('[runRace] ❌ Aucune saison active — abandon.'); return; }
   const slot   = (gpIndex !== null || override) ? null : getCurrentSlot();
   const race   = gpIndex !== null
     ? await Race.findOne({ seasonId: season._id, index: gpIndex })
     : await getCurrentRace(season, slot);
-  if (!race || race.status === 'done' || race.status === 'race_computed') return;
-  if (!await isRaceDay(race, override)) return;
+  if (!race) { console.log('[runRace] ❌ Aucune course trouvée pour ce slot/index — abandon.'); return; }
+  if (race.status === 'done' || race.status === 'race_computed') {
+    console.log(`[runRace] ❌ Course ${race.circuit} déjà terminée (status=${race.status}) — abandon.`);
+    return;
+  }
+  if (race.status !== 'quali_done' && !override) {
+    console.log(`[runRace] ❌ Course ${race.circuit} pas encore qualifiée (status=${race.status}) — abandon.`);
+    return;
+  }
+  if (!await isRaceDay(race, override)) {
+    console.log(`[runRace] ❌ Pas le bon jour pour ${race.circuit} (scheduledDate=${race.scheduledDate}) — abandon.`);
+    return;
+  }
+  console.log(`[runRace] ✅ Lancement course ${race.circuit} (status=${race.status}, slot=${race.slot ?? 'N/A'})`);
 
   const { pilots, teams } = await getAllPilotsWithTeams();
   const contracts = await Contract.find({ active: true });
-  if (!pilots.length) return;
+  if (!pilots.length) { console.log('[runRace] ❌ Aucun pilote trouvé — abandon.'); return; }
 
   let grid = race.qualiGrid;
   if (!grid?.length) {
