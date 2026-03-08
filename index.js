@@ -12627,14 +12627,14 @@ async function handleInteraction(interaction) {
     // affinityDelta : impact sur la relation
     // public : l'article sort dans le channel principal (true) ou reste discret (false)
     const ACTION_CONFIG = {
-      trash_talk : { affinityDelta: -18, public: true,  label: 'Trash talk',         emoji: '🗡️'  },
-      rumeur     : { affinityDelta: -12, public: false, label: 'Rumeur',              emoji: '💣'  },
-      eloge      : { affinityDelta: +15, public: true,  label: 'Éloge public',        emoji: '🤝'  },
-      trahison   : { affinityDelta: -22, public: true,  label: 'Trahison conf',       emoji: '🔪'  },
-      vanne      : { affinityDelta: -8,  public: true,  label: 'Vanne',               emoji: '😂'  },
-      dementir   : { affinityDelta: +10, public: true,  label: 'Démenti',             emoji: '🤐'  },
-      defi       : { affinityDelta: -15, public: true,  label: 'Défi ouvert',         emoji: '⚔️'  },
-      secret     : { affinityDelta: -28, public: true,  label: 'Secret de vestiaire', emoji: '💔'  },
+      trash_talk : { affinityDelta: -8,  public: true,  label: 'Trash talk',         emoji: '🗡️'  },
+      rumeur     : { affinityDelta: -5,  public: false, label: 'Rumeur',              emoji: '💣'  },
+      eloge      : { affinityDelta: +7,  public: true,  label: 'Éloge public',        emoji: '🤝'  },
+      trahison   : { affinityDelta: -10, public: true,  label: 'Trahison conf',       emoji: '🔪'  },
+      vanne      : { affinityDelta: -3,  public: true,  label: 'Vanne',               emoji: '😂'  },
+      dementir   : { affinityDelta: +5,  public: true,  label: 'Démenti',             emoji: '🤐'  },
+      defi       : { affinityDelta: -7,  public: true,  label: 'Défi ouvert',         emoji: '⚔️'  },
+      secret     : { affinityDelta: -13, public: true,  label: 'Secret de vestiaire', emoji: '💔'  },
     };
     const cfg = ACTION_CONFIG[actionType];
 
