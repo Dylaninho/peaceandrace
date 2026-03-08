@@ -11868,52 +11868,111 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_help') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Accès refusé.', ephemeral: true });
-    const adminHelpEmbed = new EmbedBuilder().setTitle('🛠️ Commandes Administrateur — F1 PL').setColor('#FF6600')
-      .setDescription('Toutes les commandes nécessitent la permission **Administrateur**.')
+
+    const schedulerStatus = global.schedulerPaused
+      ? '⏸️ **Scheduler en pause**'
+      : '▶️ Scheduler actif';
+
+    const embed = new EmbedBuilder()
+      .setTitle('🛠️ Commandes Administrateur — F1 PL')
+      .setColor('#FF6600')
+      .setDescription(`Toutes les commandes nécessitent la permission **Administrateur**.\nÉtat actuel : ${schedulerStatus}`)
       .addFields(
-        { name: '🏁 Saison & Course', value: [
-          '`/admin_new_season` — Crée une nouvelle saison (24 GP au calendrier)',
-          '`/admin_force_practice` — Déclenche les essais libres immédiatement',
-          '`/admin_force_quali` — Déclenche les qualifications Q1/Q2/Q3 immédiatement',
-          '`/admin_force_race` — Déclenche la course immédiatement',
-          '`/admin_apply_last_race` — 🔧 Applique manuellement les résultats (si points non crédités)',
-          '`/admin_skip_gp` — Saute un GP sans le simuler',
-          '`/admin_evolve_cars` — Affiche l\'état actuel des stats voitures',
-          '`/admin_reset_rivalites` — Réinitialise toutes les rivalités en début de saison',
-          `\`/admin_scheduler_pause\` — ⏸️ Met en pause le scheduler auto${global.schedulerPaused ? ' *(actuellement en pause)*' : ''}`,
-          `\`/admin_scheduler_resume\` — ▶️ Réactive le scheduler auto${!global.schedulerPaused ? ' *(actuellement actif)*' : ''}`,
-        ].join('\n') },
-        { name: '🔄 Transferts & Draft', value: [
-          '`/admin_transfer` — Ouvre la période de transfert (IA génère les offres automatiquement)',
-          '`/admin_second_wave` — Force la 2ème vague de transferts pour les pilotes encore libres',
-          '`/reveal_grille` — Révèle publiquement la grille complète de la saison à venir',
-          '`/admin_grille_next` — [ADMIN privé] Voir la vraie grille avec contrats, salaires et pilotes libres',
-          '`/pilotes_libres` — Affiche les pilotes sans équipe pendant le mercato',
-          '`/admin_draft_start` — Lance le draft snake (attribution manuelle des écuries)',
-        ].join('\n') },
-        { name: '🖼️ Gestion Pilotes', value: [
-          '`/admin_set_photo joueur:@user url:... [pilote:1|2]` — Définit la photo d\'un pilote',
-          '`/admin_reset_pilot joueur:@user [pilote:1|2]` — Supprime le(s) pilote(s) d\'un joueur *(test/reset)*',
-        ].join('\n') },
-        { name: '🧪 Test & Debug', value: [
-          '`/admin_test_race` — Simule une course fictive avec pilotes fictifs (aucune sauvegarde)',
-          '`/admin_test_practice` — Simule des essais libres fictifs',
-          '`/admin_test_qualif` — Simule des qualifs Q1/Q2/Q3 fictives',
-        ].join('\n') },
-        { name: '📋 Procédure de démarrage', value: [
-          '1️⃣ Les joueurs créent leurs pilotes : `/create_pilot` (2 pilotes max par joueur)',
-          '2️⃣ Attribution des écuries via `/admin_draft_start` (snake draft) ou `/admin_transfer`',
-          '3️⃣ `/admin_new_season` — crée la saison et les 24 GP',
-          '4️⃣ Courses auto planifiées : **🌅 11h** EL · **13h** Q · **15h** Course · **🌆 17h** EL · **18h** Q · **20h** Course',
-          '5️⃣ Fin de saison : `/admin_transfer` — IA génère les offres de transfert',
-        ].join('\n') },
-        { name: '⚙️ Infos système', value: [
-          '🏎️ **2 pilotes max** par joueur Discord — nationalité, numéro et stats personnalisables',
-          `📊 **${TOTAL_STAT_POOL} points** à répartir à la création (base ${BASE_STAT_VALUE} par stat)`,
-          '🔔 Keep-alive actif · Ping toutes les 8 min · GP auto : 🌅11h/13h/15h · 🌆17h/18h/20h (Paris)',
-        ].join('\n') },
-      ).setFooter({ text: 'F1 PL Bot — Panneau Admin v2.1' });
-    return interaction.editReply({ embeds: [adminHelpEmbed], ephemeral: true });
+        {
+          name: '🏁 Saison & Courses',
+          value: [
+            '`/admin_new_season` — Crée une nouvelle saison (24 GP au calendrier)',
+            '`/admin_force_practice [gp_index]` — Déclenche les EL immédiatement',
+            '`/admin_force_quali [gp_index]` — Déclenche les qualifs Q1/Q2/Q3',
+            '`/admin_force_race [gp_index]` — Déclenche la course',
+            '`/admin_skip_gp [gp_index]` — Saute un GP sans le simuler',
+            '`/admin_stop_race` — Stoppe la course en cours (résultats non comptabilisés)',
+            '`/admin_apply_last_race [race_id]` — 🔧 Applique les résultats si points non crédités',
+            '`/admin_inject_results [gp_index]` — Injecte manuellement les résultats d\'un GP sans points',
+            '`/admin_set_race_results classement:A,B,C [dnf:X,Y] [gp_index]` — Saisie manuelle du classement si simulation plantée',
+          ].join('\n'),
+        },
+        {
+          name: '⏱️ Scheduler automatique',
+          value: [
+            '`/admin_scheduler_pause` — ⏸️ Met en pause le lancement automatique des GPs',
+            '`/admin_scheduler_resume` — ▶️ Réactive le lancement automatique',
+            '`/admin_replan gp_index date` — Replanifie tout le calendrier depuis un GP de référence',
+            '`/admin_fix_slots` — Recalcule les slots matin/soir des GPs (pair=matin, impair=soir)',
+          ].join('\n'),
+        },
+        {
+          name: '🔄 Transferts & Draft',
+          value: [
+            '`/admin_draft_start` — Lance le draft snake (joueurs choisissent leur écurie)',
+            '`/admin_transfer` — Ouvre la période de transfert (IA génère les offres)',
+            '`/admin_second_wave` — Force la 2ème vague pour les pilotes encore libres',
+            '`/admin_grille_next` — Voir la vraie grille avec contrats, salaires et pilotes libres',
+            '`/reveal_grille` — Révèle publiquement la grille de la saison à venir',
+          ].join('\n'),
+        },
+        {
+          name: '🎭 Paddock & News',
+          value: [
+            '`/admin_queue list` — Voir les articles en file d\'attente (avec heure et timer actif 🟢/🔴)',
+            '`/admin_queue cancel id:XXXXXX` — Supprimer un article en attente',
+            '`/admin_queue publish id:XXXXXX` — Forcer la publication d\'un article orphelin (timer perdu après redémarrage)',
+            '`/admin_news_force` — Force la publication d\'un article de news immédiatement',
+          ].join('\n'),
+        },
+        {
+          name: '🖼️ Gestion Pilotes',
+          value: [
+            '`/admin_set_photo url:... [joueur:@u] [pilote:1|2]` — Définit la photo d\'un pilote',
+            '`/admin_set_personalities` — Assigne une personnalité aux pilotes qui n\'en ont pas',
+            '`/admin_reset_rivalites` — Réinitialise toutes les rivalités de la saison',
+            '`/admin_reset_pilot joueur:@u [pilote:1|2]` — Supprime le(s) pilote(s) d\'un joueur',
+          ].join('\n'),
+        },
+        {
+          name: '🎬 Intro GP',
+          value: [
+            '`/admin_set_intro [video:<fichier MP4>] [url:<URL>]` — Définit la vidéo d\'intro GP',
+            '`/admin_test_intro` — Teste l\'envoi de la vidéo d\'intro dans ce channel',
+          ].join('\n'),
+        },
+        {
+          name: '🔧 Fixes & Sync',
+          value: [
+            '`/admin_fix_emojis` — Synchronise les emojis des écuries depuis le code source',
+            '`/admin_evolve_cars` — Affiche l\'état actuel des stats voitures',
+          ].join('\n'),
+        },
+        {
+          name: '🧪 Test & Debug',
+          value: [
+            '`/admin_test_race` — Simule une course fictive (aucune sauvegarde)',
+            '`/admin_test_practice` — Simule des EL fictifs',
+            '`/admin_test_qualif` — Simule des qualifs fictives',
+          ].join('\n'),
+        },
+        {
+          name: '📋 Procédure de démarrage',
+          value: [
+            '1️⃣ Les joueurs créent leurs pilotes via `/create_pilot` (2 max par joueur)',
+            '2️⃣ Attribution des écuries : `/admin_draft_start` (snake draft) ou `/admin_transfer`',
+            '3️⃣ `/admin_new_season` — Crée la saison et planifie les 24 GP',
+            '4️⃣ Courses auto : **🌅 11h** EL · **13h** Q · **15h** Race · **🌆 17h** EL · **18h** Q · **20h** Race',
+            '5️⃣ Fin de saison : `/admin_transfer` pour les offres, puis `/admin_new_season`',
+          ].join('\n'),
+        },
+        {
+          name: '⚙️ Infos système',
+          value: [
+            `📊 **${TOTAL_STAT_POOL} points** à répartir à la création (base ${BASE_STAT_VALUE}/stat · max +${MAX_STAT_BONUS})`,
+            '🔔 Keep-alive actif — ping toutes les 8 min',
+            '🎭 File d\'attente paddock : 1 article/heure, chaque article s\'enchaîne après le précédent',
+          ].join('\n'),
+        },
+      )
+      .setFooter({ text: 'F1 PL Bot — Panneau Admin v2.2' });
+
+    return interaction.editReply({ embeds: [embed], ephemeral: true });
   }
 
   // -- /f1 --
@@ -11933,45 +11992,85 @@ async function handleInteraction(interaction) {
         return `  ${flag} **#${p.racingNumber || '?'} ${p.name}** (Pilote ${p.pilotIndex}) ${tier.badge} ${ov}`;
       }).join('\n');
     }
-    const f1Embed = new EmbedBuilder().setTitle('🏎️ F1 PL — Tes commandes joueur').setColor('#FF1801')
+
+    const f1Embed = new EmbedBuilder()
+      .setTitle('🏎️ F1 PL — Guide des commandes')
+      .setColor('#FF1801')
       .setDescription(welcomeDesc)
       .addFields(
-        { name: '👤 Tes pilotes', value: [
-          '`/create_pilot` — Crée un pilote (nationalité, numéro, stats — **2 max par joueur**)',
-          '`/profil [pilote:1|2]` — Stats, note générale, contrat et classement',
-          '`/ameliorer [pilote:1|2]` — Améliore une stat (+1, coût croissant selon le niveau)',
-          '`/performances [pilote:1|2] [vue:récents|records|écuries|saison]` — Historique complet des GPs',
-          '`/historique [pilote:1|2]` — Carrière complète multi-saisons',
-          '`/rivalite [pilote:1|2]` — Ta rivalité actuelle en saison',
-        ].join('\n') },
-        { name: '🏎️ Écuries & Pilotes', value: [
-          '`/pilotes` — Classement général par note (style FIFA)',
-          '`/ecuries` — Liste des 8 écuries avec leurs pilotes',
-          '`/ecurie nom:...` — Stats voiture détaillées d\'une écurie',
-          '`/record_circuit circuit:...` — Record du meilleur tour sur un circuit',
-        ].join('\n') },
-        { name: '🗞️ Actualités paddock', value: '`/news [page]` — Rumeurs, drama, rivalités, title fight… mis à jour après chaque GP et toutes les ~40h' },
-        { name: '📋 Contrats & Transferts', value: [
-          '`/mon_contrat [pilote:1|2]` — Ton contrat actuel',
-          '`/offres [pilote:1|2]` — Offres en attente (boutons interactifs)',
-          '`/accepter_offre offre_id:... [pilote:1|2]` — Accepter une offre',
-          '`/refuser_offre offre_id:... [pilote:1|2]` — Refuser une offre',
-        ].join('\n') },
-        { name: '🏆 Classements & Calendrier', value: [
-          '`/classement` — Championnat pilotes saison en cours',
-          '`/classement_constructeurs` — Championnat constructeurs',
-          '`/calendrier` — Tous les GP de la saison',
-          '`/planning` — Prochains GPs avec leurs horaires détaillés',
-          '`/resultats` — Résultats de la dernière course',
-          '`/palmares` — 🏛️ Hall of Fame de toutes les saisons',
-        ].join('\n') },
-        { name: '📖 Infos', value: [
-          '`/concept` — Présentation complète du jeu (pour les nouveaux !)',
-          '`/f1` — Affiche ce panneau',
-        ].join('\n') },
-      ).setFooter({ text: 'GP auto : 🌅11h/13h/15h · 🌆17h/18h/20h (Paris) · 2 pilotes max par joueur' });
+        {
+          name: '👤 Ton pilote',
+          value: [
+            '`/create_pilot` — Crée un pilote *(nationalité, numéro, stats — 2 max)*',
+            '`/profil [joueur:@u] [pilote:1|2]` — Stats, note, contrat et classement',
+            '`/ameliorer [pilote:1|2]` — Améliore une stat (coût croissant selon le niveau)',
+            '`/performances [pilote:1|2] [vue]` — Historique GPs : récents / records / écuries / saison',
+            '`/historique [pilote:1|2]` — Carrière complète multi-saisons',
+          ].join('\n'),
+        },
+        {
+          name: '🎭 Paddock — Actions & Relations',
+          value: [
+            '`/action_paddock cible:... type:... [pilote:1|2]` — Prends une initiative dans le paddock',
+            '  🗡️ **Trash talk** — attaque publique · 💣 **Rumeur** — fuite anonyme (tu restes dans l\'ombre)',
+            '  🤝 **Éloge** — reconnaissance publique · 🔪 **Trahison** — révèle ce qu\'il a dit en privé',
+            '  😂 **Vanne** — pique humoristique · 🤐 **Démentir** — prends sa défense',
+            '  ⚔️ **Défi** — provocation ouverte · 💔 **Secret** — révèle quelque chose de caché',
+            '`/affinites pilote:...` — Voir la personnalité et les relations d\'un pilote',
+            '`/rivalite [pilote:1|2]` — Ta rivalité actuelle en saison',
+            '*⏳ Les articles paddock sont espacés d\'1h minimum (file automatique)*',
+          ].join('\n'),
+        },
+        {
+          name: '🏎️ Pilotes & Écuries',
+          value: [
+            '`/pilotes` — Classement général de tous les pilotes par note (style FIFA)',
+            '`/ecuries` — Liste des 8 écuries avec pilotes et stats voiture',
+            '`/ecurie nom:...` — Stats voiture détaillées d\'une écurie',
+            '`/pilotes_libres` — Pilotes sans équipe pendant le mercato',
+            '`/valeur_marche` — Classement des pilotes les plus convoités du mercato',
+          ].join('\n'),
+        },
+        {
+          name: '🏆 Classements & Résultats',
+          value: [
+            '`/classement` — Championnat pilotes saison en cours',
+            '`/classement_constructeurs` — Championnat constructeurs',
+            '`/resultats` — Résultats de la dernière course',
+            '`/record_circuit circuit:...` — Record du meilleur tour sur un circuit',
+            '`/palmares` — 🏛️ Hall of Fame de toutes les saisons',
+          ].join('\n'),
+        },
+        {
+          name: '📅 Calendrier & Planning',
+          value: [
+            '`/calendrier` — Tous les GP de la saison',
+            '`/planning` — Prochains GPs avec horaires détaillés (EL · Qualifs · Course)',
+          ].join('\n'),
+        },
+        {
+          name: '📋 Contrats & Transferts',
+          value: [
+            '`/mon_contrat [pilote:1|2]` — Ton contrat actuel (durée, salaire, primes)',
+            '`/offres [pilote:1|2]` — Offres de contrat en attente (boutons interactifs)',
+            '`/accepter_offre offre_id:... [pilote:1|2]` — Accepter une offre',
+            '`/refuser_offre offre_id:... [pilote:1|2]` — Refuser une offre',
+          ].join('\n'),
+        },
+        {
+          name: '🗞️ News & Infos',
+          value: [
+            '`/news [page]` — Derniers articles paddock (rumeurs, drama, rivalités)',
+            '`/concept` — Présentation complète du jeu *(pour les nouveaux !)*',
+            '`/f1` — Affiche ce panneau',
+          ].join('\n'),
+        },
+      )
+      .setFooter({ text: 'GP auto : 🌅 11h/13h/15h · 🌆 17h/18h/20h (Paris) · 2 pilotes max · Cooldown action_paddock : 48h/pilote' });
+
     return interaction.editReply({ embeds: [f1Embed], ephemeral: true });
   }
+
 
 
   // ── /performances ─────────────────────────────────────────
