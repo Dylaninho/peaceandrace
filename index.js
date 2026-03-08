@@ -9920,6 +9920,13 @@ const commands = [
       .addStringOption(o => o
         .setName('id')
         .setDescription('ID court de l\'article (affiché dans /admin_queue list)')
+        .setRequired(true)))
+    .addSubcommand(sub => sub
+      .setName('publish')
+      .setDescription('Forcer la publication immédiate d\'un article en attente (timer perdu après redémarrage)')
+      .addStringOption(o => o
+        .setName('id')
+        .setDescription('ID court de l\'article (affiché dans /admin_queue list)')
         .setRequired(true))),
   new SlashCommandBuilder().setName('admin_fix_slots')
     .setDescription('[ADMIN] Recalcule les slots matin/soir des GP de la saison active.'),
@@ -12929,7 +12936,62 @@ async function handleInteraction(interaction) {
       }
     }
 
-    return interaction.editReply({ content: '❌ Sous-commande inconnue.', ephemeral: true });
+    // ── PUBLISH (force-post pour articles orphelins après redémarrage) ──
+    if (sub === 'publish') {
+      const shortId = interaction.options.getString('id').trim().toUpperCase();
+
+      try {
+        const queued = await NewsArticle.find({ queued: true }).lean();
+        const match  = queued.find(a => String(a._id).slice(-6).toUpperCase() === shortId);
+
+        if (!match) {
+          return interaction.editReply({
+            content: `❌ Aucun article en file avec l'ID \`${shortId}\`. Vérifie avec \`/admin_queue list\`.`,
+          });
+        }
+
+        // Si un timer est encore actif en mémoire, l'annuler (on publie maintenant)
+        const existingTimer = paddockQueue.get(String(match._id));
+        if (existingTimer) {
+          clearTimeout(existingTimer);
+          paddockQueue.delete(String(match._id));
+        }
+
+        // Récupérer le channel de news
+        const ch = RACE_CHANNEL ? await client.channels.fetch(RACE_CHANNEL).catch(() => null) : null;
+        if (!ch) {
+          return interaction.editReply({ content: '❌ Channel de news introuvable (RACE_CHANNEL_ID manquant ou invalide).' });
+        }
+
+        // Marquer comme publié en BDD
+        await NewsArticle.findByIdAndUpdate(match._id, {
+          queued: false,
+          scheduledFor: null,
+          publishedAt: new Date(),
+        });
+
+        // Publier
+        await publishNews(match, ch);
+
+        const pilotsIds = match.pilotIds.map(String);
+        const pilots    = await Pilot.find({ _id: { $in: pilotsIds } }).lean();
+        const pilotsStr = pilots.map(p => p.name).join(' vs ');
+        const wasOrphan = !existingTimer ? ' *(timer perdu — article orphelin récupéré)*' : '';
+
+        return interaction.editReply({
+          content: [
+            `📤 Article \`${shortId}\` **publié immédiatement**.${wasOrphan}`,
+            `📰 *${match.headline.slice(0, 80)}${match.headline.length > 80 ? '…' : ''}*`,
+            `👥 Pilotes : **${pilotsStr}**`,
+          ].join('\n'),
+        });
+      } catch(e) {
+        console.error('[admin_queue publish]', e);
+        return interaction.editReply({ content: `❌ Erreur : ${e.message}` });
+      }
+    }
+
+    return interaction.editReply({ content: '❌ Sous-commande inconnue.' });
   }
 
   if (commandName === 'admin_fix_emojis') {
