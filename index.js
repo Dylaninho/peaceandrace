@@ -12816,8 +12816,6 @@ async function handleInteraction(interaction) {
   // /admin_queue — file d'attente des articles paddock
   // ================================================================
   if (commandName === 'admin_queue') {
-    await interaction.deferReply({ ephemeral: true });
-
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
 
