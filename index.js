@@ -9665,7 +9665,6 @@ const commands = [
 
   new SlashCommandBuilder().setName('action_paddock')
     .setDescription('🎭 Ton pilote prend une initiative dans le paddock — rumeur, éloge, trahison...')
-    .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2))
     .addStringOption(o => o.setName('cible').setDescription('Nom du pilote ciblé').setRequired(true))
     .addStringOption(o => o.setName('type')
       .setDescription('Type d\'action')
@@ -9680,7 +9679,8 @@ const commands = [
         { name: '⚔️ Défi — provoquer ouvertement l\'autre pilote',       value: 'defi'           },
         { name: '💔 Trahison intime — révéler un secret de vestiaire',   value: 'secret'         },
       )
-    ),
+    )
+    .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2)),
   new SlashCommandBuilder().setName('admin_stop_race')
     .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
   new SlashCommandBuilder().setName('admin_fix_slots')
@@ -11379,7 +11379,7 @@ async function handleInteraction(interaction) {
       const flag = pilot.nationality?.split(' ')[0] || '';
       desc += rank+' '+tier.badge+' **'+ov+'** '+tier.label.padEnd(9)+' — '+flag+' **'+pilot.name+'** '+(team ? team.emoji+' '+team.name : '🔴 *Libre*')+'\n';
     }
-    return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🏎️ Classement Pilotes — Note Générale').setColor('#FF1801').setDescription(desc.slice(0,4000)||'Aucun').setFooter({ text: sorted.length+' pilote(s) · Poids: Freinage 17% · Contrôle 17% · Dépassement 15%...' })] });
+    return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🏎️ Classement Pilotes — Note Générale').setColor('#FF1801').setDescription(desc.slice(0,4000)||'Aucun').setFooter({ text: sorted.length+' pilote(s)' })] });
   }
 
 
@@ -12291,18 +12291,54 @@ async function handleInteraction(interaction) {
 
     // ── Publier dans le channel si public ───────────────────
     const targetNick = target.nickname ? ` *(${target.nickname})*` : '';
-    const confirmMsg = delta >= 0
-      ? `✅ **${pilot.name}** a pris la parole sur **${target.name}**${targetNick}. L'article sort maintenant.\n📈 Affinité : **${delta >= 0 ? '+' : ''}${delta}** → *${rel.type}*`
-      : `✅ **${pilot.name}** a lâché une bombe sur **${target.name}**${targetNick}. Article publié dans le channel.\n📉 Affinité : **${delta}** → *${rel.type}*`;
 
-    await interaction.editReply({ content: confirmMsg, ephemeral: true });
-
-    // Publier dans le channel principal
+    // Publier dans le channel principal (avec file d'attente anti-flood 1h)
     if (cfg.public) {
       try {
         const ch = interaction.channel;
-        await publishNews(saved, ch);
+        const QUEUE_COOLDOWN_MS = 60 * 60 * 1000; // 1 heure
+
+        // Vérifier le dernier article action_paddock publié
+        const lastPaddockArticle = await NewsArticle.findOne({ triggered: 'player_action' })
+          .sort({ publishedAt: -1 });
+
+        const now = Date.now();
+        const lastPublishedAt = lastPaddockArticle?.publishedAt
+          ? new Date(lastPaddockArticle.publishedAt).getTime()
+          : 0;
+        const elapsed = now - lastPublishedAt;
+
+        if (elapsed < QUEUE_COOLDOWN_MS) {
+          // Trop tôt : programmer la publication après le délai restant
+          const delay = QUEUE_COOLDOWN_MS - elapsed;
+          const pubTime = new Date(now + delay);
+          const hh = pubTime.getHours().toString().padStart(2,'0');
+          const mm = pubTime.getMinutes().toString().padStart(2,'0');
+          const confirmMsg = delta >= 0
+            ? `✅ **${pilot.name}** a pris la parole sur **${target.name}**${targetNick}.\n📈 Affinité : **${delta >= 0 ? '+' : ''}${delta}** → *${rel.type}*\n⏳ L'article paraîtra bientôt — publication programmée à **${hh}:${mm}** pour éviter le flood.`
+            : `✅ **${pilot.name}** a lâché une bombe sur **${target.name}**${targetNick}.\n📉 Affinité : **${delta}** → *${rel.type}*\n⏳ L'article paraîtra bientôt — publication programmée à **${hh}:${mm}** pour éviter le flood.`;
+          await interaction.editReply({ content: confirmMsg, ephemeral: true });
+
+          // Publier après le délai
+          setTimeout(async () => {
+            try { await publishNews(saved, ch); }
+            catch(e) { console.error('[action_paddock publish delayed]', e.message); }
+          }, delay);
+        } else {
+          // OK : publier immédiatement
+          const confirmMsg = delta >= 0
+            ? `✅ **${pilot.name}** a pris la parole sur **${target.name}**${targetNick}. L'article sort maintenant.\n📈 Affinité : **${delta >= 0 ? '+' : ''}${delta}** → *${rel.type}*`
+            : `✅ **${pilot.name}** a lâché une bombe sur **${target.name}**${targetNick}. Article publié dans le channel.\n📉 Affinité : **${delta}** → *${rel.type}*`;
+          await interaction.editReply({ content: confirmMsg, ephemeral: true });
+          await publishNews(saved, ch);
+        }
       } catch(e) { console.error('[action_paddock publish]', e.message); }
+    } else {
+      // Action non-publique (rumeur) : confirmer discrètement
+      const confirmMsg = delta >= 0
+        ? `✅ **${pilot.name}** a pris la parole sur **${target.name}**${targetNick}. L'article sort maintenant.\n📈 Affinité : **${delta >= 0 ? '+' : ''}${delta}** → *${rel.type}*`
+        : `✅ **${pilot.name}** a lâché une bombe sur **${target.name}**${targetNick}. Action enregistrée discrètement.\n📉 Affinité : **${delta}** → *${rel.type}*`;
+      await interaction.editReply({ content: confirmMsg, ephemeral: true });
     }
 
     return;
