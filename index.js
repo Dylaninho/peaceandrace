@@ -9552,9 +9552,41 @@ async function handleInteraction(interaction) {
 
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
     await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
-    // Appliquer le statut pilote proposé dans l'offre (numero1 / numero2)
-    const pilotStatusUpdate = { teamId: team._id };
-    if (offer.driverStatus) pilotStatusUpdate.teamStatus = offer.driverStatus;
+
+    // ── Statut définitif calculé à la signature (pas dans l'offre) ────────
+    // Règle : on regarde qui est déjà dans l'écurie et on (re)calcule les statuts.
+    // Ça évite qu'une équipe se retrouve avec 2×N°1 ou 2×N°2.
+    const existingTeamPilots = await Pilot.find({ teamId: team._id }).lean();
+    let finalStatus = null;
+    if (existingTeamPilots.length === 0) {
+      // Premier pilote à signer → statut N°1 (leader par défaut, le 2ème aura N°2)
+      finalStatus = 'numero1';
+    } else if (existingTeamPilots.length === 1) {
+      // Comparer les overall ratings pour attribuer N°1 au plus fort
+      const existingOv = overallRating(existingTeamPilots[0]);
+      const newOv      = overallRating(pilot);
+      if (newOv >= existingOv) {
+        // Le nouveau pilote est plus fort → il prend N°1, le titulaire passe N°2
+        finalStatus = 'numero1';
+        await Pilot.findByIdAndUpdate(existingTeamPilots[0]._id, { teamStatus: 'numero2' });
+      } else {
+        // Le titulaire reste N°1, le nouvel arrivant est N°2
+        finalStatus = 'numero2';
+        // S'assurer que le titulaire a bien le statut N°1 (au cas où il était null)
+        if (!existingTeamPilots[0].teamStatus) {
+          await Pilot.findByIdAndUpdate(existingTeamPilots[0]._id, { teamStatus: 'numero1' });
+        }
+      }
+    }
+    // Invalider toutes les offres N°1 encore en attente pour cette équipe (le slot N°1 est pris)
+    if (finalStatus === 'numero1') {
+      await TransferOffer.updateMany(
+        { teamId: team._id, status: 'pending', driverStatus: 'numero1', pilotId: { $ne: pilot._id } },
+        { status: 'expired' }
+      );
+    }
+
+    const pilotStatusUpdate = { teamId: team._id, teamStatus: finalStatus };
     await Pilot.findByIdAndUpdate(pilot._id, pilotStatusUpdate);
     await Contract.create({
       pilotId: pilot._id, teamId: team._id,
@@ -10500,10 +10532,32 @@ async function handleInteraction(interaction) {
 
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
     await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
-    // Appliquer le statut pilote proposé dans l'offre
-    const pilotStatusUpdate2 = { teamId: team._id };
-    if (offer.driverStatus) pilotStatusUpdate2.teamStatus = offer.driverStatus;
-    await Pilot.findByIdAndUpdate(pilot._id, pilotStatusUpdate2);
+
+    // Statut définitif calculé à la signature (même logique que le bouton)
+    const existingTeamPilots2 = await Pilot.find({ teamId: team._id }).lean();
+    let finalStatus2 = null;
+    if (existingTeamPilots2.length === 0) {
+      finalStatus2 = 'numero1';
+    } else if (existingTeamPilots2.length === 1) {
+      const existingOv2 = overallRating(existingTeamPilots2[0]);
+      const newOv2      = overallRating(pilot);
+      if (newOv2 >= existingOv2) {
+        finalStatus2 = 'numero1';
+        await Pilot.findByIdAndUpdate(existingTeamPilots2[0]._id, { teamStatus: 'numero2' });
+      } else {
+        finalStatus2 = 'numero2';
+        if (!existingTeamPilots2[0].teamStatus) {
+          await Pilot.findByIdAndUpdate(existingTeamPilots2[0]._id, { teamStatus: 'numero1' });
+        }
+      }
+    }
+    if (finalStatus2 === 'numero1') {
+      await TransferOffer.updateMany(
+        { teamId: team._id, status: 'pending', driverStatus: 'numero1', pilotId: { $ne: pilot._id } },
+        { status: 'expired' }
+      );
+    }
+    await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id, teamStatus: finalStatus2 });
     await Contract.create({
       pilotId: pilot._id, teamId: team._id,
       seasonsDuration:   offer.seasons, seasonsRemaining: offer.seasons,
@@ -11448,6 +11502,8 @@ async function handleInteraction(interaction) {
 
   // ── /admin_new_season ─────────────────────────────────────
   if (commandName === 'admin_new_season') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     await interaction.deferReply();
     try {
       const season = await createNewSeason();
@@ -11490,7 +11546,11 @@ async function handleInteraction(interaction) {
     return;
   }
 
-  if (commandName === 'admin_set_personalities') return handleAdminSetPersonalities(interaction);
+  if (commandName === 'admin_set_personalities') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    return handleAdminSetPersonalities(interaction);
+  }
   if (commandName === 'affinites') return handleAffinites(interaction);
   if (commandName === 'admin_stop_race') {
     if (!interaction.member.permissions.has('Administrator'))
@@ -11984,6 +12044,8 @@ async function handleInteraction(interaction) {
 
   // ── /admin_evolve_cars ────────────────────────────────────
   if (commandName === 'admin_evolve_cars') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     const teams = await Team.find().sort({ vitesseMax: -1 });
     const bar   = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10-Math.round(v/10));
     const embed = new EmbedBuilder().setTitle('🔧 Stats Voitures (état actuel)').setColor('#888888');
