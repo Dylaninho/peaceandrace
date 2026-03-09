@@ -181,7 +181,8 @@ const PilotSchema = new mongoose.Schema({
     teamChemistry: { type: Number, default: 50 },
     pressureLevel: { type: Number, default: 0 },
     archetypeEvo : { type: Number, default: 0 },
-    fiaCriticism : { type: Number, default: 0 }, // 0-100 : tendance à critiquer la FIA publiquement
+    // 0-100 : tension accumulée envers la FIA (critique = monte, félicite/apaise = descend)
+    fiaCriticism : { type: Number, default: 0 },
   },
   // État
   teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
@@ -191,14 +192,10 @@ const PilotSchema = new mongoose.Schema({
   // Influence légèrement le temps au tour (+200ms sur série de DNFs, -200ms sur série de podiums)
   recentFormScore : { type: Number, default: 0 },
   // ── Surnom ────────────────────────────────────────────────
+  // Donné par un rival ou un coéquipier à un moment-clé.
+  // Repris ponctuellement dans les articles et confs de presse.
   nickname        : { type: String, default: null },
   nicknameGivenBy : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
-  // ── Historique inter-saisons ─────────────────────────────
-  // Conservés en fin de saison pour contextualiser les narratifs de la saison suivante
-  lastSeasonRank   : { type: Number, default: null },   // classement final saison précédente
-  lastSeasonPts    : { type: Number, default: null },   // points saison précédente
-  lastSeasonWins   : { type: Number, default: null },   // victoires saison précédente
-  careerBestRank   : { type: Number, default: null },   // meilleur classement de carrière
 });
 const Pilot = mongoose.model('Pilot', PilotSchema);
 
@@ -1138,10 +1135,10 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.0);
   // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×1.8 au-delà
   // (réduit de ×3.5 à ×1.8 pour éviter des pertes de 5+ places en 1 seul tour)
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.3;
-  // Cap à 0.022 : max ~2s/tour de perte — limite réaliste F1
-  // (réduit de 0.046 pour empêcher les remontées de 49s en 19 tours sur pneus frais)
-  const wearPenalty  = Math.min(0.022, tireWear * effectiveDeg * cliffFactor);
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.8;
+  // Cap à 0.046 : max ~4.1s de perte par tour sur une voiture en fin de vie de pneu
+  // Réaliste F1 : un pilote sur pneus à bout perd 1-4s/tour, pas 10-16s
+  const wearPenalty  = Math.min(0.046, tireWear * effectiveDeg * cliffFactor);
   const tireF        = (1 + wearPenalty) / tireData.grip;
 
   // Dirty air — pénalité ~0.1s max sur circuit mixte, jusqu'à ~0.4s sur urbain
@@ -1153,11 +1150,8 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
                            : gpStyle === 'technique' ? 1.8  // virages lents — difficile à suivre
                            : 1.0;
     const dirtyAirPenalty = (100 - team.dirtyAir) / 100 * 0.001 * baseDAMultiplier;
-    // Trafic dense en fond de peloton : pilote en P10+ subit plus d'air sale
-    // car il doit passer par les voitures plus lentes (backmarkers, stratégies décalées)
-    const backmarkerMult = position >= 10 ? 1.4 : position >= 7 ? 1.2 : 1.0;
     const daRandom = scCooldown > 0 ? Math.random() * 0.3 : Math.random();
-    dirtyAirF = 1 + dirtyAirPenalty * daRandom * backmarkerMult;
+    dirtyAirF = 1 + dirtyAirPenalty * daRandom;
   }
 
   // Track evolution
@@ -1393,16 +1387,11 @@ function checkIncident(pilot, team, lap = 1, totalLaps = 50, reliabilityMalus = 
                       : 0.70 + lapProgress * 0.50;
 
   // reliabilityMalus appliqué sur la probabilité mécanique uniquement (mécaniciens, pas les pilotes)
-  // reliabF : mécaniques progressives (0.007 * lapMult) — inchangé
   const reliabF  = (100 - team.refroidissement) / 100 * 0.007 * lapMultiplier * (1 + reliabilityMalus);
-  // crashF réduit ×10 : checkIncident = incidents SOLITAIRES seulement
-  // Les collisions de duel génèrent leurs propres DNFs (système séparé)
-  // Cible : ~1% crash/pilote via checkIncident (avant duels)
-  const crashF   = ((100 - pilot.controle) / 100 * 0.0003) + ((100 - pilot.reactions) / 100 * 0.0002);
-  // crevaison solitaire réduite 0.002 → 0.0003 / tour
-  if (roll < reliabF)                         return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
-  if (roll < reliabF + crashF)                return { type: 'CRASH',      msg: `💥 Accident` };
-  if (roll < reliabF + crashF + 0.0003)       return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
+  const crashF   = ((100 - pilot.controle) / 100 * 0.003) + ((100 - pilot.reactions) / 100 * 0.002);
+  if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
+  if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
+  if (roll < 0.002)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
   return null;
 }
 
@@ -4505,37 +4494,20 @@ function genDramaArticle(pilotA, pilotB, teamA, teamB, seasonYear, context = {})
 function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
   const source = pick(['pitlane_insider', 'f1_weekly', 'pl_racing_news']);
 
-  // Contexte inter-saisons pour enrichir la narrative
-  const lastRank = pilot.lastSeasonRank || null;
-  const lastWins = pilot.lastSeasonWins || 0;
-  const isRookieSeason = !lastRank; // première saison ou pas de données
-  const wasStruggling  = lastRank && lastRank > 8;  // finissait en fond de tableau
-  const wasTop         = lastRank && lastRank <= 4; // était déjà au sommet
-
-  // Headlines avec contexte inter-saisons si disponible
   const headlines = [
-    wasStruggling
-      ? `${pilot.name} : de P${lastRank} l'an dernier à la tête du championnat — une transformation`
-      : wasTop && wins > lastWins
-        ? `${pilot.name} encore plus fort cette saison — comment c'est possible ?`
-        : `${pilot.name} : et si c'était lui le grand nom de cette saison ?`,
+    `${pilot.name} : et si c'était lui le grand nom de cette saison ?`,
     `La révélation ${team.emoji}${team.name} : ${pilot.name} crève l'écran`,
     `${pilot.name} en feu — le paddock commence à vraiment prendre note`,
-    wasStruggling
-      ? `"On n'attendait pas ça de lui" — ${pilot.name} déjoue tous les pronostics${lastRank ? ` après un P${lastRank} la saison dernière` : ''}`
-      : `"On n'attendait pas ça" — ${pilot.name} déjoue tous les pronostics`,
+    `"On n'attendait pas ça" — ${pilot.name} déjoue tous les pronostics`,
     `${wins > 1 ? wins + ' victoires' : podiums + ' podiums'} — ${pilot.name} n'est plus une surprise, c'est une menace`,
   ];
 
   const bodies = [
-    `${wasStruggling
-      ? `La saison dernière, ${pilot.name} terminait **P${lastRank}** au championnat. Quelques mois plus tard : voilà ce que ça donne.`
-      : wasTop
-        ? `P${lastRank} au championnat l'an dernier, et cette saison il va encore plus vite.`
-        : isRookieSeason
-          ? `Personne ne savait vraiment à quoi s'attendre.`
-          : `En début de saison, peu de monde aurait parié sur ${pilot.name} pour jouer ce rôle.`
-    } ${wins > 0 ? `${wins} victoire(s) et ${podiums} podium(s) plus tard` : `${podiums} podium(s) plus tard`}, ${pilot.name} impose le respect.\n\n` +
+    `${pick([
+      `Personne ne l'avait mis sur la liste des favoris en début de saison.`,
+      `En début de saison, peu de monde aurait parié sur ${pilot.name} pour jouer ce rôle.`,
+      `Les données de préparation de saison n'indiquaient pas ça. Et pourtant.`,
+    ])} ${wins > 0 ? `${wins} victoire(s) et ${podiums} podium(s) plus tard` : `${podiums} podium(s) plus tard`}, ${pilot.name} impose le respect.\n\n` +
     pick([
       `"Il a quelque chose de différent dans l'approche des GP. Une maturité qu'on ne voit pas souvent." Une voix du paddock.`,
       `${team.emoji}${team.name} a clairement trouvé quelque chose. La question : est-ce durable ?`,
@@ -4546,7 +4518,7 @@ function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
     `${pilot.name} est P${champPos} au championnat avec ${wins > 0 ? `${wins} victoire(s)` : `${podiums} podium(s)`} cette saison. ` +
     pick([
       `Son ingénieur est le premier à le dire : "Il repousse les limites à chaque sortie."`,
-      wasStruggling ? `Il y a un an, la question était de savoir s'il avait sa place en haut. Aujourd'hui, la question ne se pose plus.` : `Les données télémétrie ne mentent pas — il pousse la voiture dans des zones que peu osent explorer.`,
+      `Les données télémétrie ne mentent pas — il pousse la voiture dans des zones que peu osent explorer.`,
       `Plusieurs membres du paddock ont discrètement demandé à en savoir plus sur lui. Signal fort.`,
     ]),
   ];
@@ -7381,24 +7353,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     const aliveNow = [...drivers.filter(d => !d.dnf)].sort((a,b) => a.totalTime - b.totalTime);
     aliveNow.forEach((d,i) => d.pos = i+1);
 
-    // ── Cap de remontée post-SC : max +2 positions dans les 3 tours après relance ──
-    // Empêche les dépassements irréalistes de 3+ places en 1 seul tour au restart
-    if (scRestartCooldown >= 3) {
-      for (const d of aliveNow) {
-        if (d.lastPos && d.pos < d.lastPos - 2 && !d.pittedThisLap) {
-          // Remettre artificiellement à lastPos-2 max
-          const capPos = d.lastPos - 2;
-          // Trouver le pilote qui occupe capPos et l'échanger
-          const swapTarget = aliveNow.find(x => x.pos === capPos && String(x.pilot._id) !== String(d.pilot._id));
-          if (swapTarget) {
-            const tmpTime = d.totalTime;
-            d.totalTime = swapTarget.totalTime + 1; // juste derrière
-            aliveNow.sort((a,b) => a.totalTime - b.totalTime).forEach((x,i) => x.pos = i+1);
-          }
-        }
-      }
-    }
-
     for (const driver of aliveNow) {
       if (driver.pittedThisLap) continue; // garde anti double-pit
 
@@ -7529,11 +7483,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           Math.abs(d.totalTime - driver.totalTime) < 4000
         ).length;
         if (carsNearPitExit >= 2) driver.trafficLapsLeft = randInt(1, 2);
-        // Après pit de RÉPARATION : trafic plus long — le pilote a pris 15-35s
-        // et ressort en fond de peloton avec des voitures moins rapides devant
-        if (driver.pendingRepair || (rawReason === 'damage_pit')) {
-          driver.trafficLapsLeft = Math.max(driver.trafficLapsLeft || 0, 4);
-        }
 
         // Recalcul positions
         drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
@@ -7664,9 +7613,6 @@ const exitNeighborStr = neighborAhead && neighborBehind
     // 6. Contre-attaque possible si le pilote vient d'être passé au tour précédent
     // NOTE: Si le pilote a gagné 2+ places (à cause d'un pit, SC ou incident), on le mentionne brièvement
     const justRestarted = (prevScState !== 'NONE' && scState.state === 'NONE') || scCooldown >= 5;
-    // Tours post-relance : les positions se stabilisent progressivement
-    // scCooldown 5→1 = 5 tours après relance (défini par decrements ailleurs)
-    const scRestartCooldown = scCooldown > 0 ? scCooldown : 0; // 0 = pas de restriction
           
     for (const driver of ranked) {
       if (scActive) continue;
@@ -8351,38 +8297,39 @@ const exitNeighborStr = neighborAhead && neighborBehind
       fiaEmbed.addFields({ name: '🔄 Classement modifié', value: changeLines });
     }
 
-    // Réactions pilotes pénalisés selon leur fiaCriticism
-    const penalizedPilotIds = dedupInvestigations
-      .filter((_, i) => postRacePenaltyMsgs[i]?.startsWith('⚖️'))
-      .map(inv => inv.attackerId);
+    // ── Réactions automatiques des pilotes pénalisés selon fiaCriticism ─────
+    // Si fiaCriticism >= 30 : réaction embarquée dans l'embed
+    const fiaAutoReactions = [];
+    for (const inv of dedupInvestigations) {
+      const penMsg = postRacePenaltyMsgs.find(m => m.includes('→'));
+      if (!penMsg) continue; // pas de pénalité pour cet incident
+      const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
+      if (!atk || atk.dnf) continue;
+      const pilotFull = await Pilot.findById(atk.pilot._id).select('personality name').lean();
+      const crit = pilotFull?.personality?.fiaCriticism || 0;
+      const pArch = pilotFull?.personality?.archetype || 'guerrier';
+      if (crit < 30) continue;
 
-    const fiaReactions = [];
-    for (const pid of penalizedPilotIds) {
-      const pp = await Pilot.findById(pid).lean();
-      if (!pp) continue;
-      const crit = pp.personality?.fiaCriticism || 0;
-      const arch = pp.personality?.archetype || 'guerrier';
-      if (crit >= 30) {
-        const isBad = ['bad_boy','guerrier'].includes(arch);
-        const reaction = crit >= 70
-          ? pick([
-              `🎙 *${pp.name} :* *"Encore. Toujours les mêmes. J'ai rien à ajouter."*`,
-              `🎙 *${pp.name} :* *"La FIA peut prendre leurs points. Ça ne changera pas ma façon de piloter."*`,
-              `🎙 *${pp.name} :* *"On appelle ça de l'arbitrage. Moi j'appelle ça autre chose."*`,
-            ])
-          : crit >= 40
-            ? pick([
-                `🎙 *${pp.name} :* *"J'attends toujours l'explication. Ça viendra jamais."*`,
-                `🎙 *${pp.name} :* *"${isBad ? 'Pénalité injuste. On continue.' : 'Je ne comprends pas cette décision.'}"*`,
-              ])
-            : pick([
-                `🎙 *${pp.name} :* *"${isBad ? 'Sérieusement ?' : 'Je suis déçu de cette décision.'}"*`,
-              ]);
-        fiaReactions.push(reaction);
-      }
+      const isBad = ['bad_boy', 'guerrier'].includes(pArch);
+      const n     = atk.pilot.name;
+
+      const reaction = crit >= 70 ? pick([
+        `🎙 *Radio ${n} :* *"Encore. J'ai rien à ajouter."*`,
+        `🎙 *Radio ${n} :* *"La FIA peut prendre leurs secondes. Ma façon de piloter, non."*`,
+        `🎙 *Radio ${n} :* *"On reparle de ça. En conférence. Devant tout le monde."*`,
+      ]) : crit >= 45 ? pick([
+        `🎙 *Radio ${n} :* *"J'attends toujours une explication cohérente. Je vais attendre longtemps."*`,
+        `🎙 *Radio ${n} :* *"${isBad ? 'Sérieusement ?' : 'Je ne comprends pas cette décision — encore.'}"*`,
+        `🎙 *Radio ${n} :* *"On va regarder les images ensemble. Tranquillement."*`,
+      ]) : pick([
+        `🎙 *Radio ${n} :* *"${isBad ? 'La décision me choque.' : 'Je suis déçu de cette sentence.'}"*`,
+        `🎙 *Radio ${n} :* *"Je m'y attendais — ça ne veut pas dire que j'y adhère."*`,
+      ]);
+      fiaAutoReactions.push(reaction);
     }
-    if (fiaReactions.length > 0) {
-      fiaEmbed.addFields({ name: '🎙 Réactions paddock', value: fiaReactions.join('
+
+    if (fiaAutoReactions.length > 0) {
+      fiaEmbed.addFields({ name: '🎙 Réactions paddock', value: fiaAutoReactions.join('
 ') });
     }
 
@@ -8990,27 +8937,6 @@ async function createNewSeason() {
 
   const pilots = await Pilot.find({ teamId: { $ne: null } });
   for (const p of pilots) await Standing.create({ seasonId: season._id, pilotId: p._id });
-
-  // ── Sauvegarder les stats de la saison terminée sur chaque pilote ─────────────
-  // Permet la cohérence narrative inter-saisons (comparaisons, progressions, régressions)
-  if (lastSeason) {
-    const lastStandings = await Standing.find({ seasonId: lastSeason._id }).lean();
-    const sortedLast = [...lastStandings].sort((a, b) => b.points - a.points);
-    for (let i = 0; i < sortedLast.length; i++) {
-      const s = sortedLast[i];
-      const rank = i + 1;
-      const prev = await Pilot.findById(s.pilotId).lean();
-      if (!prev) continue;
-      const newBest = !prev.careerBestRank || rank < prev.careerBestRank ? rank : prev.careerBestRank;
-      await Pilot.findByIdAndUpdate(s.pilotId, {
-        lastSeasonRank : rank,
-        lastSeasonPts  : s.points,
-        lastSeasonWins : s.wins,
-        careerBestRank : newBest,
-      });
-    }
-    console.log(`[createNewSeason] Stats inter-saisons sauvegardées pour ${sortedLast.length} pilotes`);
-  }
 
   // Réinitialiser rivalités et streak upgrade en début de saison
   await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0, rivalHeat: 0, rivalDeclaredAt: null, upgradeStreak: 0, lastUpgradeStat: null } });
@@ -10044,17 +9970,6 @@ const commands = [
       )
     )
     .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2)),
-  // ── /critiquer_fia — action paddock spéciale, sans cible ──────────────────
-  new SlashCommandBuilder().setName('h2h')
-    .setDescription('🥊 Comparaison head-to-head entre deux pilotes — stats saison, carrière, duels')
-    .addStringOption(o => o.setName('pilote1').setDescription('Nom du premier pilote').setRequired(true))
-    .addStringOption(o => o.setName('pilote2').setDescription('Nom du second pilote').setRequired(true)),
-  new SlashCommandBuilder().setName('critiquer_fia')
-    .setDescription('⚖️ Ton pilote s'en prend publiquement à la FIA — décisions, règlements, arbitrage...')
-    .addStringOption(o => o.setName('contexte')
-      .setDescription('Contexte de la critique (optionnel — ex: "pénalité de ce GP", "règlement DRS")')
-      .setRequired(false))
-    .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2)),
   new SlashCommandBuilder().setName('admin_stop_race')
     .setDescription('[ADMIN] Stoppe la course en cours immédiatement — résultats non comptabilisés'),
   new SlashCommandBuilder().setName('admin_queue')
@@ -10219,6 +10134,24 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_news_force')
     .setDescription('[ADMIN] Force la publication d\'un article de news maintenant'),
+
+  // ── /fia_reaction ─────────────────────────────────────────────────────────
+  new SlashCommandBuilder().setName('fia_reaction')
+    .setDescription('⚖️ Ton pilote prend position publiquement sur la FIA — critique, éloge ou apaisement')
+    .addStringOption(o => o.setName('type')
+      .setDescription('Type de prise de position')
+      .setRequired(true)
+      .addChoices(
+        { name: '🔥 Critiquer — attaque les décisions / l'arbitrage / les règlements',       value: 'critiquer'  },
+        { name: '🤝 Féliciter — salue une décision juste ou une initiative de la FIA',         value: 'feliciter'  },
+        { name: '🕊️ Apaiser — calme le jeu, prend du recul, tente de réconcilier',            value: 'apaiser'    },
+      )
+    )
+    .addStringOption(o => o.setName('raison')
+      .setDescription('Raison ou contexte précis (ex: "pénalité de ce GP", "règle des qualifs")')
+      .setRequired(false)
+    )
+    .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2)),
 ];
 
 // ============================================================
@@ -13762,292 +13695,327 @@ async function handleInteraction(interaction) {
     return;
   }
 
-  // ── /h2h — Head to Head ────────────────────────────────────
-  if (commandName === 'h2h') {
-    await interaction.deferReply(); // PUBLIC (pas ephemeral)
-    const name1 = interaction.options.getString('pilote1');
-    const name2 = interaction.options.getString('pilote2');
 
-    const findPilot = async (name) => {
-      const n = name.toLowerCase();
-      return Pilot.findOne({
-        $or: [
-          { name: { $regex: new RegExp(n, 'i') } },
-        ]
-      });
-    };
-    const p1 = await findPilot(name1);
-    const p2 = await findPilot(name2);
+  // ══════════════════════════════════════════════════════════════════════════
+  // /fia_reaction — prise de position publique envers la FIA
+  // Types : critiquer | feliciter | apaiser
+  // Cooldown 48h partagé avec action_paddock (même model CommandCooldown)
+  // fiaCriticism 0–100 : monte avec critique, descend avec félicite/apaise
+  // ══════════════════════════════════════════════════════════════════════════
+  if (commandName === 'fia_reaction') {
+    await interaction.deferReply({ ephemeral: false }); // message public
 
-    if (!p1) return interaction.editReply(`❌ Pilote introuvable : **${name1}**`);
-    if (!p2) return interaction.editReply(`❌ Pilote introuvable : **${name2}**`);
-    if (String(p1._id) === String(p2._id)) return interaction.editReply(`❌ Choisis deux pilotes différents.`);
-
-    const season  = await getActiveSeason();
-    const t1 = p1.teamId ? await Team.findById(p1.teamId) : null;
-    const t2 = p2.teamId ? await Team.findById(p2.teamId) : null;
-
-    // Standings saison actuelle
-    const [s1, s2] = await Promise.all([
-      season ? Standing.findOne({ seasonId: season._id, pilotId: p1._id }).lean() : null,
-      season ? Standing.findOne({ seasonId: season._id, pilotId: p2._id }).lean() : null,
-    ]);
-
-    // Carrière complète via PilotGPRecord
-    const [recs1, recs2] = await Promise.all([
-      PilotGPRecord.find({ pilotId: p1._id }).lean(),
-      PilotGPRecord.find({ pilotId: p2._id }).lean(),
-    ]);
-
-    const careerStats = (recs) => {
-      const fin = recs.filter(r => !r.dnf);
-      return {
-        gps    : recs.length,
-        wins   : fin.filter(r => r.finishPos === 1).length,
-        podiums: fin.filter(r => r.finishPos <= 3).length,
-        top10  : fin.filter(r => r.finishPos <= 10).length,
-        dnfs   : recs.filter(r => r.dnf).length,
-        poles  : recs.filter(r => r.polePosition).length,
-        fl     : recs.filter(r => r.fastestLap).length,
-        dotd   : recs.filter(r => r.driverOfTheDay).length,
-        avgPos : fin.length ? (fin.reduce((s, r) => s + r.finishPos, 0) / fin.length).toFixed(1) : '—',
-        pts    : recs.reduce((s, r) => s + (r.points || 0), 0),
-      };
-    };
-
-    const c1 = careerStats(recs1);
-    const c2 = careerStats(recs2);
-
-    // Confrontations directes — GPs où les deux ont couru ensemble
-    const sharedRaceIds = new Set(recs1.map(r => String(r.raceId)));
-    const shared1 = recs1.filter(r => sharedRaceIds.has(String(r.raceId)) && recs2.find(x => String(x.raceId) === String(r.raceId)));
-    const shared2 = recs2.filter(r => sharedRaceIds.has(String(r.raceId)) && recs1.find(x => String(x.raceId) === String(r.raceId)));
-    let h2hWins1 = 0, h2hWins2 = 0, sharedCount = 0;
-    for (const r1 of shared1) {
-      const r2 = shared2.find(x => String(x.raceId) === String(r1.raceId));
-      if (!r2) continue;
-      sharedCount++;
-      if (!r1.dnf && (r2.dnf || r1.finishPos < r2.finishPos)) h2hWins1++;
-      else if (!r2.dnf && (r1.dnf || r2.finishPos < r1.finishPos)) h2hWins2++;
-    }
-
-    // Relation affinité entre les deux pilotes
-    const rel = await PilotRelation.findOne({
-      $or: [
-        { pilotA: p1._id, pilotB: p2._id },
-        { pilotA: p2._id, pilotB: p1._id },
-      ]
-    }).lean();
-    const affinity = rel?.affinity ?? null;
-    const relLabel = affinity === null ? '*Aucun historique*'
-      : affinity >= 60  ? '🤝 Amis / Respect mutuel'
-      : affinity >= 20  ? '👍 Cordial'
-      : affinity > -20  ? '😐 Neutre'
-      : affinity > -60  ? '😤 Tension'
-      : '⚔️ Ennemis déclarés';
-
-    // Fonction de comparaison visuelle
-    const cmp = (v1, v2, higherIsBetter = true) => {
-      if (v1 === v2 || v1 === '—' || v2 === '—') return ['▪️', '▪️'];
-      const p1Better = higherIsBetter ? (parseFloat(v1) > parseFloat(v2)) : (parseFloat(v1) < parseFloat(v2));
-      return p1Better ? ['✅', '◽'] : ['◽', '✅'];
-    };
-
-    // Bar de comparaison visuelle
-    const bar = (v1, v2, max) => {
-      if (max === 0) return '▬▬▬▬▬▬▬▬▬▬';
-      const pct1 = Math.round((v1 / max) * 8);
-      const pct2 = Math.round((v2 / max) * 8);
-      return `${'█'.repeat(Math.min(8,pct1))}${'░'.repeat(Math.max(0,8-pct1))} vs ${'█'.repeat(Math.min(8,pct2))}${'░'.repeat(Math.max(0,8-pct2))}`;
-    };
-
-    const ovr1 = Math.round((p1.depassement + p1.freinage + p1.defense + p1.adaptabilite + p1.reactions + p1.controle + p1.gestionPneus) / 7);
-    const ovr2 = Math.round((p2.depassement + p2.freinage + p2.defense + p2.adaptabilite + p2.reactions + p2.controle + p2.gestionPneus) / 7);
-
-    // Stats saison
-    const szn1pts = s1?.points || 0; const szn1wins = s1?.wins || 0; const szn1pods = s1?.podiums || 0; const szn1dnfs = s1?.dnfs || 0;
-    const szn2pts = s2?.points || 0; const szn2wins = s2?.wins || 0; const szn2pods = s2?.podiums || 0; const szn2dnfs = s2?.dnfs || 0;
-
-    const [cW, cP, cD, cA, cPts, cFL] = [
-      cmp(c1.wins, c2.wins), cmp(c1.podiums, c2.podiums), cmp(c1.dnfs, c2.dnfs, false),
-      cmp(c1.avgPos, c2.avgPos, false), cmp(c1.pts, c2.pts), cmp(c1.fl, c2.fl),
-    ];
-
-    // Forme récente (5 derniers GPs)
-    const formStr = (recs) => recs.slice(0, 5).map(r => r.dnf ? '❌' : r.finishPos <= 1 ? '🥇' : r.finishPos <= 3 ? '🏆' : r.finishPos <= 10 ? '✅' : '▪️').join('');
-
-    const embed = new EmbedBuilder()
-      .setTitle(`🥊 ${t1?.emoji || ''}${p1.name}  VS  ${t2?.emoji || ''}${p2.name}`)
-      .setColor('#FF1801')
-      .setDescription(
-        `*${relLabel}${affinity !== null ? ` · Affinité : **${affinity > 0 ? '+' : ''}${affinity}**` : ''}*
-` +
-        (sharedCount > 0 ? `⚔️ **${sharedCount} confrontations directes** — ${p1.name} : **${h2hWins1}** | ${p2.name} : **${h2hWins2}** | Nul : **${sharedCount - h2hWins1 - h2hWins2}**
-` : '') +
-        `​`
-      );
-
-    // Stats saison actuelle
-    if (season) {
-      embed.addFields({
-        name: `📊 Saison ${season.year}`,
-        value:
-          `\`\`\`
-` +
-          `                ${p1.name.slice(0,12).padEnd(12)} ${p2.name.slice(0,12).padStart(12)}
-` +
-          `Points       ${String(szn1pts).padStart(6)}          ${String(szn2pts).padStart(6)}
-` +
-          `Victoires    ${String(szn1wins).padStart(6)}          ${String(szn2wins).padStart(6)}
-` +
-          `Podiums      ${String(szn1pods).padStart(6)}          ${String(szn2pods).padStart(6)}
-` +
-          `DNFs         ${String(szn1dnfs).padStart(6)}          ${String(szn2dnfs).padStart(6)}
-` +
-          `\`\`\``
-      });
-    }
-
-    // Carrière comparée
-    embed.addFields({
-      name: `🏆 Carrière (${c1.gps} GP vs ${c2.gps} GP)`,
-      value:
-        `${cW[0]} Victoires    **${c1.wins}** ${bar(c1.wins, c2.wins, Math.max(c1.wins, c2.wins, 1))} **${c2.wins}** ${cW[1]}
-` +
-        `${cP[0]} Podiums      **${c1.podiums}** ${bar(c1.podiums, c2.podiums, Math.max(c1.podiums, c2.podiums, 1))} **${c2.podiums}** ${cP[1]}
-` +
-        `${cFL[0]} Meill. tours **${c1.fl}** ${bar(c1.fl, c2.fl, Math.max(c1.fl, c2.fl, 1))} **${c2.fl}** ${cFL[1]}
-` +
-        `${cD[0]} DNFs         **${c1.dnfs}** ${bar(c1.dnfs, c2.dnfs, Math.max(c1.dnfs, c2.dnfs, 1))} **${c2.dnfs}** ${cD[1]}
-` +
-        `${cA[0]} Moy. position **P${c1.avgPos}**                  **P${c2.avgPos}** ${cA[1]}
-` +
-        `${cPts[0]} Points total **${c1.pts}** ${bar(c1.pts, c2.pts, Math.max(c1.pts, c2.pts, 1))} **${c2.pts}** ${cPts[1]}`
-    });
-
-    // Stats pilotes (stats individuelles)
-    const [oW] = [cmp(ovr1, ovr2)];
-    embed.addFields({
-      name: '🎮 Stats pilote',
-      value:
-        `**${p1.name}** — OVR **${ovr1}** *(Dep ${p1.depassement} · Frei ${p1.freinage} · Déf ${p1.defense} · Ctr ${p1.controle})*
-` +
-        `**${p2.name}** — OVR **${ovr2}** *(Dep ${p2.depassement} · Frei ${p2.freinage} · Déf ${p2.defense} · Ctr ${p2.controle})*
-` +
-        (ovr1 !== ovr2 ? `
-${ovr1 > ovr2 ? `✅ **${p1.name}** supérieur en stats globales (+${ovr1-ovr2} pts)` : `✅ **${p2.name}** supérieur en stats globales (+${ovr2-ovr1} pts)`}` : `*Stats globales à égalité*`)
-    });
-
-    // Forme récente
-    embed.addFields({
-      name: '📈 Forme récente (5 derniers GPs)',
-      value: `${t1?.emoji || ''}**${p1.name}** : ${formStr(recs1) || '—'}
-${t2?.emoji || ''}**${p2.name}** : ${formStr(recs2) || '—'}`
-    });
-
-    // Contexte inter-saisons si disponible
-    const interCtx = [];
-    if (p1.lastSeasonRank) interCtx.push(`${p1.name} : **P${p1.lastSeasonRank}** l'an dernier (${p1.lastSeasonWins || 0}V)`);
-    if (p2.lastSeasonRank) interCtx.push(`${p2.name} : **P${p2.lastSeasonRank}** l'an dernier (${p2.lastSeasonWins || 0}V)`);
-    if (interCtx.length > 0) {
-      embed.addFields({ name: '📅 Saison précédente', value: interCtx.join('
-') });
-    }
-
-    embed.setFooter({ text: `Comparaison générée pour la saison ${season?.year || '?'} · ✅ = meilleur dans cette catégorie` });
-
-    // Message PUBLIC (pas ephemeral)
-    return interaction.editReply({ embeds: [embed] });
-  }
-
-  // ── /critiquer_fia ─────────────────────────────────────────
-  if (commandName === 'critiquer_fia') {
-    await interaction.deferReply();
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const contexte   = interaction.options.getString('contexte') || null;
+    const fiaType    = interaction.options.getString('type');   // critiquer | feliciter | apaiser
+    const raison     = interaction.options.getString('raison'); // optionnel
+
     const pilot = await Pilot.findOne({ discordId: interaction.user.id, pilotIndex });
-    if (!pilot) return interaction.editReply({ content: `❌ Tu n'as pas de pilote n°${pilotIndex}.`, ephemeral: true });
+    if (!pilot)
+      return interaction.editReply({ content: `❌ Tu n'as pas de pilote n°${pilotIndex}. Crée-le avec \`/create_pilot\`.` });
+
     const pilotTeam = pilot.teamId ? await Team.findById(pilot.teamId) : null;
-    const season = await getActiveSeason();
-    const arch = pilot.personality?.archetype || 'guerrier';
-    const ego  = pilot.personality?.ego || 50;
+    const season    = await getActiveSeason();
 
-    // Monter le fiaCriticism du pilote (0-100)
-    const prevCrit = pilot.personality?.fiaCriticism || 0;
-    const critGain = randInt(8, 15);
-    const newCrit  = Math.min(100, prevCrit + critGain);
-    await Pilot.findByIdAndUpdate(pilot._id, { 'personality.fiaCriticism': newCrit });
+    // ── Cooldown 48h partagé (command = 'fia_reaction', pilotId = pilot._id) ──
+    const COOLDOWN_MS = 48 * 60 * 60 * 1000;
+    const lastFia = await CommandCooldown.findOne({
+      discordId : interaction.user.id,
+      command   : 'fia_reaction',
+      pilotId   : pilot._id,
+    }).sort({ usedAt: -1 });
 
-    const isBadBoy = ['bad_boy','guerrier'].includes(arch);
-    const isVieux  = arch === 'vieux_sage';
-    const critLabel = newCrit >= 70 ? 'critique récidiviste' : newCrit >= 40 ? 'voix dissidente' : 'ton inhabituel';
-
-    // Headlines selon contexte et niveau critique
-    const ctxStr = contexte ? ` concernant "${contexte}"` : '';
-    const fiaHeadlines = [
-      `${pilot.name} s'en prend à la FIA${ctxStr} — "${ego > 65 ? 'Je ne m'excuserai pas' : 'Quelqu'un doit le dire'}"`,
-      `Sortie remarquée${ctxStr ? ` (${contexte})` : ''} : ${pilot.name} monte au créneau contre les commissaires`,
-      newCrit >= 50
-        ? `${pilot.name} récidive — la FIA reste sa cible favorite${ctxStr}`
-        : `${pilot.name} questionne la cohérence arbitrale${ctxStr} — sans langue de bois`,
-      newCrit >= 70
-        ? `${pilot.name} vs FIA : une guerre ouverte${ctxStr} — le paddock prend position`
-        : `${pilot.name} pointe les incohérences de la FIA — "Deux poids deux mesures"`,
-      pilotTeam ? `${pilotTeam.emoji}${pilot.name} tire à boulets rouges sur la FIA${ctxStr}` : `${pilot.name} tire à boulets rouges sur la FIA${ctxStr}`,
-    ];
-
-    const fiaBodies = [
-      isBadBoy
-        ? `*"Je respecte le sport. Pas les décisions inexplicables. Ce week-end${contexte ? ` sur ${contexte}` : ''}, c'était inacceptable."*
-
-` +
-          pick([
-            `${pilot.name} n'est pas connu pour mâcher ses mots. Cette fois, c'est documenté.`,
-            `La FIA n'a pas encore répondu officiellement. Mais le paddock, lui, a entendu.`,
-            newCrit >= 60 ? `Ce n'est pas la première fois. Et visiblement, ce ne sera pas la dernière.` : `Le ton était mesuré. Le fond, cinglant.`,
-          ])
-        : isVieux
-          ? `*"Après toutes ces saisons, je pensais avoir tout vu. Mais certaines décisions me surprennent encore."*
-
-` +
-            pick([
-              `Quand un pilote expérimenté comme ${pilot.name} sort de sa réserve, ça pèse.`,
-              `Le paddock prend note. Pas forcément d'accord, mais personne ne l'ignore.`,
-            ])
-          : `*"Je n'ai rien contre les commissaires personnellement${contexte ? ` sur ${contexte}` : ''}. Mais cette décision mérite une explication publique."*
-
-` +
-            pick([
-              `Rare de voir ${pilot.name} dans cette posture. L'irritation transparaît.`,
-              `Des soutiens arrivent dans les heures suivant la déclaration.`,
-            ]),
-      `La décision ${contexte ? `concernant ${contexte} ` : ''}continue de faire parler. **${pilot.name}** a pris la parole là où d'autres gardent le silence.
-
-` +
-      pick([
-        `*"Tout le monde le pense. Je suis juste le seul à le dire clairement."*`,
-        `*"J'ai regardé les images dix fois. Je ne vois toujours pas la faute."*`,
-        `*"Si c'est ça l'arbitrage moderne, autant changer les règles ouvertement."*`,
-        ego > 65 ? `*"Ça ne changera rien à ce que je pense. Ni à comment je course."*` : `*"Je veux juste que les règles soient appliquées de la même façon pour tout le monde."*`,
-      ]) +
-      (newCrit >= 50 ? `
-
-*C'est la ${newCrit >= 70 ? 'énième' : 'nouvelle'} sortie publique de ce type — la FIA reste muette pour l'instant.*` : ''),
-    ];
-
-    const newsChannel = await getRaceChannel(null) || interaction.channel;
-    const embed = new EmbedBuilder()
-      .setColor('#E8B400')
-      .setTitle(`⚖️ ${pick(fiaHeadlines)}`)
-      .setDescription(pick(fiaBodies))
-      .setFooter({ text: `📰 Déclaration publique · ${pilot.name} · Critique FIA cumulée : ${newCrit}/100 (${critLabel})` });
-
-    if (newsChannel && newsChannel.id !== interaction.channelId) {
-      await newsChannel.send({ embeds: [embed] });
-      await interaction.editReply({ content: `⚖️ Déclaration publiée dans le channel d'actualité. *(Critique FIA : ${newCrit}/100)*` });
-    } else {
-      await interaction.editReply({ embeds: [embed] });
+    if (lastFia) {
+      const elapsed = Date.now() - lastFia.usedAt.getTime();
+      if (elapsed < COOLDOWN_MS) {
+        const rem = COOLDOWN_MS - elapsed;
+        const h   = Math.floor(rem / 3_600_000);
+        const m   = Math.floor((rem % 3_600_000) / 60_000);
+        const cdLabel = {
+          critiquer : 'critiquer la FIA',
+          feliciter : 'féliciter la FIA',
+          apaiser   : 'jouer les pacificateurs',
+        }[fiaType] || 'interagir avec la FIA';
+        return interaction.editReply({
+          content: `⏳ **${pilot.name}** doit attendre avant de ${cdLabel} à nouveau.\n*Disponible dans **${h}h${m > 0 ? `${m}m` : ''}**.*`,
+        });
+      }
     }
+
+    // ── Stats contextuelles ──────────────────────────────────────────────────
+    const arch      = pilot.personality?.archetype || 'guerrier';
+    const ego       = pilot.personality?.ego        || 50;
+    const tone      = pilot.personality?.tone       || 'diplomatique';
+    const prevCrit  = pilot.personality?.fiaCriticism || 0;
+    const isBadBoy  = ['bad_boy', 'guerrier'].includes(arch);
+    const isVieux   = arch === 'vieux_sage';
+    const isRookie  = arch === 'rookie_ambitieux';
+    const isDiplo   = tone === 'diplomatique';
+
+    // Dernier GP pour ancrer le contexte si pas de raison fournie
+    let lastRace = null;
+    if (!raison && season) {
+      lastRace = await Race.findOne({ seasonId: season._id, status: 'done' }).sort({ index: -1 }).lean();
+    }
+    const ctxGP     = raison || (lastRace ? `${lastRace.emoji || '🏁'} ${lastRace.circuit}` : null);
+    const ctxStr    = ctxGP ? ` concernant ${ctxGP}` : '';
+    const ctxShort  = ctxGP ? ` (${ctxGP})` : '';
+
+    // ── Raisons prédéfinies contextuelles par type ───────────────────────────
+    // Critiques selon niveau fiaCriticism et archétype
+    const critReasons = isBadBoy ? [
+      raison || pick(['la pénalité reçue', 'l\'arbitrage de ce week-end', 'la cohérence des règles', 'les commissaires de course', 'le règlement sportif']),
+    ] : [
+      raison || pick(['la décision des commissaires', 'l\'application des règles', 'la transparence de la FIA', 'l\'égalité de traitement entre pilotes']),
+    ];
+
+    const praiseReasons = [
+      raison || pick(['la décision post-course', 'l\'initiative prise cette semaine', 'la clarté du communiqué officiel', 'la réactivité des commissaires', 'le dialogue ouvert avec les pilotes']),
+    ];
+
+    const peaceReasons = [
+      raison || pick(['la situation globale', 'les tensions des derniers GPs', 'le débat autour des règlements', 'les échanges tendus dans le paddock']),
+    ];
+
+    // ══════════════════════════════════════════════════════════════
+    // TYPE : CRITIQUER
+    // ══════════════════════════════════════════════════════════════
+    if (fiaType === 'critiquer') {
+      const newCrit = Math.min(100, prevCrit + randInt(10, 18));
+      await Pilot.findByIdAndUpdate(pilot._id, { 'personality.fiaCriticism': newCrit });
+
+      const critLabel = newCrit >= 70 ? '🔴 critique récidiviste' : newCrit >= 40 ? '🟠 voix dissidente' : '🟡 ton inhabituel';
+
+      // Headlines — 3 niveaux de fiaCriticism × 3 archétypes
+      const headlines = [
+        // Première critique ou niveau bas
+        ...(prevCrit < 30 ? [
+          `${pilot.name} sort de sa réserve${ctxShort} — message direct à la FIA`,
+          `Ton surprenant de ${pilot.name}${ctxStr} — *"Quelqu'un devait le dire"*`,
+          `${pilotTeam ? pilotTeam.emoji : ''}${pilot.name} interpelle la FIA${ctxStr}`,
+        ] : []),
+        // Niveau moyen — voix connue
+        ...(prevCrit >= 30 && prevCrit < 65 ? [
+          `${pilot.name} récidive${ctxStr} — la FIA dans son viseur depuis plusieurs GPs`,
+          `Nouvelle sortie de ${pilot.name} contre les commissaires${ctxShort}`,
+          `${pilot.name} vs FIA${ctxShort} : un feuilleton qui continue`,
+          `*"Deux poids deux mesures"* — ${pilot.name} ne lâche pas${ctxStr}`,
+        ] : []),
+        // Niveau élevé — guerre ouverte
+        ...(prevCrit >= 65 ? [
+          `${pilot.name} vs FIA : la guerre ouverte${ctxShort} — le paddock retient son souffle`,
+          `Personne ne s'y trompe plus — ${pilot.name} est en croisade contre la FIA`,
+          `${pilot.name} encore${ctxShort}. La FIA, cible préférée du paddock cette saison`,
+          `*"Je ne m'excuserai pas"* — ${pilot.name} assume et continue${ctxStr}`,
+        ] : []),
+        // Fallback toujours disponibles
+        `${pilot.name} s'en prend publiquement à la FIA${ctxShort}`,
+        `${pilot.name} monte au créneau${ctxStr}`,
+      ];
+
+      // Bodies — différenciés par archétype et niveau de tension
+      const quotesCrit = isBadBoy ? [
+        `*"Je respecte le sport. Pas les décisions${ctxGP ? ` de ${ctxGP}` : ' de ce genre'}. Inexplicable."*`,
+        `*"La FIA peut justifier ce qu'elle veut — le paddock a des yeux."*`,
+        `*"J'ai rien contre les commissaires personnellement. Mais là, non."*`,
+        `*"${prevCrit >= 60 ? 'Encore. Toujours les mêmes problèmes.' : 'Faut qu\'on en parle. Maintenant.'}"*`,
+        `*"${ego > 70 ? 'Je suis le seul à dire ce que tout le monde pense.' : 'Quelqu\'un doit bien le dire.'}"*`,
+      ] : isVieux ? [
+        `*"Après toutes ces saisons, je pensais avoir tout vu. Et pourtant${ctxGP ? ` — ${ctxGP}` : ''}."*`,
+        `*"Je ne suis pas là pour créer des problèmes. Mais certaines décisions méritent une réponse."*`,
+        `*"Je reste respectueux. Mais je ne peux pas ne rien dire${ctxGP ? ` sur ${ctxGP}` : ''}."*`,
+      ] : isRookie ? [
+        `*"Je suis peut-être nouveau, mais j'ai des yeux. Ça${ctxGP ? ` — ${ctxGP}` : ''}, c'était injuste."*`,
+        `*"Je veux bien apprendre les règles. Encore faut-il qu'elles soient appliquées de la même façon pour tout le monde."*`,
+      ] : [
+        `*"Je n'ai rien contre la FIA personnellement. Mais là, une explication s'impose."*`,
+        `*"La transparence est la base. Ce week-end${ctxGP ? ` à ${ctxGP}` : ''}, on en était loin."*`,
+        `*"Deux pilotes, même situation, deux décisions différentes. Que faut-il comprendre ?"*`,
+      ];
+
+      const bodyCtx = prevCrit >= 65
+        ? pick([
+            `La déclaration de **${pilot.name}**${ctxStr} s'inscrit dans une longue série de sorties contre l'instance dirigeante. Le paddock commence à vraiment prendre position.`,
+            `Ce n'est plus une surprise. **${pilot.name}** et la FIA, c'est une relation qui se détériore GP après GP. Et visiblement, personne ne cligne des yeux en premier.`,
+          ])
+        : prevCrit >= 30
+          ? pick([
+              `**${pilot.name}** n'est pas du genre à se taire quand quelque chose le choque. Cette fois encore, le message est passé — le paddock a entendu.`,
+              `Deuxième sortie notable${ctxStr} en quelques GP. Une tendance se dessine du côté de **${pilot.name}**.`,
+            ])
+          : pick([
+              `Rare de voir **${pilot.name}** dans cette posture. L'irritation est visible${ctxGP ? ` après ${ctxGP}` : ''}.`,
+              `Le paddock prend note. Pas forcément d'accord avec la forme, mais le fond résonne chez beaucoup.`,
+            ]);
+
+      const body = `${pick(quotesCrit)}\n\n${bodyCtx}` +
+        (newCrit >= 50 ? `\n\n*Niveau de tension FIA : **${critLabel}** (${newCrit}/100)*` : '');
+
+      const embed = new EmbedBuilder()
+        .setColor('#E53935')
+        .setTitle(`🔥 ${pick(headlines)}`)
+        .setDescription(body)
+        .setFooter({ text: `📰 Déclaration publique · ${pilot.name} · FIA Tension : ${newCrit}/100 ${critLabel}` });
+
+      const newsChannel = await getRaceChannel(null);
+      const targetChannel = (newsChannel && newsChannel.id !== interaction.channelId) ? newsChannel : interaction.channel;
+      await targetChannel.send({ embeds: [embed] });
+
+      if (targetChannel.id !== interaction.channelId) {
+        await interaction.editReply({ content: `🔥 Déclaration publiée. *(Tension FIA : ${newCrit}/100 — ${critLabel})*` });
+      } else {
+        await interaction.editReply({ content: `✅ Publié.` });
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // TYPE : FÉLICITER
+    // ══════════════════════════════════════════════════════════════
+    else if (fiaType === 'feliciter') {
+      // Légère descente de fiaCriticism (plus difficile à baisser qu'à monter)
+      const drop    = randInt(4, 8);
+      const newCrit = Math.max(0, prevCrit - drop);
+      await Pilot.findByIdAndUpdate(pilot._id, { 'personality.fiaCriticism': newCrit });
+
+      const praiseReason = pick(praiseReasons);
+      const impactNote   = prevCrit >= 40
+        ? `\n\n*Surprenant de la part de ${pilot.name}, connu pour ses critiques envers la FIA — le paddock note le changement de ton.*`
+        : '';
+
+      const quotesPraise = isBadBoy ? [
+        `*"Je suis le premier à critiquer quand c'est mérité. Là — c'était la bonne décision. Chapeau."*`,
+        `*"Je ne suis pas là pour faire de la politique. Mais ${praiseReason}, c'était juste."*`,
+        `*"Tout le monde peut se tromper. Là, la FIA a fait ce qu'il fallait faire."*`,
+      ] : isVieux ? [
+        `*"Dans ma carrière, j'ai vu beaucoup de mauvaises décisions. Celle-là, non. C'était bien géré."*`,
+        `*"Je peux critiquer quand il le faut — et saluer quand c'est mérité. ${praiseReason ? `Sur ${praiseReason}` : 'Ici'}, c'est mérité."*`,
+        `*"La FIA n'a pas souvent d'alliés dans le paddock. Aujourd'hui, j'en suis un."*`,
+      ] : isRookie ? [
+        `*"Je commence à comprendre comment ça fonctionne ici. Et ${praiseReason ? praiseReason : 'cette décision'}, c'était cool."*`,
+        `*"Honnêtement, je m'attendais à pire. Bien joué."*`,
+      ] : [
+        `*"${praiseReason ? `Sur ${praiseReason}` : 'Cette fois'}, la décision était la bonne. Je le dis franchement."*`,
+        `*"Ce n'est pas si courant de pouvoir féliciter la FIA. Là, c'est justifié."*`,
+        `*"Transparence, cohérence${praiseReason ? `, ${praiseReason}` : ''} — c'est tout ce qu'on demande. Bien."*`,
+      ];
+
+      const bodyPraise = isDiplo
+        ? pick([
+            `**${pilot.name}** prend tout le monde de court avec cette déclaration${ctxStr}. Quand on s'attendait à voir le pilote critique habituel, il choisit de saluer le travail de la FIA.`,
+            `Pas toujours facile de reconnaître quand l'institution fait bien. **${pilot.name}** le fait — et le paddock retient la chose.`,
+          ])
+        : pick([
+            `La déclaration de **${pilot.name}**${ctxStr} tranche avec les sorties habituelles du paddock. Un signal positif — rare.`,
+            `**${pilot.name}** surprend${ctxStr}. Dans un environnement où critiquer la FIA est devenu un sport en soi, l'éloge détonne.`,
+          ]);
+
+      const headlines = [
+        `${pilot.name} salue la FIA${ctxShort} — "C'était la bonne décision"`,
+        `${pilot.name} prend tout le monde de court : éloge public de la FIA${ctxShort}`,
+        `Geste rare de ${pilot.name}${ctxStr} — le paddock prend note`,
+        prevCrit >= 40
+          ? `Le retournement de situation — ${pilot.name} félicite la FIA${ctxShort}`
+          : `${pilot.name} reconnaît le bon travail de la FIA${ctxShort}`,
+        `*"C'est mérité"* — ${pilot.name} défend la FIA${ctxShort}`,
+      ];
+
+      const body = `${pick(quotesPraise)}\n\n${bodyPraise}${impactNote}`;
+
+      const embed = new EmbedBuilder()
+        .setColor('#43A047')
+        .setTitle(`🤝 ${pick(headlines)}`)
+        .setDescription(body)
+        .setFooter({ text: `📰 Déclaration publique · ${pilot.name} · FIA Tension : ${newCrit}/100${prevCrit >= 40 ? ' ⬇️ apaisement' : ''}` });
+
+      const newsChannel = await getRaceChannel(null);
+      const targetChannel = (newsChannel && newsChannel.id !== interaction.channelId) ? newsChannel : interaction.channel;
+      await targetChannel.send({ embeds: [embed] });
+
+      if (targetChannel.id !== interaction.channelId) {
+        await interaction.editReply({ content: `🤝 Déclaration publiée. *(Tension FIA : ${newCrit}/100)*` });
+      } else {
+        await interaction.editReply({ content: `✅ Publié.` });
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // TYPE : APAISER
+    // ══════════════════════════════════════════════════════════════
+    else if (fiaType === 'apaiser') {
+      // Descente plus forte de fiaCriticism — geste de réconciliation
+      const drop    = randInt(8, 16);
+      const newCrit = Math.max(0, prevCrit - drop);
+      await Pilot.findByIdAndUpdate(pilot._id, { 'personality.fiaCriticism': newCrit });
+
+      const peaceReason = pick(peaceReasons);
+      const wasHostile  = prevCrit >= 50; // changement de cap notable
+
+      const quotesPeace = isBadBoy ? [
+        `*"Ça fait du bruit depuis un moment. J'ai dit ce que j'avais à dire. Maintenant on avance."*`,
+        `*"Je peux me battre sur la piste sans me battre contre la FIA. Cette semaine, on repart à zéro."*`,
+        `*"Critiquer c'est facile. Construire, c'est autre chose. J'essaie de faire ma part."*`,
+      ] : isVieux ? [
+        `*"Dans ce sport, la FIA et les pilotes ont besoin les uns des autres. Le dialogue est la seule voie."*`,
+        `*"J'ai eu mes désaccords. Mais l'important c'est que le sport avance — ensemble."*`,
+        `*"On peut ne pas être d'accord et quand même se respecter. C'est ce que j'essaie de montrer."*`,
+      ] : isRookie ? [
+        `*"Je ne veux pas commencer ma carrière en mode guerre. Si y'a des problèmes, on peut en parler."*`,
+        `*"Tout le monde cherche la même chose — que le sport soit bon. On part de là."*`,
+      ] : [
+        `*"Les tensions ne font de bien à personne. ${peaceReason ? `Sur ${peaceReason}` : 'Sur ce sujet'}, je préfère le dialogue."*`,
+        `*"Je veux qu'on trouve des solutions, pas des coupables. C'est l'état d'esprit dans lequel j'aborde ça."*`,
+        `*"Critiquer ne change rien si on ne propose pas autre chose. Alors voilà — parlons-en."*`,
+      ];
+
+      const bodyPeace = wasHostile
+        ? pick([
+            `Changement de ton marquant de **${pilot.name}**${ctxStr}. Celui qui était en première ligne des critiques envers la FIA semble vouloir tourner une page.`,
+            `Après plusieurs sorties médiatiques contre la FIA, **${pilot.name}** prend le contre-pied. Le paddock observe — et retient la geste.`,
+          ])
+        : pick([
+            `**${pilot.name}** fait le choix de la désescalade${ctxStr}. Un signal adressé à toutes les parties.`,
+            `Dans un paddock souvent en guerre froide avec la FIA, la déclaration de **${pilot.name}** détonne — dans le bon sens.`,
+          ]);
+
+      const headlines = wasHostile ? [
+        `${pilot.name} choisit l'apaisement${ctxShort} — revirement après semaines de tensions`,
+        `La surprise de la semaine : ${pilot.name} tend la main à la FIA${ctxShort}`,
+        `${pilot.name} change de cap${ctxStr} — *"Maintenant, on avance"*`,
+        `Fin de la guerre ? ${pilot.name} appelle au dialogue avec la FIA${ctxShort}`,
+      ] : [
+        `${pilot.name} opte pour le dialogue${ctxShort} — message aux deux camps`,
+        `*"Je préfère le dialogue"* — ${pilot.name} appelle à la désescalade${ctxShort}`,
+        `${pilot.name} choisit la voie de la réconciliation${ctxStr}`,
+        `${pilot.name} pose sa main sur l'épaule de la FIA${ctxShort}`,
+      ];
+
+      const body = `${pick(quotesPeace)}\n\n${bodyPeace}` +
+        (wasHostile ? `\n\n*Tension FIA de **${pilot.name}** en baisse : ${prevCrit} → ${newCrit}/100.*` : '');
+
+      const embed = new EmbedBuilder()
+        .setColor('#7B61FF')
+        .setTitle(`🕊️ ${pick(headlines)}`)
+        .setDescription(body)
+        .setFooter({ text: `📰 Déclaration publique · ${pilot.name} · FIA Tension : ${newCrit}/100${wasHostile ? ' ⬇️ désescalade notable' : ''}` });
+
+      const newsChannel = await getRaceChannel(null);
+      const targetChannel = (newsChannel && newsChannel.id !== interaction.channelId) ? newsChannel : interaction.channel;
+      await targetChannel.send({ embeds: [embed] });
+
+      if (targetChannel.id !== interaction.channelId) {
+        await interaction.editReply({ content: `🕊️ Déclaration publiée. *(Tension FIA : ${newCrit}/100)*` });
+      } else {
+        await interaction.editReply({ content: `✅ Publié.` });
+      }
+    }
+
+    // ── Enregistrer le cooldown (après traitement, quel que soit le type) ──────
+    await CommandCooldown.create({
+      discordId : interaction.user.id,
+      command   : 'fia_reaction',
+      pilotId   : pilot._id,
+      usedAt    : new Date(),
+    });
+
     return;
   }
 
