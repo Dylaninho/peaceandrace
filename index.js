@@ -181,8 +181,7 @@ const PilotSchema = new mongoose.Schema({
     teamChemistry: { type: Number, default: 50 },
     pressureLevel: { type: Number, default: 0 },
     archetypeEvo : { type: Number, default: 0 },
-    // 0-100 : tension accumulée envers la FIA (critique = monte, félicite/apaise = descend)
-    fiaCriticism : { type: Number, default: 0 },
+    fiaCriticism : { type: Number, default: 0 }, // 0-100 : tension envers la FIA
   },
   // État
   teamId       : { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
@@ -726,7 +725,7 @@ function genSocialMediaPost(pilot, team, result, allPilots, allTeams, constrStan
   const arch     = pilot?.personality?.archetype || 'guerrier';
   const pressure = pilot?.personality?.pressureLevel || 0;
   const source   = pick(['grid_social','speed_gossip','turbo_people','pl_celebrity']);
-  const { pos, dnf, circuit, rival, rivalPos, champPos } = ctx;
+  const { pos, dnf, circuit, rival, rivalPos, champPos, rivalAffinity: ctxRivAff } = ctx;
   const isDnf    = dnf === true;
   const isWin    = pos === 1 && !isDnf;
   const isPodium = pos <= 3 && !isDnf;
@@ -8297,40 +8296,41 @@ const exitNeighborStr = neighborAhead && neighborBehind
       fiaEmbed.addFields({ name: '🔄 Classement modifié', value: changeLines });
     }
 
-    // ── Réactions automatiques des pilotes pénalisés selon fiaCriticism ─────
-    // Si fiaCriticism >= 30 : réaction embarquée dans l'embed
+    // ── Réactions auto des pilotes pénalisés selon fiaCriticism ──────────────
     const fiaAutoReactions = [];
     for (const inv of dedupInvestigations) {
-      const penMsg = postRacePenaltyMsgs.find(m => m.includes('→'));
-      if (!penMsg) continue; // pas de pénalité pour cet incident
+      const hasPenalty = postRacePenaltyMsgs.some(m => m.startsWith('⚖️') && m.includes(inv.attackerId));
       const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
       if (!atk || atk.dnf) continue;
       const pilotFull = await Pilot.findById(atk.pilot._id).select('personality name').lean();
       const crit = pilotFull?.personality?.fiaCriticism || 0;
       const pArch = pilotFull?.personality?.archetype || 'guerrier';
       if (crit < 30) continue;
-
       const isBad = ['bad_boy', 'guerrier'].includes(pArch);
-      const n     = atk.pilot.name;
-
-      const reaction = crit >= 70 ? pick([
-        `🎙 *Radio ${n} :* *"Encore. J'ai rien à ajouter."*`,
-        `🎙 *Radio ${n} :* *"La FIA peut prendre leurs secondes. Ma façon de piloter, non."*`,
-        `🎙 *Radio ${n} :* *"On reparle de ça. En conférence. Devant tout le monde."*`,
-      ]) : crit >= 45 ? pick([
-        `🎙 *Radio ${n} :* *"J'attends toujours une explication cohérente. Je vais attendre longtemps."*`,
-        `🎙 *Radio ${n} :* *"${isBad ? 'Sérieusement ?' : 'Je ne comprends pas cette décision — encore.'}"*`,
-        `🎙 *Radio ${n} :* *"On va regarder les images ensemble. Tranquillement."*`,
-      ]) : pick([
-        `🎙 *Radio ${n} :* *"${isBad ? 'La décision me choque.' : 'Je suis déçu de cette sentence.'}"*`,
-        `🎙 *Radio ${n} :* *"Je m'y attendais — ça ne veut pas dire que j'y adhère."*`,
-      ]);
+      const n = atk.pilot.name;
+      let reaction;
+      if (crit >= 70) {
+        reaction = pick([
+          '🎙 *Radio ' + n + ' :* *"Encore. Toujours les mêmes. J\'ai rien à ajouter."*',
+          '🎙 *Radio ' + n + ' :* *"La FIA peut prendre leurs secondes. Ma façon de piloter, non."*',
+          '🎙 *Radio ' + n + ' :* *"On en reparle. En conférence. Devant tout le monde."*',
+        ]);
+      } else if (crit >= 45) {
+        reaction = pick([
+          '🎙 *Radio ' + n + ' :* *"J\'attends toujours une explication cohérente."*',
+          '🎙 *Radio ' + n + ' :* *"' + (isBad ? 'Sérieusement ?' : 'Je ne comprends pas cette décision.') + '"*',
+          '🎙 *Radio ' + n + ' :* *"On va regarder les images ensemble. Tranquillement."*',
+        ]);
+      } else {
+        reaction = pick([
+          '🎙 *Radio ' + n + ' :* *"' + (isBad ? 'La décision me choque.' : 'Je suis déçu de cette sentence.') + '"*',
+          '🎙 *Radio ' + n + ' :* *"Je m\'y attendais — ça ne veut pas dire que j\'y adhère."*',
+        ]);
+      }
       fiaAutoReactions.push(reaction);
     }
-
     if (fiaAutoReactions.length > 0) {
-      fiaEmbed.addFields({ name: '🎙 Réactions paddock', value: fiaAutoReactions.join('
-') });
+      fiaEmbed.addFields({ name: '🎙 Réactions paddock', value: fiaAutoReactions.join('\n') });
     }
 
     fiaEmbed.setFooter({ text: 'Décision officielle des commissaires de course — sans appel' });
@@ -10135,20 +10135,19 @@ const commands = [
   new SlashCommandBuilder().setName('admin_news_force')
     .setDescription('[ADMIN] Force la publication d\'un article de news maintenant'),
 
-  // ── /fia_reaction ─────────────────────────────────────────────────────────
   new SlashCommandBuilder().setName('fia_reaction')
     .setDescription('⚖️ Ton pilote prend position publiquement sur la FIA — critique, éloge ou apaisement')
     .addStringOption(o => o.setName('type')
       .setDescription('Type de prise de position')
       .setRequired(true)
       .addChoices(
-        { name: '🔥 Critiquer — attaque les décisions / l'arbitrage / les règlements',       value: 'critiquer'  },
-        { name: '🤝 Féliciter — salue une décision juste ou une initiative de la FIA',         value: 'feliciter'  },
-        { name: '🕊️ Apaiser — calme le jeu, prend du recul, tente de réconcilier',            value: 'apaiser'    },
+        { name: '🔥 Critiquer — attaque les décisions / arbitrage / règlements', value: 'critiquer' },
+        { name: '🤝 Féliciter — salue une décision juste ou une initiative',      value: 'feliciter' },
+        { name: '🕊️ Apaiser — calme le jeu, tente de réconcilier',               value: 'apaiser'   },
       )
     )
     .addStringOption(o => o.setName('raison')
-      .setDescription('Raison ou contexte précis (ex: "pénalité de ce GP", "règle des qualifs")')
+      .setDescription('Raison précise (ex: "pénalité de ce GP", "règle DRS") — optionnel')
       .setRequired(false)
     )
     .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2)),
@@ -13698,25 +13697,24 @@ async function handleInteraction(interaction) {
 
   // ══════════════════════════════════════════════════════════════════════════
   // /fia_reaction — prise de position publique envers la FIA
-  // Types : critiquer | feliciter | apaiser
-  // Cooldown 48h partagé avec action_paddock (même model CommandCooldown)
+  // Types : critiquer | feliciter | apaiser   — Cooldown 48h
   // fiaCriticism 0–100 : monte avec critique, descend avec félicite/apaise
   // ══════════════════════════════════════════════════════════════════════════
   if (commandName === 'fia_reaction') {
-    await interaction.deferReply({ ephemeral: false }); // message public
+    await interaction.deferReply({ ephemeral: false });
 
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const fiaType    = interaction.options.getString('type');   // critiquer | feliciter | apaiser
-    const raison     = interaction.options.getString('raison'); // optionnel
+    const fiaType    = interaction.options.getString('type');
+    const raison     = interaction.options.getString('raison');
 
     const pilot = await Pilot.findOne({ discordId: interaction.user.id, pilotIndex });
     if (!pilot)
-      return interaction.editReply({ content: `❌ Tu n'as pas de pilote n°${pilotIndex}. Crée-le avec \`/create_pilot\`.` });
+      return interaction.editReply({ content: '❌ Aucun pilote n°' + pilotIndex + '. Crée-le avec `/create_pilot`.' });
 
     const pilotTeam = pilot.teamId ? await Team.findById(pilot.teamId) : null;
     const season    = await getActiveSeason();
 
-    // ── Cooldown 48h partagé (command = 'fia_reaction', pilotId = pilot._id) ──
+    // ── Cooldown 48h ────────────────────────────────────────────────────────
     const COOLDOWN_MS = 48 * 60 * 60 * 1000;
     const lastFia = await CommandCooldown.findOne({
       discordId : interaction.user.id,
@@ -13730,292 +13728,278 @@ async function handleInteraction(interaction) {
         const rem = COOLDOWN_MS - elapsed;
         const h   = Math.floor(rem / 3_600_000);
         const m   = Math.floor((rem % 3_600_000) / 60_000);
-        const cdLabel = {
-          critiquer : 'critiquer la FIA',
-          feliciter : 'féliciter la FIA',
-          apaiser   : 'jouer les pacificateurs',
-        }[fiaType] || 'interagir avec la FIA';
+        const cdLabel = fiaType === 'critiquer' ? 'critiquer la FIA'
+                      : fiaType === 'feliciter' ? 'féliciter la FIA'
+                      : 'jouer les pacificateurs';
         return interaction.editReply({
-          content: `⏳ **${pilot.name}** doit attendre avant de ${cdLabel} à nouveau.\n*Disponible dans **${h}h${m > 0 ? `${m}m` : ''}**.*`,
+          content: '⏳ **' + pilot.name + '** doit attendre avant de ' + cdLabel + ' à nouveau.\n*Disponible dans **' + h + 'h' + (m > 0 ? m + 'm' : '') + '**.*',
         });
       }
     }
 
-    // ── Stats contextuelles ──────────────────────────────────────────────────
-    const arch      = pilot.personality?.archetype || 'guerrier';
-    const ego       = pilot.personality?.ego        || 50;
-    const tone      = pilot.personality?.tone       || 'diplomatique';
-    const prevCrit  = pilot.personality?.fiaCriticism || 0;
-    const isBadBoy  = ['bad_boy', 'guerrier'].includes(arch);
-    const isVieux   = arch === 'vieux_sage';
-    const isRookie  = arch === 'rookie_ambitieux';
-    const isDiplo   = tone === 'diplomatique';
+    // ── Contexte pilote ───────────────────────────────────────────────────
+    const arch     = pilot.personality?.archetype  || 'guerrier';
+    const ego      = pilot.personality?.ego         || 50;
+    const tone     = pilot.personality?.tone        || 'diplomatique';
+    const prevCrit = pilot.personality?.fiaCriticism || 0;
+    const isBadBoy = ['bad_boy', 'guerrier'].includes(arch);
+    const isVieux  = arch === 'vieux_sage';
+    const isRookie = arch === 'rookie_ambitieux';
+    const isDiplo  = tone === 'diplomatique';
 
-    // Dernier GP pour ancrer le contexte si pas de raison fournie
+    // Dernier GP pour contexte si aucune raison fournie
     let lastRace = null;
     if (!raison && season) {
       lastRace = await Race.findOne({ seasonId: season._id, status: 'done' }).sort({ index: -1 }).lean();
     }
-    const ctxGP     = raison || (lastRace ? `${lastRace.emoji || '🏁'} ${lastRace.circuit}` : null);
-    const ctxStr    = ctxGP ? ` concernant ${ctxGP}` : '';
-    const ctxShort  = ctxGP ? ` (${ctxGP})` : '';
+    const ctxGP    = raison || (lastRace ? (lastRace.emoji || '') + ' ' + lastRace.circuit : null);
+    const ctxStr   = ctxGP ? ' concernant ' + ctxGP : '';
+    const ctxShort = ctxGP ? ' (' + ctxGP + ')' : '';
 
-    // ── Raisons prédéfinies contextuelles par type ───────────────────────────
-    // Critiques selon niveau fiaCriticism et archétype
-    const critReasons = isBadBoy ? [
-      raison || pick(['la pénalité reçue', 'l\'arbitrage de ce week-end', 'la cohérence des règles', 'les commissaires de course', 'le règlement sportif']),
-    ] : [
-      raison || pick(['la décision des commissaires', 'l\'application des règles', 'la transparence de la FIA', 'l\'égalité de traitement entre pilotes']),
-    ];
-
-    const praiseReasons = [
-      raison || pick(['la décision post-course', 'l\'initiative prise cette semaine', 'la clarté du communiqué officiel', 'la réactivité des commissaires', 'le dialogue ouvert avec les pilotes']),
-    ];
-
-    const peaceReasons = [
-      raison || pick(['la situation globale', 'les tensions des derniers GPs', 'le débat autour des règlements', 'les échanges tendus dans le paddock']),
-    ];
+    // ── Publie dans le channel course si possible ─────────────────────────
+    const newsChannel  = await getRaceChannel(null);
+    const targetChannel = (newsChannel && newsChannel.id !== interaction.channelId) ? newsChannel : interaction.channel;
 
     // ══════════════════════════════════════════════════════════════
-    // TYPE : CRITIQUER
+    // CRITIQUER
     // ══════════════════════════════════════════════════════════════
     if (fiaType === 'critiquer') {
       const newCrit = Math.min(100, prevCrit + randInt(10, 18));
       await Pilot.findByIdAndUpdate(pilot._id, { 'personality.fiaCriticism': newCrit });
 
-      const critLabel = newCrit >= 70 ? '🔴 critique récidiviste' : newCrit >= 40 ? '🟠 voix dissidente' : '🟡 ton inhabituel';
+      const critLabel = newCrit >= 70 ? '🔴 critique récidiviste'
+                      : newCrit >= 40 ? '🟠 voix dissidente'
+                      :                 '🟡 ton inhabituel';
 
-      // Headlines — 3 niveaux de fiaCriticism × 3 archétypes
-      const headlines = [
-        // Première critique ou niveau bas
-        ...(prevCrit < 30 ? [
-          `${pilot.name} sort de sa réserve${ctxShort} — message direct à la FIA`,
-          `Ton surprenant de ${pilot.name}${ctxStr} — *"Quelqu'un devait le dire"*`,
-          `${pilotTeam ? pilotTeam.emoji : ''}${pilot.name} interpelle la FIA${ctxStr}`,
-        ] : []),
-        // Niveau moyen — voix connue
-        ...(prevCrit >= 30 && prevCrit < 65 ? [
-          `${pilot.name} récidive${ctxStr} — la FIA dans son viseur depuis plusieurs GPs`,
-          `Nouvelle sortie de ${pilot.name} contre les commissaires${ctxShort}`,
-          `${pilot.name} vs FIA${ctxShort} : un feuilleton qui continue`,
-          `*"Deux poids deux mesures"* — ${pilot.name} ne lâche pas${ctxStr}`,
-        ] : []),
-        // Niveau élevé — guerre ouverte
-        ...(prevCrit >= 65 ? [
-          `${pilot.name} vs FIA : la guerre ouverte${ctxShort} — le paddock retient son souffle`,
-          `Personne ne s'y trompe plus — ${pilot.name} est en croisade contre la FIA`,
-          `${pilot.name} encore${ctxShort}. La FIA, cible préférée du paddock cette saison`,
-          `*"Je ne m'excuserai pas"* — ${pilot.name} assume et continue${ctxStr}`,
-        ] : []),
-        // Fallback toujours disponibles
-        `${pilot.name} s'en prend publiquement à la FIA${ctxShort}`,
-        `${pilot.name} monte au créneau${ctxStr}`,
-      ];
+      // Headlines en 3 niveaux de tension
+      let headlines;
+      if (prevCrit < 30) {
+        headlines = [
+          pilot.name + ' sort de sa réserve' + ctxShort + ' — message direct à la FIA',
+          'Ton surprenant de ' + pilot.name + ctxStr + ' — "Quelqu\'un devait le dire"',
+          (pilotTeam ? pilotTeam.emoji : '') + pilot.name + ' interpelle la FIA' + ctxStr,
+        ];
+      } else if (prevCrit < 65) {
+        headlines = [
+          pilot.name + ' récidive' + ctxStr + ' — la FIA dans son viseur depuis plusieurs GPs',
+          'Nouvelle sortie de ' + pilot.name + ' contre les commissaires' + ctxShort,
+          pilot.name + ' vs FIA' + ctxShort + ' : un feuilleton qui continue',
+          '"Deux poids deux mesures" — ' + pilot.name + ' ne lâche pas' + ctxStr,
+        ];
+      } else {
+        headlines = [
+          pilot.name + ' vs FIA : la guerre ouverte' + ctxShort + ' — le paddock retient son souffle',
+          'Personne ne s\'y trompe plus — ' + pilot.name + ' est en croisade contre la FIA',
+          pilot.name + ' encore' + ctxShort + '. La FIA, cible préférée du paddock cette saison',
+          '"Je ne m\'excuserai pas" — ' + pilot.name + ' assume et continue' + ctxStr,
+        ];
+      }
 
-      // Bodies — différenciés par archétype et niveau de tension
-      const quotesCrit = isBadBoy ? [
-        `*"Je respecte le sport. Pas les décisions${ctxGP ? ` de ${ctxGP}` : ' de ce genre'}. Inexplicable."*`,
-        `*"La FIA peut justifier ce qu'elle veut — le paddock a des yeux."*`,
-        `*"J'ai rien contre les commissaires personnellement. Mais là, non."*`,
-        `*"${prevCrit >= 60 ? 'Encore. Toujours les mêmes problèmes.' : 'Faut qu\'on en parle. Maintenant.'}"*`,
-        `*"${ego > 70 ? 'Je suis le seul à dire ce que tout le monde pense.' : 'Quelqu\'un doit bien le dire.'}"*`,
-      ] : isVieux ? [
-        `*"Après toutes ces saisons, je pensais avoir tout vu. Et pourtant${ctxGP ? ` — ${ctxGP}` : ''}."*`,
-        `*"Je ne suis pas là pour créer des problèmes. Mais certaines décisions méritent une réponse."*`,
-        `*"Je reste respectueux. Mais je ne peux pas ne rien dire${ctxGP ? ` sur ${ctxGP}` : ''}."*`,
-      ] : isRookie ? [
-        `*"Je suis peut-être nouveau, mais j'ai des yeux. Ça${ctxGP ? ` — ${ctxGP}` : ''}, c'était injuste."*`,
-        `*"Je veux bien apprendre les règles. Encore faut-il qu'elles soient appliquées de la même façon pour tout le monde."*`,
-      ] : [
-        `*"Je n'ai rien contre la FIA personnellement. Mais là, une explication s'impose."*`,
-        `*"La transparence est la base. Ce week-end${ctxGP ? ` à ${ctxGP}` : ''}, on en était loin."*`,
-        `*"Deux pilotes, même situation, deux décisions différentes. Que faut-il comprendre ?"*`,
-      ];
+      // Quotes différenciées par archétype
+      let quotes;
+      if (isBadBoy) {
+        quotes = [
+          '"Je respecte le sport. Pas les décisions' + (ctxGP ? ' de ' + ctxGP : ' de ce genre') + '. Inexplicable."',
+          '"La FIA peut justifier ce qu\'elle veut — le paddock a des yeux."',
+          '"J\'ai rien contre les commissaires personnellement. Mais là, non."',
+          (prevCrit >= 60 ? '"Encore. Toujours les mêmes problèmes."' : '"Faut qu\'on en parle. Maintenant."'),
+          (ego > 70 ? '"Je suis le seul à dire ce que tout le monde pense."' : '"Quelqu\'un doit bien le dire."'),
+        ];
+      } else if (isVieux) {
+        quotes = [
+          '"Après toutes ces saisons, je pensais avoir tout vu. Et pourtant' + (ctxGP ? ' — ' + ctxGP : '') + '."',
+          '"Je ne suis pas là pour créer des problèmes. Mais certaines décisions méritent une réponse."',
+          '"Je reste respectueux. Mais je ne peux pas ne rien dire' + (ctxGP ? ' sur ' + ctxGP : '') + '."',
+        ];
+      } else if (isRookie) {
+        quotes = [
+          '"Je suis peut-être nouveau, mais j\'ai des yeux. Ça' + (ctxGP ? ' — ' + ctxGP : '') + ', c\'était injuste."',
+          '"Je veux bien apprendre les règles. Encore faut-il qu\'elles soient appliquées de la même façon pour tout le monde."',
+        ];
+      } else {
+        quotes = [
+          '"Je n\'ai rien contre la FIA personnellement. Mais là, une explication s\'impose."',
+          '"La transparence est la base. Ce week-end' + (ctxGP ? ' à ' + ctxGP : '') + ', on en était loin."',
+          '"Deux pilotes, même situation, deux décisions différentes. Que faut-il comprendre ?"',
+        ];
+      }
 
-      const bodyCtx = prevCrit >= 65
-        ? pick([
-            `La déclaration de **${pilot.name}**${ctxStr} s'inscrit dans une longue série de sorties contre l'instance dirigeante. Le paddock commence à vraiment prendre position.`,
-            `Ce n'est plus une surprise. **${pilot.name}** et la FIA, c'est une relation qui se détériore GP après GP. Et visiblement, personne ne cligne des yeux en premier.`,
-          ])
-        : prevCrit >= 30
-          ? pick([
-              `**${pilot.name}** n'est pas du genre à se taire quand quelque chose le choque. Cette fois encore, le message est passé — le paddock a entendu.`,
-              `Deuxième sortie notable${ctxStr} en quelques GP. Une tendance se dessine du côté de **${pilot.name}**.`,
-            ])
-          : pick([
-              `Rare de voir **${pilot.name}** dans cette posture. L'irritation est visible${ctxGP ? ` après ${ctxGP}` : ''}.`,
-              `Le paddock prend note. Pas forcément d'accord avec la forme, mais le fond résonne chez beaucoup.`,
-            ]);
+      let bodyCtx;
+      if (prevCrit >= 65) {
+        bodyCtx = pick([
+          'La déclaration de **' + pilot.name + '**' + ctxStr + ' s\'inscrit dans une longue série de sorties contre l\'instance dirigeante.',
+          'Ce n\'est plus une surprise. **' + pilot.name + '** et la FIA, c\'est une relation qui se détériore GP après GP.',
+        ]);
+      } else if (prevCrit >= 30) {
+        bodyCtx = pick([
+          '**' + pilot.name + '** n\'est pas du genre à se taire quand quelque chose le choque. Le paddock a entendu.',
+          'Deuxième sortie notable' + ctxStr + ' en quelques GP. Une tendance se dessine.',
+        ]);
+      } else {
+        bodyCtx = pick([
+          'Rare de voir **' + pilot.name + '** dans cette posture. L\'irritation est visible' + (ctxGP ? ' après ' + ctxGP : '') + '.',
+          'Le paddock prend note. Pas forcément d\'accord avec la forme, mais le fond résonne chez beaucoup.',
+        ]);
+      }
 
-      const body = `${pick(quotesCrit)}\n\n${bodyCtx}` +
-        (newCrit >= 50 ? `\n\n*Niveau de tension FIA : **${critLabel}** (${newCrit}/100)*` : '');
+      const body = '*' + pick(quotes) + '*\n\n' + bodyCtx +
+        (newCrit >= 50 ? '\n\n*Niveau de tension FIA : **' + critLabel + '** (' + newCrit + '/100)*' : '');
 
       const embed = new EmbedBuilder()
         .setColor('#E53935')
-        .setTitle(`🔥 ${pick(headlines)}`)
+        .setTitle('🔥 ' + pick(headlines))
         .setDescription(body)
-        .setFooter({ text: `📰 Déclaration publique · ${pilot.name} · FIA Tension : ${newCrit}/100 ${critLabel}` });
+        .setFooter({ text: '📰 Déclaration publique · ' + pilot.name + ' · FIA Tension : ' + newCrit + '/100 ' + critLabel });
 
-      const newsChannel = await getRaceChannel(null);
-      const targetChannel = (newsChannel && newsChannel.id !== interaction.channelId) ? newsChannel : interaction.channel;
       await targetChannel.send({ embeds: [embed] });
-
-      if (targetChannel.id !== interaction.channelId) {
-        await interaction.editReply({ content: `🔥 Déclaration publiée. *(Tension FIA : ${newCrit}/100 — ${critLabel})*` });
-      } else {
-        await interaction.editReply({ content: `✅ Publié.` });
-      }
+      if (targetChannel.id !== interaction.channelId)
+        await interaction.editReply({ content: '🔥 Déclaration publiée. *(Tension FIA : ' + newCrit + '/100 — ' + critLabel + ')*' });
+      else
+        await interaction.editReply({ content: '✅ Publié.' });
     }
 
     // ══════════════════════════════════════════════════════════════
-    // TYPE : FÉLICITER
+    // FÉLICITER
     // ══════════════════════════════════════════════════════════════
     else if (fiaType === 'feliciter') {
-      // Légère descente de fiaCriticism (plus difficile à baisser qu'à monter)
-      const drop    = randInt(4, 8);
-      const newCrit = Math.max(0, prevCrit - drop);
+      const newCrit = Math.max(0, prevCrit - randInt(4, 8));
       await Pilot.findByIdAndUpdate(pilot._id, { 'personality.fiaCriticism': newCrit });
 
-      const praiseReason = pick(praiseReasons);
+      const praiseReason = raison || pick(['la décision post-course', 'l\'initiative prise cette semaine', 'la clarté du communiqué officiel', 'la réactivité des commissaires']);
       const impactNote   = prevCrit >= 40
-        ? `\n\n*Surprenant de la part de ${pilot.name}, connu pour ses critiques envers la FIA — le paddock note le changement de ton.*`
+        ? '\n\n*Surprenant de la part de ' + pilot.name + ', connu pour ses critiques — le paddock note le changement de ton.*'
         : '';
 
-      const quotesPraise = isBadBoy ? [
-        `*"Je suis le premier à critiquer quand c'est mérité. Là — c'était la bonne décision. Chapeau."*`,
-        `*"Je ne suis pas là pour faire de la politique. Mais ${praiseReason}, c'était juste."*`,
-        `*"Tout le monde peut se tromper. Là, la FIA a fait ce qu'il fallait faire."*`,
-      ] : isVieux ? [
-        `*"Dans ma carrière, j'ai vu beaucoup de mauvaises décisions. Celle-là, non. C'était bien géré."*`,
-        `*"Je peux critiquer quand il le faut — et saluer quand c'est mérité. ${praiseReason ? `Sur ${praiseReason}` : 'Ici'}, c'est mérité."*`,
-        `*"La FIA n'a pas souvent d'alliés dans le paddock. Aujourd'hui, j'en suis un."*`,
-      ] : isRookie ? [
-        `*"Je commence à comprendre comment ça fonctionne ici. Et ${praiseReason ? praiseReason : 'cette décision'}, c'était cool."*`,
-        `*"Honnêtement, je m'attendais à pire. Bien joué."*`,
+      let quotes;
+      if (isBadBoy) {
+        quotes = [
+          '"Je suis le premier à critiquer quand c\'est mérité. Là — c\'était la bonne décision. Chapeau."',
+          '"La FIA peut se tromper. Là elle ne s\'est pas trompée."',
+          '"Tout le monde peut bien faire. Là, c\'était bien."',
+        ];
+      } else if (isVieux) {
+        quotes = [
+          '"Dans ma carrière, j\'ai vu beaucoup de mauvaises décisions. Celle-là, non. C\'était bien géré."',
+          '"Je peux critiquer quand il le faut — et saluer quand c\'est mérité. ' + (ctxGP ? 'Sur ' + ctxGP + ' :' : 'Ici :') + ' c\'est mérité."',
+          '"La FIA n\'a pas souvent d\'alliés dans le paddock. Aujourd\'hui, j\'en suis un."',
+        ];
+      } else if (isRookie) {
+        quotes = [
+          '"Je commence à comprendre comment ça fonctionne. Et ' + (raison || 'cette décision') + ', c\'était bien."',
+          '"Honnêtement, je m\'attendais à pire. Bien joué."',
+        ];
+      } else {
+        quotes = [
+          '"' + (raison ? 'Sur ' + raison : 'Cette fois') + ', la décision était la bonne. Je le dis franchement."',
+          '"Ce n\'est pas si courant de pouvoir féliciter la FIA. Là, c\'est justifié."',
+          '"Transparence, cohérence — c\'est tout ce qu\'on demande. Bien."',
+        ];
+      }
+
+      const headlines = prevCrit >= 40 ? [
+        'Le retournement de situation — ' + pilot.name + ' félicite la FIA' + ctxShort,
+        pilot.name + ' change de ton' + ctxStr + ' — *"C\'était la bonne décision"*',
+        'Surprise dans le paddock : ' + pilot.name + ' prend la défense de la FIA' + ctxShort,
       ] : [
-        `*"${praiseReason ? `Sur ${praiseReason}` : 'Cette fois'}, la décision était la bonne. Je le dis franchement."*`,
-        `*"Ce n'est pas si courant de pouvoir féliciter la FIA. Là, c'est justifié."*`,
-        `*"Transparence, cohérence${praiseReason ? `, ${praiseReason}` : ''} — c'est tout ce qu'on demande. Bien."*`,
+        pilot.name + ' salue la FIA' + ctxShort + ' — "C\'était la bonne décision"',
+        pilot.name + ' prend tout le monde de court : éloge public de la FIA' + ctxShort,
+        '"C\'est mérité" — ' + pilot.name + ' défend la FIA' + ctxShort,
+        'Geste rare de ' + pilot.name + ctxStr + ' — le paddock prend note',
       ];
 
       const bodyPraise = isDiplo
-        ? pick([
-            `**${pilot.name}** prend tout le monde de court avec cette déclaration${ctxStr}. Quand on s'attendait à voir le pilote critique habituel, il choisit de saluer le travail de la FIA.`,
-            `Pas toujours facile de reconnaître quand l'institution fait bien. **${pilot.name}** le fait — et le paddock retient la chose.`,
-          ])
-        : pick([
-            `La déclaration de **${pilot.name}**${ctxStr} tranche avec les sorties habituelles du paddock. Un signal positif — rare.`,
-            `**${pilot.name}** surprend${ctxStr}. Dans un environnement où critiquer la FIA est devenu un sport en soi, l'éloge détonne.`,
-          ]);
+        ? '**' + pilot.name + '** prend tout le monde de court' + ctxStr + '. Quand on s\'attendait à la critique habituelle, il choisit de saluer.'
+        : 'Dans un environnement où critiquer la FIA est un sport en soi, la déclaration de **' + pilot.name + '** détonne' + ctxStr + '.';
 
-      const headlines = [
-        `${pilot.name} salue la FIA${ctxShort} — "C'était la bonne décision"`,
-        `${pilot.name} prend tout le monde de court : éloge public de la FIA${ctxShort}`,
-        `Geste rare de ${pilot.name}${ctxStr} — le paddock prend note`,
-        prevCrit >= 40
-          ? `Le retournement de situation — ${pilot.name} félicite la FIA${ctxShort}`
-          : `${pilot.name} reconnaît le bon travail de la FIA${ctxShort}`,
-        `*"C'est mérité"* — ${pilot.name} défend la FIA${ctxShort}`,
-      ];
-
-      const body = `${pick(quotesPraise)}\n\n${bodyPraise}${impactNote}`;
+      const body = '*' + pick(quotes) + '*\n\n' + bodyPraise + impactNote;
 
       const embed = new EmbedBuilder()
         .setColor('#43A047')
-        .setTitle(`🤝 ${pick(headlines)}`)
+        .setTitle('🤝 ' + pick(headlines))
         .setDescription(body)
-        .setFooter({ text: `📰 Déclaration publique · ${pilot.name} · FIA Tension : ${newCrit}/100${prevCrit >= 40 ? ' ⬇️ apaisement' : ''}` });
+        .setFooter({ text: '📰 Déclaration publique · ' + pilot.name + ' · FIA Tension : ' + newCrit + '/100' + (prevCrit >= 40 ? ' ⬇️ apaisement' : '') });
 
-      const newsChannel = await getRaceChannel(null);
-      const targetChannel = (newsChannel && newsChannel.id !== interaction.channelId) ? newsChannel : interaction.channel;
       await targetChannel.send({ embeds: [embed] });
-
-      if (targetChannel.id !== interaction.channelId) {
-        await interaction.editReply({ content: `🤝 Déclaration publiée. *(Tension FIA : ${newCrit}/100)*` });
-      } else {
-        await interaction.editReply({ content: `✅ Publié.` });
-      }
+      if (targetChannel.id !== interaction.channelId)
+        await interaction.editReply({ content: '🤝 Déclaration publiée. *(Tension FIA : ' + newCrit + '/100)*' });
+      else
+        await interaction.editReply({ content: '✅ Publié.' });
     }
 
     // ══════════════════════════════════════════════════════════════
-    // TYPE : APAISER
+    // APAISER
     // ══════════════════════════════════════════════════════════════
     else if (fiaType === 'apaiser') {
-      // Descente plus forte de fiaCriticism — geste de réconciliation
-      const drop    = randInt(8, 16);
-      const newCrit = Math.max(0, prevCrit - drop);
+      const newCrit  = Math.max(0, prevCrit - randInt(8, 16));
+      const wasHostile = prevCrit >= 50;
       await Pilot.findByIdAndUpdate(pilot._id, { 'personality.fiaCriticism': newCrit });
 
-      const peaceReason = pick(peaceReasons);
-      const wasHostile  = prevCrit >= 50; // changement de cap notable
+      const peaceReason = raison || pick(['la situation globale', 'les tensions des derniers GPs', 'le débat autour des règlements', 'les échanges tendus dans le paddock']);
 
-      const quotesPeace = isBadBoy ? [
-        `*"Ça fait du bruit depuis un moment. J'ai dit ce que j'avais à dire. Maintenant on avance."*`,
-        `*"Je peux me battre sur la piste sans me battre contre la FIA. Cette semaine, on repart à zéro."*`,
-        `*"Critiquer c'est facile. Construire, c'est autre chose. J'essaie de faire ma part."*`,
-      ] : isVieux ? [
-        `*"Dans ce sport, la FIA et les pilotes ont besoin les uns des autres. Le dialogue est la seule voie."*`,
-        `*"J'ai eu mes désaccords. Mais l'important c'est que le sport avance — ensemble."*`,
-        `*"On peut ne pas être d'accord et quand même se respecter. C'est ce que j'essaie de montrer."*`,
-      ] : isRookie ? [
-        `*"Je ne veux pas commencer ma carrière en mode guerre. Si y'a des problèmes, on peut en parler."*`,
-        `*"Tout le monde cherche la même chose — que le sport soit bon. On part de là."*`,
+      let quotes;
+      if (isBadBoy) {
+        quotes = [
+          '"Ça fait du bruit depuis un moment. J\'ai dit ce que j\'avais à dire. Maintenant on avance."',
+          '"Je peux me battre sur la piste sans me battre contre la FIA. Cette semaine, on repart à zéro."',
+          '"Critiquer c\'est facile. Construire, c\'est autre chose."',
+        ];
+      } else if (isVieux) {
+        quotes = [
+          '"Dans ce sport, la FIA et les pilotes ont besoin les uns des autres. Le dialogue est la seule voie."',
+          '"J\'ai eu mes désaccords. Mais l\'important c\'est que le sport avance — ensemble."',
+          '"On peut ne pas être d\'accord et quand même se respecter."',
+        ];
+      } else if (isRookie) {
+        quotes = [
+          '"Je ne veux pas commencer ma carrière en mode guerre. Si y\'a des problèmes, on peut en parler."',
+          '"Tout le monde cherche la même chose — que le sport soit bon. On part de là."',
+        ];
+      } else {
+        quotes = [
+          '"Les tensions ne font de bien à personne. Sur ' + peaceReason + ', je préfère le dialogue."',
+          '"Je veux des solutions, pas des coupables."',
+          '"Critiquer ne change rien si on ne propose pas autre chose. Alors — parlons-en."',
+        ];
+      }
+
+      const headlines = wasHostile ? [
+        pilot.name + ' choisit l\'apaisement' + ctxShort + ' — revirement après semaines de tensions',
+        'La surprise de la semaine : ' + pilot.name + ' tend la main à la FIA' + ctxShort,
+        pilot.name + ' change de cap' + ctxStr + ' — "Maintenant, on avance"',
+        'Fin de la guerre ? ' + pilot.name + ' appelle au dialogue' + ctxShort,
       ] : [
-        `*"Les tensions ne font de bien à personne. ${peaceReason ? `Sur ${peaceReason}` : 'Sur ce sujet'}, je préfère le dialogue."*`,
-        `*"Je veux qu'on trouve des solutions, pas des coupables. C'est l'état d'esprit dans lequel j'aborde ça."*`,
-        `*"Critiquer ne change rien si on ne propose pas autre chose. Alors voilà — parlons-en."*`,
+        pilot.name + ' opte pour le dialogue' + ctxShort + ' — message aux deux camps',
+        '"Je préfère le dialogue" — ' + pilot.name + ' appelle à la désescalade' + ctxShort,
+        pilot.name + ' choisit la voie de la réconciliation' + ctxStr,
       ];
 
       const bodyPeace = wasHostile
-        ? pick([
-            `Changement de ton marquant de **${pilot.name}**${ctxStr}. Celui qui était en première ligne des critiques envers la FIA semble vouloir tourner une page.`,
-            `Après plusieurs sorties médiatiques contre la FIA, **${pilot.name}** prend le contre-pied. Le paddock observe — et retient la geste.`,
-          ])
-        : pick([
-            `**${pilot.name}** fait le choix de la désescalade${ctxStr}. Un signal adressé à toutes les parties.`,
-            `Dans un paddock souvent en guerre froide avec la FIA, la déclaration de **${pilot.name}** détonne — dans le bon sens.`,
-          ]);
+        ? 'Changement de ton marquant de **' + pilot.name + '**' + ctxStr + '. Celui qui était en première ligne des critiques semble vouloir tourner une page.'
+        : '**' + pilot.name + '** fait le choix de la désescalade' + ctxStr + '. Un signal adressé à toutes les parties.';
 
-      const headlines = wasHostile ? [
-        `${pilot.name} choisit l'apaisement${ctxShort} — revirement après semaines de tensions`,
-        `La surprise de la semaine : ${pilot.name} tend la main à la FIA${ctxShort}`,
-        `${pilot.name} change de cap${ctxStr} — *"Maintenant, on avance"*`,
-        `Fin de la guerre ? ${pilot.name} appelle au dialogue avec la FIA${ctxShort}`,
-      ] : [
-        `${pilot.name} opte pour le dialogue${ctxShort} — message aux deux camps`,
-        `*"Je préfère le dialogue"* — ${pilot.name} appelle à la désescalade${ctxShort}`,
-        `${pilot.name} choisit la voie de la réconciliation${ctxStr}`,
-        `${pilot.name} pose sa main sur l'épaule de la FIA${ctxShort}`,
-      ];
-
-      const body = `${pick(quotesPeace)}\n\n${bodyPeace}` +
-        (wasHostile ? `\n\n*Tension FIA de **${pilot.name}** en baisse : ${prevCrit} → ${newCrit}/100.*` : '');
+      const body = '*' + pick(quotes) + '*\n\n' + bodyPeace +
+        (wasHostile ? '\n\n*Tension FIA de **' + pilot.name + '** : ' + prevCrit + ' → ' + newCrit + '/100.*' : '');
 
       const embed = new EmbedBuilder()
         .setColor('#7B61FF')
-        .setTitle(`🕊️ ${pick(headlines)}`)
+        .setTitle('🕊️ ' + pick(headlines))
         .setDescription(body)
-        .setFooter({ text: `📰 Déclaration publique · ${pilot.name} · FIA Tension : ${newCrit}/100${wasHostile ? ' ⬇️ désescalade notable' : ''}` });
+        .setFooter({ text: '📰 Déclaration publique · ' + pilot.name + ' · FIA Tension : ' + newCrit + '/100' + (wasHostile ? ' ⬇️ désescalade notable' : '') });
 
-      const newsChannel = await getRaceChannel(null);
-      const targetChannel = (newsChannel && newsChannel.id !== interaction.channelId) ? newsChannel : interaction.channel;
       await targetChannel.send({ embeds: [embed] });
-
-      if (targetChannel.id !== interaction.channelId) {
-        await interaction.editReply({ content: `🕊️ Déclaration publiée. *(Tension FIA : ${newCrit}/100)*` });
-      } else {
-        await interaction.editReply({ content: `✅ Publié.` });
-      }
+      if (targetChannel.id !== interaction.channelId)
+        await interaction.editReply({ content: '🕊️ Déclaration publiée. *(Tension FIA : ' + newCrit + '/100)*' });
+      else
+        await interaction.editReply({ content: '✅ Publié.' });
     }
 
-    // ── Enregistrer le cooldown (après traitement, quel que soit le type) ──────
+    // ── Enregistrer cooldown ────────────────────────────────────────────────
     await CommandCooldown.create({
       discordId : interaction.user.id,
       command   : 'fia_reaction',
       pilotId   : pilot._id,
       usedAt    : new Date(),
     });
-
     return;
   }
 
