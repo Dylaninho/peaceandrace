@@ -1318,8 +1318,10 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false,
   return { pit: false, reason: null };
 }
 
-function choosePitCompound(currentCompound, lapsRemaining, usedCompounds) {
-  if (!usedCompounds.includes('HARD')   && lapsRemaining > 20) return 'HARD';
+function choosePitCompound(currentCompound, lapsRemaining, usedCompounds, weather = 'DRY') {
+  // Par temps chaud, le HARD est encore plus favorisé (dégradation accélérée des softs)
+  const hotBias = weather === 'HOT';
+  if (!usedCompounds.includes('HARD')   && lapsRemaining > (hotBias ? 15 : 20)) return 'HARD';
   if (!usedCompounds.includes('MEDIUM') && lapsRemaining > 10) return 'MEDIUM';
   if (lapsRemaining <= 15) return 'SOFT';
   return 'MEDIUM';
@@ -1369,27 +1371,37 @@ function resolveSafetyCar(scState, lapIncidents) {
 // Les réactions et le controle réduisent le risque d'accident
 // reliabilityMalus : multiplicateur additionnel sur reliabF (ex: 0.15 = +15% de risque mécanique)
 //                    Calculé depuis la chimie d'écurie (mécaniciens démotivés)
-function checkIncident(pilot, team, lap = 1, totalLaps = 50, reliabilityMalus = 0) {
+function checkIncident(pilot, team, lap = 1, totalLaps = 50, reliabilityMalus = 0, weather = 'DRY') {
   const roll = Math.random();
 
+  // ── Multiplicateur météo ─────────────────────────────────────────────────
+  // HOT  : surchauffe moteur/frein → +40% risque mécanique
+  // WET  : aquaplaning, erreurs pilote → +55% risque crash/crevaison
+  // INTER: conditions changeantes → +25%
+  const hotMult  = weather === 'HOT'  ? 1.40 : 1.0;  // amplifie surtout les mécaniques
+  const wetMult  = weather === 'WET'  ? 1.55 : weather === 'INTER' ? 1.25 : 1.0;
+
   // ── Fiabilité mécanique progressive ──────────────────────────────────────
-  // Tours 1-5  : seulement les défauts de conception graves (×0.12)
-  //              → Un problème en tour 2 = vrai bug de conception, ultra-rare
-  // Tours 6-15 : rodage, échauffement, risque modéré (×0.55)
-  // Tours 16+  : accumulation d'usure — plus la voiture roule, plus elle peut lâcher
-  //              Facteur linéaire de 0.70 (T16) → 1.20 (dernier tour)
-  //              Une voiture peu fiable peut donc craquer en fin de course
+  // Tours 1-5  : défauts de conception graves (×0.12)
+  // Tours 6-15 : rodage, échauffement (×0.55)
+  // Tours 16+  : usure — 0.70→1.20
   const lapProgress = Math.max(0, Math.min(1, (lap - 15) / Math.max(1, totalLaps - 15)));
   const lapMultiplier = lap <= 5  ? 0.12
                       : lap <= 15 ? 0.55
                       : 0.70 + lapProgress * 0.50;
 
-  // reliabilityMalus appliqué sur la probabilité mécanique uniquement (mécaniciens, pas les pilotes)
-  const reliabF  = (100 - team.refroidissement) / 100 * 0.007 * lapMultiplier * (1 + reliabilityMalus);
-  const crashF   = ((100 - pilot.controle) / 100 * 0.003) + ((100 - pilot.reactions) / 100 * 0.002);
-  if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
-  if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
-  if (roll < 0.002)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
+  // reliabilityMalus + canicule sur risque mécanique
+  const reliabF  = (100 - team.refroidissement) / 100 * 0.007 * lapMultiplier * (1 + reliabilityMalus) * hotMult;
+  // crash/crevaison amplifié sous pluie/inter
+  const crashF   = (((100 - pilot.controle) / 100 * 0.003) + ((100 - pilot.reactions) / 100 * 0.002)) * wetMult;
+  const punctureThreshold = 0.002 * wetMult;
+
+  const mechMsg = weather === 'HOT'
+    ? pick(['💥 Surchauffe moteur', '🌡️ Freins surchauffés', '💥 Problème thermique'])
+    : pick(['💥 Problème mécanique', '💥 Panne moteur', '💥 Problème hydraulique']);
+  if (roll < reliabF)                              return { type: 'MECHANICAL', msg: mechMsg };
+  if (roll < reliabF + crashF)                     return { type: 'CRASH',      msg: `💥 Accident` };
+  if (roll < reliabF + crashF + punctureThreshold) return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
   return null;
 }
 
@@ -1399,7 +1411,9 @@ function checkIncident(pilot, team, lap = 1, totalLaps = 50, reliabilityMalus = 
 // Q3 (10 restants) → shoot-out pour la grille de pole
 // Chaque pilote fait UN tour chrono par segment, avec variabilité.
 async function simulateQualifying(race, pilots, teams) {
-  const weather = pick(['DRY','DRY','DRY','WET','INTER']);
+  // Météo Quali basée sur la prévision EL — peut évoluer légèrement (~15% de chance)
+  const _baseW = race.forecastWeather || pick(['DRY','DRY','DRY','WET','INTER']);
+  const weather = Math.random() < 0.15 ? pick(['DRY','DRY','WET','INTER']) : _baseW;
   const n = pilots.length;
   const q3Size = Math.min(10, Math.max(3, Math.floor(n * 0.5)));
   const q2Size = Math.min(15, Math.max(q3Size + 2, Math.floor(n * 0.75)));
@@ -4534,30 +4548,48 @@ function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
 function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear, dnfThisRace = false) {
   const source = pick(['pitlane_insider', 'pl_racing_news', 'paddock_whispers']);
 
+  // Headlines : contexte immédiat (DNF ce GP) vs tendance saison (≥3 DNFs)
   const headlines = dnfThisRace ? [
     `${pilot.name} dans le dur — jusqu'où ?`,
     `DNF au dernier GP — ${pilot.name} traverse sa période la plus compliquée`,
-    `${dnfs} abandon${dnfs > 1 ? 's' : ''} cette saison — ${pilot.name} dans une mauvaise passe`,
     `La spirale ${pilot.name} : accident de parcours ou signal d'alarme ?`,
+    dnfs >= 2
+      ? `${dnfs} abandons cette saison dont le dernier — le paddock s'interroge`
+      : `L'abandon de ${pilot.name} relance les questions — un problème récurrent ?`,
   ] : [
+    // Cas ≥3 DNFs sans DNF ce GP : tendance longue saison
     `${pilot.name} dans le dur — jusqu'où ?`,
     `Les résultats ne suivent pas pour ${pilot.name} — le paddock s'interroge`,
     `${team.emoji}${team.name} commence à s'interroger sur ${pilot.name}`,
-    `${dnfs} abandon${dnfs > 1 ? 's' : ''} en saison — ${pilot.name} peine à trouver la régularité`,
+    `${dnfs} abandons en saison — ${pilot.name} peine à trouver la régularité`,
   ];
 
-  const bodies = [
-    `${dnfs} abandons ${lastResults ? `et des résultats en dessous des attentes` : ''} — la série noire de ${pilot.name} commence à faire parler.\n\n` +
+  const bodies = dnfThisRace ? [
+    // Body ciblé sur l'abandon de ce GP
+    `Encore un abandon. ${dnfs >= 2 ? `C'est le ${dnfs}ème cette saison pour **${pilot.name}** — ` : `Pour **${pilot.name}** — `}et à chaque fois, les mêmes questions reviennent.\n\n` +
     pick([
       `En interne, on reste solidaire officiellement. Mais les questions existent.`,
-      `"Tout le monde traverse des creux. La différence c'est comment tu en sors." Message reçu ?`,
-      `${pilot.name} s'est entraîné en simulateur pendant 6 heures hier soir. La réponse sera en piste.`,
+      `*"Tout le monde traverse des creux. La différence c'est comment tu en sors."* Message reçu ?`,
+      `${pilot.name} s'est entraîné en simulateur après la course. La réponse sera en piste.`,
     ]),
-
-    `Il y a quelques GP, ${pilot.name} semblait intouchable. Aujourd'hui, chaque course apporte son lot de mauvaises nouvelles.\n\n` +
+    `Le dernier GP s'est terminé avant la ligne d'arrivée pour **${pilot.name}** — ${dnfs >= 2 ? `une habitude cette saison.` : `pas la première difficulté, mais celle-là fait mal.`}\n\n` +
     pick([
       `La pression commence à se faire sentir. ${team.emoji}${team.name} a des attentes — et pour l'instant, elles ne sont pas remplies.`,
-      `Selon une source interne : "On ne remet pas en question le pilote. On remet en question la dynamique actuelle."`,
+      `*"On ne remet pas en question le pilote. On remet en question la dynamique actuelle."* Selon une source interne.`,
+      `Des rumeurs de changement d'ingénieur de course ont commencé à circuler. Rien de confirmé.`,
+    ]),
+  ] : [
+    // Body tendance longue (≥3 DNFs sans DNF ce GP)
+    `${dnfs} abandons en saison — la série noire de **${pilot.name}** commence à faire parler, même lors des GP où il finit.\n\n` +
+    pick([
+      `En interne, on reste solidaire officiellement. Mais les questions existent.`,
+      `La régularité manque. Et dans ce sport, la régularité c'est tout.`,
+      `${pilot.name} s'est dit serein en conférence de presse. Son classement, lui, raconte une autre histoire.`,
+    ]),
+    `Il y a quelques GP, ${pilot.name} semblait intouchable. Aujourd'hui, le compteur DNF de la saison en dit long.\n\n` +
+    pick([
+      `La pression commence à se faire sentir. ${team.emoji}${team.name} a des attentes — et pour l'instant, elles ne sont pas remplies.`,
+      `*"On ne remet pas en question le pilote. On remet en question la dynamique actuelle."* Selon une source interne.`,
       `Des rumeurs de changement d'ingénieur de course ont commencé à circuler. Rien de confirmé.`,
     ]),
   ];
@@ -5166,6 +5198,9 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   }
 
   // 4. CRISE DE FORME
+  // Note : postRacePersonalityHooks tourne via setImmediate AVANT que applyRaceResults
+  // ait mis à jour les standings → s.dnfs ne compte pas encore le DNF de ce GP.
+  // On corrige en ajoutant manuellement le DNF de ce GP si présent.
 const crisisChance = isEarly ? 0.2 : isMid ? 0.35 : isLate ? 0.45 : 0.5;
 for (const s of standings.slice(Math.floor(standings.length / 2))) {
   const pilot = pilotMap.get(String(s.pilotId));
@@ -5173,10 +5208,15 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
   if (!pilot || !team) continue;
   const pilotRaceResult = finalResults.find(r => String(r.pilotId) === String(pilot._id));
   const dnfThisRace     = pilotRaceResult?.dnf === true;
-  // DNF ce GP OU ≥2 DNFs en saison — évite le faux positif pour un pilote P5 sain
-  const qualifiesCrisis = dnfThisRace || s.dnfs >= 2;
+  // s.dnfs pas encore incrémenté → on ajoute +1 si DNF ce GP
+  const realDnfs = (s.dnfs || 0) + (dnfThisRace ? 1 : 0);
+  // Critères réalistes :
+  // - DNF au dernier GP (context immédiat — article a du sens)
+  // - OU 3+ DNFs en saison (tendance lourde, même sans DNF ce GP)
+  // On évite l'article "crise" pour un pilote qui finit P12 normalement
+  const qualifiesCrisis = dnfThisRace || realDnfs >= 3;
   if (qualifiesCrisis && Math.random() < crisisChance) {
-    articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year, dnfThisRace));
+    articlesToPost.push(genFormCrisisArticle(pilot, team, realDnfs, null, season.year, dnfThisRace));
     break;
   }
 }
@@ -6546,7 +6586,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
   // ── Météo dynamique ───────────────────────────────────────
   // Météo de départ (pondérée vers DRY)
-  let weather = pick(['DRY','DRY','DRY','DRY','WET','INTER','HOT']);
+  // Météo Course basée sur la prévision EL — peut changer (~20% de chance d'évolution surprise)
+  const _forecastW = race.forecastWeather || 'DRY';
+  let weather = Math.random() < 0.20 ? pick(['DRY','DRY','WET','INTER','HOT']) : _forecastW;
 
   // Transitions possibles selon la météo courante
   const WEATHER_TRANSITIONS = {
@@ -7000,7 +7042,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     for (const driver of alive) {
       // Récupérer le malus de fiabilité de la chimie d'écurie (pré-calculé avant la course)
       const teamReliabilityMalus = teamChemistryMalusMap.get(String(driver.team._id)) || 0;
-      const incident = checkIncident(driver.pilot, driver.team, lap, totalLaps, teamReliabilityMalus);
+      const incident = checkIncident(driver.pilot, driver.team, lap, totalLaps, teamReliabilityMalus, weather);
       if (!incident) continue;
       if (scActive && (incident.type === 'CRASH' || incident.type === 'PUNCTURE')) continue;
 
@@ -7311,7 +7353,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
 
         driver.totalTime += lt;
-        driver.tireWear  += 1;
+        // Canicule : pneus s'usent ~30% plus vite (asphalte brûlant, températures extrêmes)
+        driver.tireWear  += (weather === 'HOT' ? 1.30 : 1);
         driver.tireAge   += 1;
         if (lt < driver.fastestLap) driver.fastestLap = lt;
         if (lt < fastestLapMs) {
@@ -7436,7 +7479,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       if (doPit && driver.pitStops < 3 && lapsRemaining > 8) {
         const posIn      = driver.pos;
         const oldTire    = driver.tireCompound;
-        const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds);
+        const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds, weather);
 
         // Pit de réparation : aileron = +12-20s, suspension = +8-14s
         let pitTime;
@@ -8849,6 +8892,19 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
       // Si rivalité différente déjà active, on ne change pas (on garde la plus vieille)
     }
   }
+
+  // ── Décroissance de rivalHeat pour les paires sans contact ce GP ──
+  // Un GP calme entre rivaux = tension qui retombe légèrement (-5 heat)
+  try {
+    const allRivalsNow = await Pilot.find({ rivalId: { $ne: null } });
+    for (const p of allRivalsNow) {
+      const pairKey = [String(p._id), String(p.rivalId)].sort().join('_');
+      if (!rivalCollisionThisRace.has(pairKey) && (p.rivalHeat || 0) > 0) {
+        const decayed = Math.max(0, (p.rivalHeat || 0) - 5);
+        await Pilot.findByIdAndUpdate(p._id, { $set: { rivalHeat: decayed } });
+      }
+    }
+  } catch(e) { console.error('[rivalHeat decay]', e.message); }
 
   // ── Forcer un article rivalité si les rivaux se sont touchés ce GP ──
   // (indépendamment de la chance normale de publication)
@@ -13684,7 +13740,7 @@ async function runPractice(override, gpIndex = null) {
 
   const { weather, e1, e2, e3 } = await simulatePractice(race, pilots, teams);
   const channel = await getRaceChannel(override);
-  if (!channel) { await Race.findByIdAndUpdate(race._id, { status: 'practice_done' }); return; }
+  if (!channel) { await Race.findByIdAndUpdate(race._id, { status: 'practice_done', forecastWeather: weather }); return; }
 
   const W = ms => new Promise(r => setTimeout(r, ms));
   const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
@@ -13937,7 +13993,7 @@ async function runPractice(override, gpIndex = null) {
     .setFooter({ text: race.slot === 1 ? 'Qualifications à 18h 🏎️' : 'Qualifications à 13h 🏎️' });
 
   await channel.send({ embeds: [el3Embed] });
-  await Race.findByIdAndUpdate(race._id, { status: 'practice_done' });
+  await Race.findByIdAndUpdate(race._id, { status: 'practice_done', forecastWeather: weather });
 }
 
 async function runQualifying(override, gpIndex = null) {
