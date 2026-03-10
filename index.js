@@ -195,6 +195,15 @@ const PilotSchema = new mongoose.Schema({
   // Repris ponctuellement dans les articles et confs de presse.
   nickname        : { type: String, default: null },
   nicknameGivenBy : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
+  // ── Historique inter-saisons ─────────────────────────────
+  lastSeasonRank  : { type: Number, default: null }, // classement pilote saison précédente
+  lastSeasonPts   : { type: Number, default: null }, // points saison précédente
+  lastSeasonWins  : { type: Number, default: null }, // victoires saison précédente
+  careerBestRank  : { type: Number, default: null }, // meilleur classement de carrière
+  careerWins      : { type: Number, default: 0    }, // victoires cumulées toutes saisons
+  careerPodiums   : { type: Number, default: 0    }, // podiums cumulés toutes saisons
+  careerDnfs      : { type: Number, default: 0    }, // DNFs cumulés toutes saisons
+  careerRaces     : { type: Number, default: 0    }, // courses disputées cumulées
 });
 const Pilot = mongoose.model('Pilot', PilotSchema);
 
@@ -631,6 +640,59 @@ function overallRating(pilot) {
     pilot.reactions    * 0.11
   );
 }
+// ── evalPilotPerf — évaluation RELATIVE de la performance pilote ─────────────
+// Tient compte : budget/rang équipe, lastSeasonRank constructeur/pilote,
+// points en saison, victoires, podiums, DNFs.
+function evalPilotPerf(pilot, team, standing, teamRank, totalTeams, lastSeasonTeamRank) {
+  const tpWins    = standing?.wins    || 0;
+  const tpPts     = standing?.points  || 0;
+  const tpPodiums = standing?.podiums || 0;
+  const tpDnfs    = standing?.dnfs    || 0;
+  const tpOvr     = overallRating(pilot);
+  const budget    = team?.budget  || 80;
+  const nTeams    = totalTeams    || 10;
+  const rank      = teamRank      || Math.ceil(nTeams / 2);
+
+  const isTopTeam  = rank <= 3 || budget >= 120;
+  const isMidField = !isTopTeam && (rank <= 6 || budget >= 80);
+  const isSmall    = !isTopTeam && !isMidField;
+
+  const winTarget    = isTopTeam ? 3  : isMidField ? 1  : 0;
+  const podiumTarget = isTopTeam ? 8  : isMidField ? 3  : 1;
+  const ptsTarget    = isTopTeam ? 80 : isMidField ? 35 : 12;
+  const dnfTolerance = 4; // seuil universel : 4+ DNF = problématique quel que soit l'équipe
+
+  const seasonDelta      = lastSeasonTeamRank ? (lastSeasonTeamRank - rank) : 0;
+  const progressingTeam  = seasonDelta >= 2;
+  const regressingTeam   = seasonDelta <= -2;
+
+  const winScore    = winTarget    > 0 ? (tpWins    / winTarget)    * 40 : Math.min(tpWins * 15, 40);
+  const podiumScore = podiumTarget > 0 ? (tpPodiums / podiumTarget) * 25 : Math.min(tpPodiums * 8, 25);
+  const ptsScore    = ptsTarget    > 0 ? (tpPts     / ptsTarget)    * 25 : Math.min(tpPts * 2, 25);
+  // Pas de pénalité DNF dans le perfScore — 2-3 DNF/saison c'est normal
+  let perfScore     = winScore + podiumScore + ptsScore;
+
+  if (!isTopTeam && tpWins >= 1)    perfScore += 20;
+  if (isSmall    && tpPodiums >= 1) perfScore += 15;
+  if (progressingTeam)              perfScore += 8;
+  if (regressingTeam)               perfScore -= 8;
+
+  const isChamp    = perfScore >= 85 || (isTopTeam && tpWins >= 3);
+  const isOverperf = !isChamp && (perfScore >= 55 || tpPts >= ptsTarget * 1.4);
+  const isFlop     = perfScore < 20 || (tpDnfs >= 5 && tpPts < ptsTarget * 0.4); // ≥5 DNF ET très peu de points = flop
+  const isSolid    = !isChamp && !isOverperf && !isFlop;
+  const tier       = isChamp ? 'champion' : isOverperf ? 'overperf' : isSolid ? 'solid' : 'flop';
+
+  return {
+    tier, isChamp, isOverperf, isFlop, isSolid,
+    winTarget, podiumTarget, ptsTarget,
+    perfScore: Math.round(perfScore),
+    isTopTeam, isMidField, isSmall,
+    tpWins, tpPts, tpPodiums, tpDnfs, tpOvr,
+    progressingTeam, regressingTeam,
+  };
+}
+
 function ratingTier(r) {
   if (r >= 90) return { badge: '🟫', label: 'ICÔNE',          color: '#b07d26' };
   if (r >= 85) return { badge: '🟨', label: 'ÉLITE',          color: '#FFD700' };
@@ -899,6 +961,14 @@ async function evolvePersonalityDiscreetly(pilot,standing,racesPlayed){
   if(!pilot?.personality?.archetype)return;
   const p=pilot.personality;
   const wins=standing?.wins||0,dnfs=standing?.dnfs||0,pts=standing?.points||0;
+  // Rang constructeur approx. pour le ton (calculé à partir de constrStandings si disponible)
+  const _spRank  = constrStandings ? ([...constrStandings].sort((a,b)=>b.points-a.points).findIndex(s=>String(s.teamId)===String(team._id))+1)||5 : 5;
+  const _spNT    = constrStandings ? constrStandings.length : 10;
+  const _spPerf  = evalPilotPerf(pilot, team, standing, _spRank, _spNT, null);
+  // Override des seuils : 'beaucoup de victoires' est relatif à l'équipe
+  const spWinHigh   = wins >= Math.max(2, _spPerf.winTarget);
+  const spDnfHigh   = dnfs >= 5; // ≥5 DNF = signal négatif
+  const spIsUnder   = _spPerf.isSmall || _spPerf.isMidField;
   const upd={};
   let pd=0;
   if(dnfs>=3)pd+=15;if(wins>=3)pd-=15;
@@ -1134,23 +1204,25 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.0);
   // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×1.8 au-delà
   // (réduit de ×3.5 à ×1.8 pour éviter des pertes de 5+ places en 1 seul tour)
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.8;
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.3;
   // Cap à 0.046 : max ~4.1s de perte par tour sur une voiture en fin de vie de pneu
   // Réaliste F1 : un pilote sur pneus à bout perd 1-4s/tour, pas 10-16s
-  const wearPenalty  = Math.min(0.046, tireWear * effectiveDeg * cliffFactor);
+  const wearPenalty  = Math.min(0.022, tireWear * effectiveDeg * cliffFactor);
   const tireF        = (1 + wearPenalty) / tireData.grip;
 
   // Dirty air — pénalité ~0.1s max sur circuit mixte, jusqu'à ~0.4s sur urbain
   // Les rues étroites rendent le suivi très difficile : peu d'espaces pour dépasser,
   // flux d'air très perturbé par les bâtiments, pas de DRS efficace.
   let dirtyAirF = 1.0;
+  // Fond de peloton : dirty air amplifié (trafic dense, dépassements difficiles)
+  const backmarkerMult = (position >= 12) ? 1.5 : (position >= 8) ? 1.25 : 1.0;
   if (position > 1) {
     const baseDAMultiplier = gpStyle === 'urbain' ? 3.5   // rues étroites — suivi très coûteux
                            : gpStyle === 'technique' ? 1.8  // virages lents — difficile à suivre
                            : 1.0;
     const dirtyAirPenalty = (100 - team.dirtyAir) / 100 * 0.001 * baseDAMultiplier;
     const daRandom = scCooldown > 0 ? Math.random() * 0.3 : Math.random();
-    dirtyAirF = 1 + dirtyAirPenalty * daRandom;
+    dirtyAirF = 1 + dirtyAirPenalty * daRandom * backmarkerMult;
   }
 
   // Track evolution
@@ -1387,7 +1459,7 @@ function checkIncident(pilot, team, lap = 1, totalLaps = 50, reliabilityMalus = 
 
   // reliabilityMalus appliqué sur la probabilité mécanique uniquement (mécaniciens, pas les pilotes)
   const reliabF  = (100 - team.refroidissement) / 100 * 0.007 * lapMultiplier * (1 + reliabilityMalus);
-  const crashF   = ((100 - pilot.controle) / 100 * 0.003) + ((100 - pilot.reactions) / 100 * 0.002);
+  const crashF   = (((100 - pilot.controle) / 100 * 0.0004) + ((100 - pilot.reactions) / 100 * 0.0003)) * lapMultiplier;
   if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
   if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
   if (roll < 0.002)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
@@ -2664,15 +2736,19 @@ function buildPressBlock(ctx, angle) {
           `"Circuit parfait pour nous aujourd'hui. On a maximisé chaque opportunité."`,
           `"Victoire propre. Le team a été irréprochable ce week-end — en qualif', au pit stop, partout."`,
         ]);
-        const middle = wins >= 3
+        // Seuil "beaucoup de victoires" relatif à l'envergure de l'équipe
+        const _vrank  = cStandSorted.findIndex(s => String(s.teamId) === String(team._id)) + 1 || 5;
+        const _vperf  = evalPilotPerf(pilot, team, form, _vrank, cStandSorted.length || 10, null);
+        const isMultiWin = wins >= Math.max(2, _vperf.winTarget);
+        const middle = isMultiWin
           ? pick([
-              `"${wins} victoires en ${gpPhase}. On ne s'attendait pas à ça forcément, mais on le prend."`,
+              `"${wins} victoires en ${gpPhase}. ${_vperf.isTopTeam ? "On ne s'attendait pas à moins — mais le travail pour y arriver reste colossal." : "Pour une équipe de notre taille, c'est exceptionnel."}"`,
               `"C'est notre ${wins}ème victoire cette saison. L'élan est là. ${endPressure}"`,
-              `"${wins} victoires — ça commence à compter sérieusement au championnat."`,
+              `"${wins} victoires — ça compte sérieusement au championnat. ${_vperf.isSmall ? "L'équipe a dépassé toutes les attentes." : "On reste concentrés."}"`,
             ])
           : wins === 1
             ? pick([
-                `"Première victoire de la saison — ça fait un bien fou. Maintenant on continue."`,
+                `"${_vperf.isSmall ? "Personne n'attendait ça de nous. Mais on l'a fait." : "Première victoire de la saison — ça fait un bien fou."} Maintenant on continue."`,
                 `"On attendait ça depuis le début de saison. C'est libérateur."`,
               ])
             : `"Belle victoire pour le moral. ${bilanStr.charAt(0).toUpperCase() + bilanStr.slice(1)}. On avance."`;
@@ -2858,8 +2934,10 @@ function buildPressBlock(ctx, angle) {
           `"Leader, ça n'a de valeur que si ça l'est à la fin de la saison."`,
           `"${pts} points, ${wins} victoires. ${seasonPhase === 'fin' ? 'La course au titre est ouverte.' : 'Saison solide jusqu\'ici.'}"`,
         ]);
-        const closer = wins >= 3
-          ? `"${wins} victoires, c'est notre meilleur bilan depuis longtemps. L'équipe est en feu."`
+        const _clRank = cStandSorted.findIndex(s => String(s.teamId) === String(team._id)) + 1 || 5;
+        const _clPerf = evalPilotPerf(pilot, team, form, _clRank, cStandSorted.length || 10, null);
+        const closer = wins >= Math.max(2, _clPerf.winTarget)
+          ? `"${wins} victoires — ${_clPerf.isTopTeam ? "c'est notre meilleur bilan depuis longtemps" : "personne ne nous attendait là"}. L'équipe est en feu."`
           : `"Régularité avant tout. Chaque point compte dans un championnat comme celui-là."`;
         return `${opener}\n"${closer}"`;
       },
@@ -4491,35 +4569,83 @@ function genDramaArticle(pilotA, pilotB, teamA, teamB, seasonYear, context = {})
 }
 
 function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
-  const source = pick(['pitlane_insider', 'f1_weekly', 'pl_racing_news']);
+  const source      = pick(['pitlane_insider', 'f1_weekly', 'pl_racing_news']);
+  const lastRank    = pilot.lastSeasonRank  || null;
+  const lastPts     = pilot.lastSeasonPts   || 0;
+  const lastWins    = pilot.lastSeasonWins  || 0;
+  const careerBest  = pilot.careerBestRank  || null;
+  const isRookie    = !lastRank; // première saison connue
+  const wasStruggling = lastRank && lastRank > 8;  // finissait loin l'an passé
+  const wasTop      = lastRank && lastRank <= 3;   // podiumiste au classement
+  const isCareerBest = careerBest && champPos < careerBest; // meilleur résultat de carrière
+  const isBigLeap   = lastRank && (lastRank - champPos) >= 5; // progression de 5+ places
 
+  // Headlines contextualisés
   const headlines = [
-    `${pilot.name} : et si c'était lui le grand nom de cette saison ?`,
-    `La révélation ${team.emoji}${team.name} : ${pilot.name} crève l'écran`,
-    `${pilot.name} en feu — le paddock commence à vraiment prendre note`,
+    ...(isRookie ? [
+      `${pilot.name} : la révélation surprise de cette saison`,
+      `Personne ne savait à quoi s'attendre. ${pilot.name} a répondu sur la piste.`,
+    ] : wasStruggling ? [
+      `${pilot.name} : la métamorphose. De P${lastRank} l'an dernier à P${champPos} cette saison.`,
+      `Le retour de ${pilot.name} — d'une saison dans l'ombre à un top de grille`,
+      `"Il est revenu différent" — ${pilot.name} en transformation totale`,
+    ] : wasTop ? [
+      `${pilot.name} confirme. Encore. Et c'est impressionnant.`,
+      `P${lastRank} l'an passé, P${champPos} cette saison — ${pilot.name} ne connaît pas la régression`,
+    ] : isBigLeap ? [
+      `+${lastRank - champPos} places au classement — ${pilot.name} fait un bond historique`,
+      `La progression de ${pilot.name} n'est plus une anomalie. C'est une trajectoire.`,
+    ] : [
+      `${pilot.name} en feu — le paddock commence à vraiment prendre note`,
+      `${wins > 1 ? wins + ' victoires' : podiums + ' podiums'} — ${pilot.name} n'est plus une surprise, c'est une menace`,
+      `La révélation ${team.emoji}${team.name} : ${pilot.name} crève l'écran`,
+    ]),
+    // Toujours disponibles
     `"On n'attendait pas ça" — ${pilot.name} déjoue tous les pronostics`,
-    `${wins > 1 ? wins + ' victoires' : podiums + ' podiums'} — ${pilot.name} n'est plus une surprise, c'est une menace`,
+    `${pilot.name} : et si c'était lui le grand nom de cette saison ?`,
   ];
 
+  // Contexte inter-saisons pour le body
+  const interSeasonCtx = isRookie
+    ? pick([
+        `Sa première saison en PL Racing. Personne ne savait vraiment à quoi s'attendre.`,
+        `Premier championnat en PL Racing pour ${pilot.name} — et le paddock l'a remarqué.`,
+      ])
+    : wasStruggling
+      ? pick([
+          `L'année dernière, ${pilot.name} terminait P${lastRank} avec ${lastPts} points. Cette saison ressemble à une autre vie.`,
+          `On l'a vu galérer. P${lastRank} au championnat l'an passé, ${lastWins > 0 ? lastWins + ' victoire(s)' : 'sans victoire'}. Ce qui se passe cette année change tout.`,
+        ])
+      : wasTop
+        ? pick([
+            `P${lastRank} l'an dernier, P${champPos} cette saison. La constance de ${pilot.name} force l'admiration.`,
+            `Certains s'attendaient à un retour de bâton après une saison solide. ${pilot.name} a ignoré la pression.`,
+          ])
+        : isBigLeap
+          ? `La progression parle d'elle-même : P${lastRank} l'an passé, P${champPos} cette saison. +${lastRank - champPos} places. Rare.`
+          : pick([
+              `Pas la première saison de ${pilot.name} en PL, et clairement pas la dernière à faire parler de lui.`,
+              `Le profil s'affirme saison après saison. Cette année marque un cap.`,
+            ]);
+
+  const careerBestStr = isCareerBest
+    ? `\n\n*Meilleur résultat de carrière pour ${pilot.name} au championnat pilotes.*`
+    : '';
+
   const bodies = [
-    `${pick([
-      `Personne ne l'avait mis sur la liste des favoris en début de saison.`,
-      `En début de saison, peu de monde aurait parié sur ${pilot.name} pour jouer ce rôle.`,
-      `Les données de préparation de saison n'indiquaient pas ça. Et pourtant.`,
-    ])} ${wins > 0 ? `${wins} victoire(s) et ${podiums} podium(s) plus tard` : `${podiums} podium(s) plus tard`}, ${pilot.name} impose le respect.\n\n` +
+    `${interSeasonCtx} ${wins > 0 ? `${wins} victoire(s) et ${podiums} podium(s) plus tard` : `${podiums} podium(s) plus tard`}, ${pilot.name} impose le respect.\n\n` +
     pick([
       `"Il a quelque chose de différent dans l'approche des GP. Une maturité qu'on ne voit pas souvent." Une voix du paddock.`,
-      `${team.emoji}${team.name} a clairement trouvé quelque chose. La question : est-ce durable ?`,
+      `${team.emoji}${team.name} a clairement trouvé quelque chose cette saison.`,
       `P${champPos} au championnat. Si ça continue, les grandes écuries vont s'intéresser à lui de près.`,
-    ]),
+    ]) + careerBestStr,
 
-    `On cherche souvent les grands noms. Parfois, les grands noms viennent nous chercher.\n\n` +
-    `${pilot.name} est P${champPos} au championnat avec ${wins > 0 ? `${wins} victoire(s)` : `${podiums} podium(s)`} cette saison. ` +
+    `${interSeasonCtx}\n\n${pilot.name} est P${champPos} au championnat avec ${wins > 0 ? `${wins} victoire(s)` : `${podiums} podium(s)`} cette saison. ` +
     pick([
       `Son ingénieur est le premier à le dire : "Il repousse les limites à chaque sortie."`,
       `Les données télémétrie ne mentent pas — il pousse la voiture dans des zones que peu osent explorer.`,
-      `Plusieurs membres du paddock ont discrètement demandé à en savoir plus sur lui. Signal fort.`,
-    ]),
+      `Plusieurs membres du paddock ont discrètement demandé à en savoir plus sur lui.`,
+    ]) + careerBestStr,
   ];
 
   return {
@@ -4533,7 +4659,17 @@ function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
 }
 
 function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear, dnfThisRace = false) {
-  const source = pick(['pitlane_insider', 'pl_racing_news', 'paddock_whispers']);
+  const source      = pick(['pitlane_insider', 'pl_racing_news', 'paddock_whispers']);
+  const lastRank    = pilot.lastSeasonRank || null;
+  const wasTop      = lastRank && lastRank <= 5;
+  const wasStruggling = lastRank && lastRank > 8;
+  const crisisCtx   = wasTop
+    ? `Lui qui terminait P${lastRank} la saison dernière. `
+    : wasStruggling
+      ? `Même après une saison difficile (P${lastRank}), les attentes étaient là. `
+      : lastRank
+        ? `P${lastRank} la saison passée — la régression interroge. `
+        : '';
 
   const headlines = dnfThisRace ? [
     `${pilot.name} dans le dur — jusqu'où ?`,
@@ -4698,7 +4834,7 @@ function genDevVagueArticle(team, seasonYear) {
 // ─── INTERVIEW PILOTE — ressenti dans l'écurie ───────────────
 // Variables prises en compte : résultats, contrat, status #1/#2, coéquipier,
 // rival, overall, spécialisation, DNFs, victoires, phase de saison.
-function genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, seasonYear, seasonPhase) {
+function genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, seasonYear, seasonPhase, teamRankCtx = null, totalTeamsCtx = 10, lastSeasonTeamRankCtx = null) {
   const source = pick(['pitlane_insider', 'paddock_whispers', 'pl_racing_news', 'f1_weekly']);
   const ov     = overallRating(pilot);
   const wins   = standing?.wins   || 0;
@@ -4716,22 +4852,21 @@ function genDriverInterviewArticle(pilot, team, standing, contract, teammate, te
 
   // ── Humeur globale pilote ───────────────────────────────────
   // Calcul d'un "mood score" -3 → +3
+  // ── Humeur : seuils RELATIFS à l'envergure de l'écurie ────────────────
+  const _perf = evalPilotPerf(pilot, team, standing, teamRankCtx, totalTeamsCtx, lastSeasonTeamRankCtx);
   let mood = 0;
-  if (wins >= 3)   mood += 2;
-  else if (wins >= 1) mood += 1;
-  if (pods >= 4)   mood += 1;
-  if (dnfs >= 3)   mood -= 2;
-  else if (dnfs >= 1) mood -= 1;
+  // Victoires : "bien" si on dépasse la cible, très bien si on la dépasse largement
+  if (wins >= _perf.winTarget * 1.5 + 1) mood += 2;
+  else if (wins >= _perf.winTarget || (wins >= 1 && _perf.isSmall)) mood += 1;
+  // Podiums bonus si on en a plus que prévu
+  if (pods >= _perf.podiumTarget * 1.4) mood += 1;
+  // DNF : inquiétant si au-dessus de la tolérance de l'écurie
+  if (dnfs >= 5) mood -= 2;
+  else if (dnfs >= 4) mood -= 1;
   if (status === 'numero1') mood += 1;
   if (status === 'numero2') mood -= 1;
-  // Seuil "mauvaise saison" relatif au rang constructeur de l'équipe :
-  // Top écurie (rank ≤ 3) : 50 pts mini pour éviter le malus d'humeur
-  // Milieu de grille (rank 4-6) : 25 pts, petite équipe (rank 7+) : 10 pts
-  const teamRankForMood = constrStandingsFull
-    ? (constrStandingsFull.findIndex(s => String(s.teamId) === String(team._id)) + 1) || 5
-    : 5;
-  const moodPtThreshold = teamRankForMood <= 3 ? 50 : teamRankForMood <= 6 ? 25 : 10;
-  if (seasonPhase === 'fin' && pts < moodPtThreshold) mood -= 1;
+  // Points insuffisants en fin de saison selon l'envergure
+  if (seasonPhase === 'fin' && pts < _perf.ptsTarget * 0.6) mood -= 1;
   if (isLastYear) mood -= 1; // contrat qui se termine = pression
   const moodLabel = mood >= 2 ? 'heureux' : mood >= 0 ? 'neutre' : mood === -1 ? 'tendu' : 'en crise';
 
@@ -4816,29 +4951,43 @@ function genDriverInterviewArticle(pilot, team, standing, contract, teammate, te
     ]);
   })();
 
-  // D. Performances / overall
+  // D. Performances / overall — seuils RELATIFS à l'envergure de l'écurie
   const perfFeel = (() => {
-    if (wins >= 3) return pick([
-      `"${wins} victoires cette saison — je ne m'en lasse pas. Mais le travail en amont de chaque GP est colossal. Les résultats ne tombent pas du ciel."`,
-      `"On est sur une bonne dynamique. ${wins} victoires, c'est bien, mais je sais qu'on peut encore s'améliorer sur certains aspects."`,
+    // Champion ou largement au-dessus des attentes
+    if (_perf.isChamp || wins >= Math.max(2, _perf.winTarget)) return pick([
+      `"${wins} victoire${wins > 1 ? 's' : ''} cette saison — je ne m'en lasse pas. Mais le travail en amont de chaque GP est colossal."`,
+      `"On est sur une très bonne dynamique. ${_perf.isTopTeam ? 'Le titre reste l\'objectif.' : 'Pour une écurie de notre taille, c\'est exceptionnel.'}${wins > 1 ? ' ' + wins + ' victoires, ça ne s\'improvise pas.' : ''}"`,
+      `"${_perf.isOverperf || _perf.isSmall ? 'Personne ne nous attendait là. ' : ''}${wins} victoire${wins > 1 ? 's' : ''} — l'équipe a fait un travail remarquable tout au long de la saison."`,
+    ]);
+    // Première victoire surprise pour une petite/mid team
+    if (wins === 1 && !_perf.isTopTeam) return pick([
+      `"Cette victoire avec ${team.name}... ça restera gravé. Personne n'y croyait vraiment. Sauf nous."`,
+      `"Gagner avec ${team.name}, ça prouve que tout est possible dans ce sport. Je n'oublierai jamais ce GP."`,
     ]);
     if (wins === 1) return pick([
       `"Cette victoire, elle m'a confirmé que j'avais le niveau pour gagner. Maintenant il faut transformer ça en régularité."`,
+      `"Première victoire de la saison — ça fait un bien fou. L'équipe méritait ça."`,
     ]);
-    if (dnfs >= 3) return pick([
-      `"${dnfs} abandons, c'est trop. Qu'est-ce qui cloche ? Un peu de tout : incidents, malchance, quelques erreurs. On doit réduire ça drastiquement."`,
-      `"Les DNFs ont plombé ma saison. Mais je ne suis pas du genre à baisser les bras. Chaque course est une nouvelle page."`,
+    // DNFs problématiques (relatifs à la tolérance de l'écurie)
+    if (dnfs >= 5) return pick([ // 5+ DNF = saison catastrophique
+      `"${dnfs} abandons — c'est trop, quelle que soit l'écurie. Ce n'est pas ce qu'on attendait de cette saison et je le sais mieux que quiconque."`,
+      `"Les DNFs ont plombé ma saison. ${_perf.isTopTeam ? 'Une écurie comme ' + team.name + ' ne peut pas se permettre ça.' : 'Il faut qu\'on analyse ça sérieusement.'} On repart de zéro mentalement."`,
     ]);
-    if (pods >= 3) return pick([
-      `"${pods} podiums sans victoire encore — je sais ce que ça veut dire : on est rapide, mais pas encore assez constants sur les moments décisifs."`,
+    // Podiums mais pas de victoire — différent selon l'ambition de l'équipe
+    if (pods >= _perf.podiumTarget && !_perf.isTopTeam) return pick([
+      `"${pods} podiums avec ${team.name} — franchement, si on m'avait dit ça en début de saison, je n'aurais peut-être pas signé tout de suite."`,
+      `"${pods} fois sur le podium. C'est au-dessus de ce qu'on visait. Le travail de l'équipe a été remarquable."`,
+    ]);
+    if (pods >= 3 && _perf.isTopTeam) return pick([
+      `"${pods} podiums sans victoire encore — on est rapides, mais pas encore assez constants sur les moments décisifs. Ça doit changer."`,
     ]);
     if (spec) return pick([
-      `"Ma spécialisation en ${spec} — ça s'est construit naturellement. Je ne cherchais pas à me pigeon-holer, mais si ça me donne un avantage dans certains contextes, tant mieux."`,
+      `"Ma spécialisation en ${spec} — ça s'est construit naturellement. Si ça me donne un avantage dans certains contextes, tant mieux."`,
       `"On me dit que je suis fort en ${spec}. Peut-être. Mais un bon pilote doit maîtriser toutes les facettes."`,
     ]);
     return pick([
-      `"Saison correcte. Pas ce que je visais au départ, mais on progresse. Le niveau général est très élevé — chaque point arraché a de la valeur."`,
-      `"Je ne suis pas satisfait à 100% de mes perfs — et c'est normal. L'auto-critique, c'est ce qui fait avancer."`,
+      `"Saison correcte. ${_perf.isTopTeam ? 'Pas à la hauteur de nos ambitions — on le sait.' : 'Pas ce que je visais, mais on progresse.'} Le niveau général est très élevé."`,
+      `"Je ne suis pas satisfait à 100% — et c'est normal. L'auto-critique, c'est ce qui fait avancer."`,
     ]);
   })();
 
@@ -5087,8 +5236,10 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   const isLate   = progress >= 0.6  && progress < 0.85;
   const isFinale = progress >= 0.85;
 
-  const pilotMap = new Map(allPilots.map(p => [String(p._id), p]));
-  const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
+  const pilotMap    = new Map(allPilots.map(p => [String(p._id), p]));
+  const teamMap     = new Map(allTeams.map(t => [String(t._id), t]));
+  const constrSt    = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+  const constrRankMap = new Map(constrSt.map((s, i) => [String(s.teamId), i + 1]));
   const articlesToPost = [];
 
   // 1. RIVALITÉ — impossible début, rare milieu, fréquent fin
@@ -5160,7 +5311,13 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     const s = standings[i];
     const pilot = pilotMap.get(String(s.pilotId));
     const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
-    if (pilot && team && (s.wins >= (isEarly ? 1 : 2) || s.podiums >= (isEarly ? 2 : 4)) && Math.random() < hypeChance) {
+    const hypeTeamRank   = constrRankMap ? (constrRankMap.get(String(team?._id)) || 5) : 5;
+    const hypeTotalTeams = allTeams.length || 10;
+    const hypePerf = evalPilotPerf(pilot, team, s, hypeTeamRank, hypeTotalTeams, null);
+    const qualifiesHype = hypePerf.isChamp || hypePerf.isOverperf
+      || (hypePerf.isSolid && hypePerf.isSmall && s.podiums >= 1)
+      || (hypePerf.isSolid && hypePerf.isMidField && s.wins >= 1);
+    if (pilot && team && qualifiesHype && Math.random() < hypeChance) {
       articlesToPost.push(genHypeArticle(pilot, team, s.wins, s.podiums, season.year, i + 1));
       break;
     }
@@ -5175,7 +5332,9 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
   const pilotRaceResult = finalResults.find(r => String(r.pilotId) === String(pilot._id));
   const dnfThisRace     = pilotRaceResult?.dnf === true;
   // DNF ce GP OU ≥2 DNFs en saison — évite le faux positif pour un pilote P5 sain
-  const qualifiesCrisis = dnfThisRace || s.dnfs >= 2;
+  const crisisTeamRank = constrRankMap ? (constrRankMap.get(String(pilot?.teamId?.toString?.())) || 5) : 5;
+  const crisisPerf = evalPilotPerf(pilot, team, s, crisisTeamRank, allTeams.length || 10, null);
+  const qualifiesCrisis = dnfThisRace || crisisPerf.isFlop;
   if (qualifiesCrisis && Math.random() < crisisChance) {
     articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year, dnfThisRace));
     break;
@@ -5347,7 +5506,84 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
     } catch(e) { console.error('[affinités croisées]', e.message); }
   }
 
-  const toPost = articlesToPost.slice(0, 3);
+  // ── 8. DRIVER OF THE DAY article ─────────────────────────────
+  // Si quelqu'un d'autre que P1/P2 a fait une performance remarquable
+  try {
+    const allTeams2  = await Team.find().lean();
+    const allPilots2 = await Pilot.find({ teamId: { $ne: null } }).lean();
+    const teamMap2   = new Map(allTeams2.map(t => [String(t._id), t]));
+    const pilotMap2  = new Map(allPilots2.map(p => [String(p._id), p]));
+    const qualiGrid  = raceDoc?.qualiGrid || [];
+    const startPosMap2 = new Map(qualiGrid.map((g, i) => [String(g.pilotId), i + 1]));
+    const gpStyle2   = raceDoc?.gpStyle || 'mixte';
+
+    // Calculer le score DOTD-like pour trouver le héros du jour
+    const dotdScores = [];
+    for (const r of finalResults) {
+      if (r.dnf) continue;
+      const pilot  = pilotMap2.get(String(r.pilotId));
+      const team   = teamMap2.get(String(r.teamId || pilot?.teamId));
+      if (!pilot || !team) continue;
+      const finishPos   = r.pos;
+      const startPos    = startPosMap2.get(String(r.pilotId)) || finishPos;
+      const placesGained = startPos - finishPos;
+      const cScore2     = carScore(team, gpStyle2);
+      const underdogMul = Math.max(0, (75 - cScore2) / 75);
+      let score = placesGained * 5 + underdogMul * (finishPos <= 10 ? 20 : 5);
+      if (r.fastestLap) score += 8;
+      if (startPos >= 15 && placesGained >= 5) score += 12;
+      dotdScores.push({ pilot, team, finishPos, startPos, placesGained, score, fastestLap: r.fastestLap });
+    }
+    dotdScores.sort((a, b) => b.score - a.score);
+    // Prendre le héros (pas le vainqueur ni P2 si pas remarquable)
+    const hero = dotdScores.find(d => d.finishPos > 2 && (d.placesGained >= 3 || d.underdogMul > 0.2 || d.fastestLap)) || dotdScores[0];
+    if (hero && hero.score > 10 && Math.random() < 0.65) {
+      const t = hero.team;
+      const p = hero.pilot;
+      const gained  = hero.placesGained;
+      const isUnder = carScore(t, gpStyle2) < 70;
+      const source  = pick(['f1_weekly', 'pitlane_insider', 'pl_racing_news']);
+      let headline, body;
+      if (gained >= 5) {
+        headline = pick([
+          `${p.name} : la remontée du jour — de P${hero.startPos} à P${hero.finishPos}`,
+          `${gained} places gagnées — ${p.name} régale le paddock`,
+          `La performance à retenir : ${p.name} depuis P${hero.startPos}`,
+        ]);
+        body = pick([
+          `Parti${gained > 0 ? '' : 'e'} de P${hero.startPos}, ${p.name} a terminé P${hero.finishPos}. ${gained} places de gagnées en course — ce n'est pas de la chance, c'est du talent pur.
+
+${isUnder ? `Avec ${t.emoji}${t.name}, ce n'était pas la voiture la plus rapide. C'est ce qui rend la performance encore plus impressionnante.` : `${t.emoji}${t.name} avait une voiture compétitive — mais il fallait quand même le faire.`}`,
+          `${gained} places gagnées. Le peloton n'a pas vu ${p.name} venir. Et c'est exactement ce qui rend cette course inoubliable.`,
+        ]);
+      } else if (hero.fastestLap && hero.finishPos > 5) {
+        headline = pick([
+          `${p.name} signe le meilleur tour — depuis P${hero.finishPos}`,
+          `Meilleur tour du GP pour ${p.name} : la vitesse de pointe était là`,
+          `${p.name} prouve sa vitesse brute — même depuis le fond du peloton`,
+        ]);
+        body = `P${hero.finishPos} au classement, mais le chrono le plus rapide de la course. ${p.name} n'a pas eu la course espérée, mais il a montré que la vitesse était là.`;
+      } else if (isUnder && hero.finishPos <= 10) {
+        headline = pick([
+          `${t.emoji}${t.name} dans les points — ${p.name} surperforme encore`,
+          `${p.name} glisse dans le top 10 — exploit pour ${t.emoji}${t.name}`,
+          `"On ne s'attendait pas à ça" — ${p.name} dans les points avec ${t.emoji}${t.name}`,
+        ]);
+        body = `Ce n'était pas dans le script de ${t.emoji}${t.name} de finir dans les points aujourd'hui. ${p.name} a transformé une course anonyme en jolie histoire. P${hero.finishPos} — c'est au-dessus des attentes.`;
+      }
+      if (headline && body) {
+        articlesToPost.push({
+          type: 'driver_of_day', source,
+          headline, body,
+          pilotIds: [p._id],
+          teamIds:  [t._id],
+          seasonYear: season.year,
+        });
+      }
+    }
+  } catch(e) { console.error('[dotd article]', e.message); }
+
+  const toPost = articlesToPost.slice(0, 4); // +1 slot pour inclure l'histoire du jour
   for (const articleData of toPost) {
     // Marquer pendingReply sur les articles rivalry/drama pour la réaction en chaîne
     if (['rivalry','drama'].includes(articleData.type) && articleData.pilotIds?.length >= 2) {
@@ -5721,11 +5957,16 @@ function genSocialMediaArticle(pilot, team, standing, seasonYear) {
         `Le post de ${pilot.name} dépasse les ${likes} likes — record personnel`,
         `${team.emoji}${pilot.name} fait le buzz : son célébration en photo cartonne`,
       ]);
+      // Buzz amplifié si petite équipe (surprise) vs top team (attendu)
+      const _sRank = 5; // valeur par défaut sans contexte constructeur live
+      const _sPerf = evalPilotPerf(pilot, team, standing, _sRank, 10, null);
+      const surpriseLine = _sPerf.isSmall
+        ? pick([`"${team.emoji}${team.name} qui gagne ? En 2025 tout est possible 😭" — top commentaire`, `Les gens n'en croyaient pas leurs yeux. ${team.name} en tête des tendances.`])
+        : pick([`Parmi les commentaires, beaucoup de "GOAT 🐐" et des mentions de ses rivaux. L'ambiance est électrique.`, `Des célébrités, des athlètes, des pilotes adverses — tout le monde a liké. Même ${team.name} a relayé.`]);
       const body = `Une simple photo publiée dans l'heure suivant sa victoire — et les chiffres ont tout de suite parlé.\n\n` +
         `**${likes} likes · ${randInt(2, 48)}K commentaires · ${randInt(5, 80)}K partages** en moins de 24h. Le compte de ${pilot.name} a gagné **+${randInt(8, 120)}K abonnés** dans la foulée.\n\n` +
         pick([
-          `Parmi les commentaires, beaucoup de "GOAT 🐐" et des mentions de ses rivaux. L'ambiance est électrique.`,
-          `Des célébrités, des athlètes, des pilotes adverses — tout le monde a liké. Même ${team.name} a relayé.`,
+          surpriseLine,
           `Son story "behind the scenes" a été vue ${randInt(200, 900)}K fois. Les sponsors ont dû se frotter les mains.`,
         ]);
       return { headline, body };
@@ -6272,7 +6513,19 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
   } else if (type === 'hype') {
     const standings = await getStandings();
     const sorted = [...standings].sort((a, b) => b.points - a.points);
-    const st = sorted.find(s => !usedPilotIds.has(String(s.pilotId)) && ((s.wins||0)>=1||(s.podiums||0)>=2)) || sorted[0];
+    // Seuil hype relatif : overperf ou champ selon envergure équipe
+    const _allConstrSt = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const _crMap = new Map(_allConstrSt.map((s,i) => [String(s.teamId), i+1]));
+    const _nT = _allConstrSt.length || 10;
+    const st = sorted.find(s => {
+      if (usedPilotIds.has(String(s.pilotId))) return false;
+      const _p = allPilots.find(p => String(p._id) === String(s.pilotId));
+      const _t = _p ? teamMap.get(String(_p.teamId)) : null;
+      if (!_p || !_t) return false;
+      const _r = _crMap.get(String(_t._id)) || 5;
+      const _ev = evalPilotPerf(_p, _t, s, _r, _nT, null);
+      return _ev.isChamp || _ev.isOverperf || (_ev.isSolid && _ev.isSmall && (s.podiums||0) >= 1);
+    }) || sorted[0];
     if (!st) return null;
     const pilot = allPilots.find(p => String(p._id) === String(st.pilotId));
     const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
@@ -6283,7 +6536,19 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
   } else if (type === 'form_crisis') {
     const standings = await getStandings();
     const sorted = [...standings].sort((a, b) => b.points - a.points);
-    const st = sorted.slice(Math.floor(sorted.length/2)).find(s => (s.dnfs||0)>=1 && !usedPilotIds.has(String(s.pilotId)));
+    // Crise relative : flop selon envergure de l'équipe
+    const _allCst2 = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const _crMap2 = new Map(_allCst2.map((s,i) => [String(s.teamId), i+1]));
+    const _nT2 = _allCst2.length || 10;
+    const st = sorted.find(s => {
+      if (usedPilotIds.has(String(s.pilotId))) return false;
+      const _p2 = allPilots.find(p => String(p._id) === String(s.pilotId));
+      const _t2 = _p2 ? teamMap.get(String(_p2.teamId)) : null;
+      if (!_p2 || !_t2) return false;
+      const _r2 = _crMap2.get(String(_t2._id)) || 5;
+      const _ev2 = evalPilotPerf(_p2, _t2, s, _r2, _nT2, null);
+      return _ev2.isFlop;
+    });
     if (!st) return null;
     const pilot = allPilots.find(p => String(p._id) === String(st.pilotId));
     const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
@@ -6328,8 +6593,12 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
     const contract  = await Contract.findOne({ pilotId: pilot._id, active: true }).lean();
     const teammate  = allPilots.find(p => String(p.teamId) === String(pilot.teamId) && String(p._id) !== String(pilot._id));
     const teammateSt = teammate ? standings.find(s => String(s.pilotId) === String(teammate._id)) : null;
+    // Passer le rang constructeur pour les seuils relatifs
+    const _intCst = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const _intRank = _intCst.findIndex(s => String(s.teamId) === String(team._id)) + 1 || 5;
+    const _intLast = pilot.lastSeasonRank ? Math.round(pilot.lastSeasonRank * (_intCst.length||10) / 20) : null;
     markUsed(pilot);
-    return genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, season.year, spPhase);
+    return genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, season.year, spPhase, _intRank, _intCst.length||10, _intLast);
 
   } else if (type === 'sponsoring') {
     const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
@@ -6605,7 +6874,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       lastPos      : idx + 1,
       // Écart initial réaliste : ~1.2s par position (P20 est à ~22s du leader)
       // Correspond à la réalité F1 où le peloton s'étire progressivement après le départ
-      totalTime       : idx * 2000, // 2s entre positions au départ — réaliste
+      totalTime       : idx * 400, // ~0.4s entre positions au départ (réaliste F1 quali)
       tireCompound    : startCompound,
       tireWear        : 0,
       tireAge         : 0,
@@ -6676,6 +6945,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     }
   }
   let scCooldown       = 0;
+  let scRestartCooldown = 0; // tours restants de cap de positions post-SC
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
   let prevFastestHolder = null; // pour détecter nouveau meilleur tour
@@ -7219,6 +7489,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     // ── Fin de SC/VSC : green flag ────────────────────────────
     if (prevScState !== 'NONE' && scState.state === 'NONE') {
       scCooldown = 6; // 6 tours de variance réduite après restart
+      scRestartCooldown = 3; // cap +2 positions par tour pendant 3 tours post-relance
       const rankedRestart = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
       const top3str = rankedRestart.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
       events.push({ priority: 10, gif: pickGif('green_flag'), text: pick([
@@ -7229,6 +7500,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
     // ── Calcul des temps au tour ─────────────────────────────
     if (scCooldown > 0) scCooldown--;
+    if (scRestartCooldown > 0) scRestartCooldown--;
 
     for (const driver of drivers.filter(d => !d.dnf)) {
       if (scActive) {
@@ -7330,6 +7602,29 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           }
         }
       }
+    }
+
+    // ── Cap positions post-SC restart : max +2 places par tour ─────────
+    // Empêche les remontées express type P5→P1 en 1 tour après green flag
+    if (scRestartCooldown > 0 && !scActive) {
+      const preRestartSnap = drivers.filter(d => !d.dnf).map(d => ({ id: String(d.pilot._id), pos: d.pos }));
+      drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => {
+        const prev = preRestartSnap.find(s => s.id === String(d.pilot._id));
+        const prevPos = prev ? prev.pos : i + 1;
+        const maxGain = 2; // max 2 places par tour pendant scRestartCooldown
+        const newPos = i + 1;
+        if (newPos < prevPos - maxGain) {
+          // Bloquer en échangeant totalTime avec le pilote à prevPos-maxGain
+          const targetPos = prevPos - maxGain;
+          const occupant = drivers.find(dx => !dx.dnf && dx.pos === targetPos);
+          if (occupant && occupant !== d) {
+            const tmpTime = d.totalTime;
+            d.totalTime = occupant.totalTime + 1;
+            occupant.totalTime = tmpTime - 1;
+          }
+        }
+      });
+      drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
     }
 
     // ── Après chaque tour de SC, re-serrer les écarts (drift résiduel) ──
@@ -7459,6 +7754,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           delete driver.pendingRepair;
           delete driver.damagedPartLabel;
           delete driver.damagedCar; // la réparation remet la voiture en état
+          // Traffic forcé : ressort en fond de peloton entouré de voitures
+          driver.trafficLapsLeft = Math.max(driver.trafficLapsLeft || 0, 5);
         } else {
           pitTime = scActive ? randInt(19_000, 21_000) : randInt(19_000, 24_000);
         }
@@ -8043,11 +8340,14 @@ const exitNeighborStr = neighborAhead && neighborBehind
                 victim.tireWear = Math.max(victim.tireWear || 0, 50);
                 victim.tireAge  = 99;
                 battleMap.delete(bkey);
-                raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), type: 'damage' });
+                // attacker = other (l'initiateur du contact) ; victim = le pilote qui subit
+                const dmgAttacker = other; // other = celui qui n'est PAS victim
+                const dmgVictim   = victim;
+                raceCollisions.push({ attackerId: String(dmgAttacker.pilot._id), victimId: String(dmgVictim.pilot._id), type: 'damage' });
                 events.push({ priority: 7, text: pick([
-                  `⚙️ **T${lap} — DÉGÂTS !** Contact entre ${aggr.team.emoji}**${aggr.pilot.name}** et ${ahead.team.emoji}**${ahead.pilot.name}** — **${battleDmgLabel}** de ${victim.team.emoji}**${victim.pilot.name}** touché${battleDmgType === 'aileron' ? '' : 'e'} ! Pit d'urgence nécessaire.`,
-                  `🔧 **T${lap}** — Accrochage dans la bataille ! ${victim.team.emoji}**${victim.pilot.name}** a l'**${battleDmgLabel}** abimé${battleDmgType === 'aileron' ? '' : 'e'} — rentre aux stands en urgence.`,
-                  `🚨 **T${lap}** — ${victim.team.emoji}**${victim.pilot.name}** sort perdant du duel avec ${aggr.team.emoji}**${aggr.pilot.name}** : **${battleDmgLabel} endommagé${battleDmgType === 'aileron' ? '' : 'e'}.** *L'arrêt aux stands est inévitable.*`,
+                  `⚙️ **T${lap} — DÉGÂTS !** Contact entre ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** et ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** — **${battleDmgLabel}** endommagé${battleDmgType === 'aileron' ? '' : 'e'} ! Pit d'urgence nécessaire.`,
+                  `🔧 **T${lap}** — Accrochage dans la bataille ! ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** a l'**${battleDmgLabel}** abimé${battleDmgType === 'aileron' ? '' : 'e'} après le contact avec ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** — rentre aux stands en urgence.`,
+                  `🚨 **T${lap}** — ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** sort perdant du duel avec ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** : **${battleDmgLabel} endommagé${battleDmgType === 'aileron' ? '' : 'e'}.** *L'arrêt aux stands est inévitable.*`,
                 ]) });
               }
             }
@@ -8938,6 +9238,38 @@ async function createNewSeason() {
   const pilots = await Pilot.find({ teamId: { $ne: null } });
   for (const p of pilots) await Standing.create({ seasonId: season._id, pilotId: p._id });
 
+  // ── Sauvegarde stats inter-saisons AVANT reset ───────────────────────────
+  if (lastSeason) {
+    const lastStandings = await Standing.find({ seasonId: lastSeason._id });
+    const sortedLast    = [...lastStandings].sort((a,b) => b.points - a.points);
+    for (let idx = 0; idx < sortedLast.length; idx++) {
+      const st = sortedLast[idx];
+      const rankLast = idx + 1;
+      await Pilot.findByIdAndUpdate(st.pilotId, {
+        $set: {
+          lastSeasonRank : rankLast,
+          lastSeasonPts  : st.points,
+          lastSeasonWins : st.wins,
+        },
+        $max: { careerBestRank: rankLast === 1 ? 1 : undefined }, // sera géré manuellement
+      });
+      // careerBestRank : mettre à jour si meilleur rang
+      const p = await Pilot.findById(st.pilotId).select('careerBestRank');
+      if (p && (p.careerBestRank === null || rankLast < p.careerBestRank)) {
+        await Pilot.findByIdAndUpdate(st.pilotId, { careerBestRank: rankLast });
+      }
+      // Cumuler wins/podiums/dnfs/races en carrière
+      await Pilot.findByIdAndUpdate(st.pilotId, {
+        $inc: {
+          careerWins    : st.wins    || 0,
+          careerPodiums : st.podiums || 0,
+          careerDnfs    : st.dnfs    || 0,
+          careerRaces   : (st.wins || 0) + (st.podiums || 0) + 1, // approx
+        },
+      });
+    }
+  }
+
   // Réinitialiser rivalités et streak upgrade en début de saison
   await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0, rivalHeat: 0, rivalDeclaredAt: null, upgradeStreak: 0, lastUpgradeStat: null } });
 
@@ -9433,6 +9765,46 @@ async function startTransferPeriod() {
   const totalTeams  = allTeams.length;
 
   for (const team of allTeams) {
+    // ── Renouvellements : proposition avant de chercher des libres ─────────
+    // Si l'écurie a des pilotes dont le contrat expire (seasonsRemaining = 0 avant update)
+    // elle peut leur proposer un renouvellement basé sur leurs perfs
+    try {
+      const teamPilots = await Pilot.find({ teamId: team._id });
+      for (const tp of teamPilots) {
+        const expContract = await Contract.findOne({ pilotId: tp._id, teamId: team._id, active: true, seasonsRemaining: { $lte: 1 } });
+        if (!expContract) continue;
+        const tpStanding    = allStandings.find(s => String(s.pilotId) === String(tp._id));
+        const teamRankLocal = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
+        const lastTeamRank  = tp.lastSeasonRank ? Math.round(tp.lastSeasonRank * totalTeams / 20) : null;
+        const perf = evalPilotPerf(tp, team, tpStanding, teamRankLocal, totalTeams, lastTeamRank);
+        const baseRenewChance = perf.isChamp
+          ? (perf.isTopTeam ? 0.97 : 0.90)
+          : perf.isOverperf ? (perf.isTopTeam ? 0.82 : 0.88)
+          : perf.isSolid    ? (perf.isTopTeam ? 0.45 : perf.isSmall ? 0.72 : 0.58)
+          : /* flop */        (perf.isTopTeam ? 0.10 : perf.isSmall ? 0.30 : 0.18);
+        const ovrBonus     = perf.tpOvr >= 82 ? 0.12 : perf.tpOvr >= 72 ? 0.06 : 0;
+        const teamCtxMalus = perf.progressingTeam && !perf.isChamp && !perf.isOverperf ? -0.12 : 0;
+        const renewChance  = Math.max(0.05, Math.min(0.98, baseRenewChance + ovrBonus + teamCtxMalus));
+        if (Math.random() > renewChance) continue;
+        const existOffer = await TransferOffer.findOne({ pilotId: tp._id, teamId: team._id, status: 'pending' });
+        if (existOffer) continue;
+        const perfMultiplier = perf.isChamp ? 1.30 : perf.isOverperf ? 1.15 : perf.isSolid ? 1.00 : 0.82;
+        const baseSalaire    = Math.round((expContract.salaireParCourse || 10) * perfMultiplier);
+        const salaireRenew   = Math.max(5, Math.min(team.budget * 0.40, baseSalaire));
+        const dureeRenew     = perf.isChamp ? 3 : perf.isOverperf ? 2 : 1;
+        await TransferOffer.create({
+          teamId   : team._id,
+          pilotId  : tp._id,
+          status   : 'pending',
+          salaire  : salaireRenew,
+          duree    : dureeRenew,
+          statut   : expContract.statut || 'titulaire',
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          isRenewal: true,
+        });
+      }
+    } catch(e) { console.error('[renouvellement IA]', e.message); }
+
     const slotsAvailable = 2 - await Pilot.countDocuments({ teamId: team._id });
     if (slotsAvailable <= 0) continue; // écurie pleine
 
@@ -10151,6 +10523,12 @@ const commands = [
       .setRequired(false)
     )
     .addIntegerOption(o => o.setName('pilote').setDescription('Ton pilote (1 ou 2)').setMinValue(1).setMaxValue(2)),
+
+  // ── /h2h ─────────────────────────────────────────────────────────────────
+  new SlashCommandBuilder().setName('h2h')
+    .setDescription('⚔️ Compare deux pilotes en face-à-face (public)')
+    .addStringOption(o => o.setName('pilote1').setDescription('Nom du premier pilote').setRequired(true))
+    .addStringOption(o => o.setName('pilote2').setDescription('Nom du second pilote').setRequired(true)),
 ];
 
 // ============================================================
@@ -10560,7 +10938,8 @@ async function handleInteraction(interaction) {
   // ── Defer immédiat pour éviter le timeout Discord (3s) ───
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
-    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_second_wave', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race', 'reveal_grille', 'admin_grille_next', 'valeur_marche'];
+    'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_second_wave', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race', 'reveal_grille', 'admin_grille_next', 'valeur_marche',
+    'fia_reaction', 'h2h'];
   const isEphemeral = ['create_pilot','profil','ameliorer','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
@@ -14001,6 +14380,210 @@ async function handleInteraction(interaction) {
       usedAt    : new Date(),
     });
     return;
+  }
+
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // /h2h — comparaison publique head-to-head entre deux pilotes
+  // ══════════════════════════════════════════════════════════════════════════
+  if (commandName === 'h2h') {
+    await interaction.deferReply({ ephemeral: false });
+
+    const name1 = interaction.options.getString('pilote1').toLowerCase();
+    const name2 = interaction.options.getString('pilote2').toLowerCase();
+
+    const allPilots = await Pilot.find({ teamId: { $ne: null } });
+    const p1 = allPilots.find(p => p.name.toLowerCase().includes(name1));
+    const p2 = allPilots.find(p => p.name.toLowerCase().includes(name2) && String(p._id) !== String(p1?._id));
+
+    if (!p1 || !p2) {
+      return interaction.editReply({ content: `❌ Pilotes introuvables. Vérifie les noms (**${name1}** / **${name2}**).` });
+    }
+
+    const [t1, t2] = await Promise.all([
+      Team.findById(p1.teamId),
+      Team.findById(p2.teamId),
+    ]);
+    const season = await getActiveSeason();
+
+    // ── Stats saison actuelle ─────────────────────────────────────────────
+    const [st1, st2] = await Promise.all([
+      season ? Standing.findOne({ seasonId: season._id, pilotId: p1._id }) : null,
+      season ? Standing.findOne({ seasonId: season._id, pilotId: p2._id }) : null,
+    ]);
+    const s1 = st1 || { points: 0, wins: 0, podiums: 0, dnfs: 0 };
+    const s2 = st2 || { points: 0, wins: 0, podiums: 0, dnfs: 0 };
+
+    // Classements saison actuelle
+    let rank1 = null, rank2 = null;
+    if (season) {
+      const allSt = await Standing.find({ seasonId: season._id }).sort({ points: -1 });
+      rank1 = allSt.findIndex(s => String(s.pilotId) === String(p1._id)) + 1 || null;
+      rank2 = allSt.findIndex(s => String(s.pilotId) === String(p2._id)) + 1 || null;
+    }
+
+    // ── Confrontations directes : qui a battu qui dans les courses partagées ─
+    let h2hWins1 = 0, h2hWins2 = 0;
+    if (season) {
+      const doneRaces = await Race.find({ seasonId: season._id, status: 'done' }).lean();
+      for (const race of doneRaces) {
+        const results = Array.isArray(race.results) ? race.results : [];
+        const r1 = results.find(r => String(r.pilotId) === String(p1._id));
+        const r2 = results.find(r => String(r.pilotId) === String(p2._id));
+        if (r1 && r2 && !r1.dnf && !r2.dnf) {
+          if (r1.pos < r2.pos) h2hWins1++;
+          else h2hWins2++;
+        }
+      }
+    }
+
+    // ── Relation / affinité ───────────────────────────────────────────────
+    const [sA, sB] = [String(p1._id), String(p2._id)].sort();
+    const rel = await PilotRelation.findOne({ pilotA: sA, pilotB: sB });
+    const affinity = rel?.affinity ?? 0;
+    const relType  = rel?.type    || 'neutre';
+    const isRivals = String(p1.rivalId) === String(p2._id) || String(p2.rivalId) === String(p1._id);
+    const isTeammates = t1 && t2 && String(p1.teamId) === String(p2.teamId);
+    const affinityBar = (() => {
+      const norm = Math.max(-100, Math.min(100, affinity));
+      const blocks = 10;
+      const filled = Math.round(((norm + 100) / 200) * blocks);
+      return '🔴'.repeat(Math.max(0, blocks - filled)) + '🟢'.repeat(Math.min(blocks, filled));
+    })();
+    const affinityLabel = affinity >= 50 ? 'Alliés proches'
+      : affinity >= 20 ? 'Bonne entente'
+      : affinity >= -10 ? 'Neutralité'
+      : affinity >= -40 ? 'Tension'
+      : 'Rivalité intense';
+
+    // ── Forme récente (5 derniers GPs) ───────────────────────────────────
+    const recentIcon = (results, pilotId) => {
+      const sorted = [...results].sort((a,b) => b.index - a.index).slice(0, 5);
+      return sorted.map(r => {
+        const res = (r.results || []).find(x => String(x.pilotId) === String(pilotId));
+        if (!res) return '⬜';
+        if (res.dnf) return '❌';
+        if (res.pos === 1) return '🥇';
+        if (res.pos <= 3) return '🥈';
+        if (res.pos <= 10) return '🟢';
+        return '⬛';
+      }).join('');
+    };
+    let recentIcons1 = '—', recentIcons2 = '—';
+    if (season) {
+      const doneR = await Race.find({ seasonId: season._id, status: 'done' }).lean();
+      if (doneR.length > 0) {
+        recentIcons1 = recentIcon(doneR, p1._id);
+        recentIcons2 = recentIcon(doneR, p2._id);
+      }
+    }
+
+    // ── OVR helpers ───────────────────────────────────────────────────────
+    const ovr  = p => overallRating(p);
+    const bar  = (v1, v2, stat) => {
+      const max = Math.max(v1, v2, 1);
+      const b1 = Math.round((v1 / max) * 8);
+      const b2 = Math.round((v2 / max) * 8);
+      const bar1 = '█'.repeat(b1) + '░'.repeat(8 - b1);
+      const bar2 = '█'.repeat(b2) + '░'.repeat(8 - b2);
+      return `\`${bar1}\` **${v1}** ${stat} **${v2}** \`${bar2}\``;
+    };
+    const barStat = (v1, v2, label, higher = true) => {
+      const winner = higher ? (v1 > v2 ? 1 : v2 > v1 ? 2 : 0) : (v1 < v2 ? 1 : v2 < v1 ? 2 : 0);
+      const b1 = Math.round(Math.min(v1 / Math.max(v1, v2, 1), 1) * 10);
+      const b2 = Math.round(Math.min(v2 / Math.max(v1, v2, 1), 1) * 10);
+      const b1s = '█'.repeat(b1) + '░'.repeat(10 - b1);
+      const b2s = '█'.repeat(b2) + '░'.repeat(10 - b2);
+      const edge1 = winner === 1 ? ' ◀' : '';
+      const edge2 = winner === 2 ? ' ◀' : '';
+      return `${label}\n\`${b1s}\` **${v1}**${edge1} — **${v2}** \`${b2s}\`${edge2}`;
+    };
+
+    // ── Inter-saisons context ─────────────────────────────────────────────
+    const interSeasonLine = (p) => {
+      if (!p.lastSeasonRank) return '_Première saison connue_';
+      const trend = p.lastSeasonRank > (rank1 || rank2 || 10)
+        ? `📈 P${p.lastSeasonRank} → progression cette saison`
+        : p.lastSeasonRank < (rank1 || rank2 || 10)
+          ? `📉 P${p.lastSeasonRank} → régression cette saison`
+          : `➡️ P${p.lastSeasonRank} → stable`;
+      return `S. précédente : P${p.lastSeasonRank} (${p.lastSeasonPts || 0} pts${p.lastSeasonWins ? ', ' + p.lastSeasonWins + ' V' : ''}) — ${trend}`;
+    };
+
+    // ── Embed principal ───────────────────────────────────────────────────
+    const e1 = t1?.emoji || '';
+    const e2 = t2?.emoji || '';
+    const title = `⚔️ ${e1}${p1.name} vs ${e2}${p2.name}`;
+
+    const embed = new EmbedBuilder()
+      .setColor(isRivals ? '#E53935' : isTeammates ? '#7B61FF' : '#1565C0')
+      .setTitle(title)
+      .setDescription(
+        (isRivals ? '🔥 **Rivalité déclarée** — les deux se connaissent bien sur la piste.\n'
+          : isTeammates ? '🔵 **Coéquipiers** — même garage, ambitions différentes.\n'
+          : '') +
+        `**Relation :** ${affinityLabel} (${affinity > 0 ? '+' : ''}${affinity})\n${affinityBar}`
+      );
+
+    // Saison actuelle
+    const h2hTotal = h2hWins1 + h2hWins2;
+    embed.addFields({
+      name: `📊 Saison ${season?.year || 'actuelle'}`,
+      value:
+        `**${p1.name}** — ${rank1 ? 'P' + rank1 : '—'} | ${s1.points} pts | ${s1.wins}V ${s1.podiums}P ${s1.dnfs}DNF\n` +
+        `**${p2.name}** — ${rank2 ? 'P' + rank2 : '—'} | ${s2.points} pts | ${s2.wins}V ${s2.podiums}P ${s2.dnfs}DNF` +
+        (h2hTotal > 0 ? `\n\n⚔️ **H2H cette saison :** ${p1.name} **${h2hWins1}** — **${h2hWins2}** ${p2.name} _(${h2hTotal} duel${h2hTotal > 1 ? 's' : ''})_` : ''),
+    });
+
+    // Forme récente
+    embed.addFields({
+      name: '📈 Forme récente (5 derniers GPs)',
+      value: `${e1}**${p1.name}** : ${recentIcons1}\n${e2}**${p2.name}** : ${recentIcons2}`,
+      inline: false,
+    });
+
+    // Stats OVR + pilotage
+    const stats1 = [p1.vitesse, p1.regularite, p1.gestionPneus, p1.reactions, p1.controle, p1.experience, p1.agressivite];
+    const stats2 = [p2.vitesse, p2.regularite, p2.gestionPneus, p2.reactions, p2.controle, p2.experience, p2.agressivite];
+    const statLabels = ['Vitesse', 'Régularité', 'Gestion pneus', 'Réactions', 'Contrôle', 'Expérience', 'Agressivité'];
+    const ovr1 = ovr(p1), ovr2 = ovr(p2);
+
+    embed.addFields({
+      name: `🏎️ Statistiques (OVR ${e1}**${ovr1}** vs ${e2}**${ovr2}**)`,
+      value: statLabels.map((lbl, i) => barStat(stats1[i] || 0, stats2[i] || 0, lbl)).join('\n'),
+      inline: false,
+    });
+
+    // Carrière
+    const cW1 = (p1.careerWins || 0) + s1.wins, cW2 = (p2.careerWins || 0) + s2.wins;
+    const cP1 = (p1.careerPodiums || 0) + s1.podiums, cP2 = (p2.careerPodiums || 0) + s2.podiums;
+    const cD1 = (p1.careerDnfs || 0) + s1.dnfs, cD2 = (p2.careerDnfs || 0) + s2.dnfs;
+    embed.addFields({
+      name: '🏆 Carrière',
+      value:
+        barStat(cW1, cW2, '🥇 Victoires') + '\n' +
+        barStat(cP1, cP2, '🥈 Podiums') + '\n' +
+        barStat(cD1, cD2, '💥 DNFs', false) + '\n' +
+        (p1.careerBestRank || p2.careerBestRank
+          ? `🏆 Meilleur rang carrière : **P${p1.careerBestRank || '—'}** vs **P${p2.careerBestRank || '—'}**`
+          : ''),
+      inline: false,
+    });
+
+    // Inter-saisons
+    const is1 = interSeasonLine(p1);
+    const is2 = interSeasonLine(p2);
+    if (is1 !== '—' || is2 !== '—') {
+      embed.addFields({
+        name: '📅 Contexte inter-saisons',
+        value: `${e1}**${p1.name}** : ${is1}\n${e2}**${p2.name}** : ${is2}`,
+        inline: false,
+      });
+    }
+
+    embed.setFooter({ text: `⚔️ Head-to-Head · PL Racing · demandé par ${interaction.user.username}` });
+
+    return interaction.editReply({ embeds: [embed] });
   }
 
 } // fin handleInteraction
