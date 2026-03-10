@@ -14080,7 +14080,9 @@ async function handleInteraction(interaction) {
   // fiaCriticism 0–100 : monte avec critique, descend avec félicite/apaise
   // ══════════════════════════════════════════════════════════════════════════
   if (commandName === 'fia_reaction') {
-    await interaction.deferReply({ ephemeral: false });
+    // Ephemeral : le "réfléchit..." et toutes les réponses de confirmation ne sont visibles
+    // que par le joueur — le contenu public est envoyé via targetChannel.send()
+    await interaction.deferReply({ ephemeral: true });
 
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const fiaType    = interaction.options.getString('type');
@@ -14088,7 +14090,7 @@ async function handleInteraction(interaction) {
 
     const pilot = await Pilot.findOne({ discordId: interaction.user.id, pilotIndex });
     if (!pilot)
-      return interaction.editReply({ content: '❌ Aucun pilote n°' + pilotIndex + '. Crée-le avec `/create_pilot`.' });
+      return interaction.editReply({ content: '❌ Aucun pilote n°' + pilotIndex + '. Crée-le avec `/create_pilot`.', ephemeral: true });
 
     const pilotTeam = pilot.teamId ? await Team.findById(pilot.teamId) : null;
     const season    = await getActiveSeason();
@@ -14112,6 +14114,7 @@ async function handleInteraction(interaction) {
                       : 'jouer les pacificateurs';
         return interaction.editReply({
           content: '⏳ **' + pilot.name + '** doit attendre avant de ' + cdLabel + ' à nouveau.\n*Disponible dans **' + h + 'h' + (m > 0 ? m + 'm' : '') + '**.*',
+          ephemeral: true,
         });
       }
     }
@@ -14232,9 +14235,9 @@ async function handleInteraction(interaction) {
 
       await targetChannel.send({ embeds: [embed] });
       if (targetChannel.id !== interaction.channelId)
-        await interaction.editReply({ content: '🔥 Déclaration publiée. *(Tension FIA : ' + newCrit + '/100 — ' + critLabel + ')*' });
+        await interaction.editReply({ content: '🔥 Déclaration publiée. *(Tension FIA : ' + newCrit + '/100 — ' + critLabel + ')*', ephemeral: true });
       else
-        await interaction.editReply({ content: '✅ Publié.' });
+        await interaction.editReply({ content: '✅ Publié.', ephemeral: true });
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -14300,9 +14303,9 @@ async function handleInteraction(interaction) {
 
       await targetChannel.send({ embeds: [embed] });
       if (targetChannel.id !== interaction.channelId)
-        await interaction.editReply({ content: '🤝 Déclaration publiée. *(Tension FIA : ' + newCrit + '/100)*' });
+        await interaction.editReply({ content: '🤝 Déclaration publiée. *(Tension FIA : ' + newCrit + '/100)*', ephemeral: true });
       else
-        await interaction.editReply({ content: '✅ Publié.' });
+        await interaction.editReply({ content: '✅ Publié.', ephemeral: true });
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -14367,9 +14370,9 @@ async function handleInteraction(interaction) {
 
       await targetChannel.send({ embeds: [embed] });
       if (targetChannel.id !== interaction.channelId)
-        await interaction.editReply({ content: '🕊️ Déclaration publiée. *(Tension FIA : ' + newCrit + '/100)*' });
+        await interaction.editReply({ content: '🕊️ Déclaration publiée. *(Tension FIA : ' + newCrit + '/100)*', ephemeral: true });
       else
-        await interaction.editReply({ content: '✅ Publié.' });
+        await interaction.editReply({ content: '✅ Publié.', ephemeral: true });
     }
 
     // ── Enregistrer cooldown ────────────────────────────────────────────────
