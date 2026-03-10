@@ -14422,18 +14422,42 @@ async function handleInteraction(interaction) {
       rank2 = allSt.findIndex(s => String(s.pilotId) === String(p2._id)) + 1 || null;
     }
 
-    // ── Confrontations directes : qui a battu qui dans les courses partagées ─
+    // ── Confrontations directes + Forme récente (une seule requête) ─────────
+    // BUG FIX : race.results → race.raceResults (champ réel du schema)
+    // BUG FIX : double Race.find fusionné en une seule requête
     let h2hWins1 = 0, h2hWins2 = 0;
+    let recentIcons1 = '—', recentIcons2 = '—';
     if (season) {
       const doneRaces = await Race.find({ seasonId: season._id, status: 'done' }).lean();
+
+      // H2H wins
       for (const race of doneRaces) {
-        const results = Array.isArray(race.results) ? race.results : [];
+        const results = Array.isArray(race.raceResults) ? race.raceResults : [];
         const r1 = results.find(r => String(r.pilotId) === String(p1._id));
         const r2 = results.find(r => String(r.pilotId) === String(p2._id));
         if (r1 && r2 && !r1.dnf && !r2.dnf) {
           if (r1.pos < r2.pos) h2hWins1++;
           else h2hWins2++;
         }
+      }
+
+      // Forme récente (5 derniers GPs)
+      const recentIcon = (races, pilotId) => {
+        const sorted = [...races].sort((a, b) => (b.index || 0) - (a.index || 0)).slice(0, 5);
+        return sorted.map(r => {
+          const res = (Array.isArray(r.raceResults) ? r.raceResults : [])
+            .find(x => String(x.pilotId) === String(pilotId));
+          if (!res) return '⬜';
+          if (res.dnf) return '❌';
+          if (res.pos === 1) return '🥇';
+          if (res.pos <= 3) return '🥈';
+          if (res.pos <= 10) return '🟢';
+          return '⬛';
+        }).join('');
+      };
+      if (doneRaces.length > 0) {
+        recentIcons1 = recentIcon(doneRaces, p1._id) || '—';
+        recentIcons2 = recentIcon(doneRaces, p2._id) || '—';
       }
     }
 
@@ -14455,28 +14479,6 @@ async function handleInteraction(interaction) {
       : affinity >= -10 ? 'Neutralité'
       : affinity >= -40 ? 'Tension'
       : 'Rivalité intense';
-
-    // ── Forme récente (5 derniers GPs) ───────────────────────────────────
-    const recentIcon = (results, pilotId) => {
-      const sorted = [...results].sort((a,b) => b.index - a.index).slice(0, 5);
-      return sorted.map(r => {
-        const res = (r.results || []).find(x => String(x.pilotId) === String(pilotId));
-        if (!res) return '⬜';
-        if (res.dnf) return '❌';
-        if (res.pos === 1) return '🥇';
-        if (res.pos <= 3) return '🥈';
-        if (res.pos <= 10) return '🟢';
-        return '⬛';
-      }).join('');
-    };
-    let recentIcons1 = '—', recentIcons2 = '—';
-    if (season) {
-      const doneR = await Race.find({ seasonId: season._id, status: 'done' }).lean();
-      if (doneR.length > 0) {
-        recentIcons1 = recentIcon(doneR, p1._id);
-        recentIcons2 = recentIcon(doneR, p2._id);
-      }
-    }
 
     // ── OVR helpers ───────────────────────────────────────────────────────
     const ovr  = p => overallRating(p);
@@ -14500,11 +14502,13 @@ async function handleInteraction(interaction) {
     };
 
     // ── Inter-saisons context ─────────────────────────────────────────────
-    const interSeasonLine = (p) => {
+    // BUG FIX : utilise le rang propre à chaque pilote (rank1 pour p1, rank2 pour p2)
+    const interSeasonLine = (p, currentRank) => {
       if (!p.lastSeasonRank) return '_Première saison connue_';
-      const trend = p.lastSeasonRank > (rank1 || rank2 || 10)
+      const ref = currentRank || 20;
+      const trend = p.lastSeasonRank > ref
         ? `📈 P${p.lastSeasonRank} → progression cette saison`
-        : p.lastSeasonRank < (rank1 || rank2 || 10)
+        : p.lastSeasonRank < ref
           ? `📉 P${p.lastSeasonRank} → régression cette saison`
           : `➡️ P${p.lastSeasonRank} → stable`;
       return `S. précédente : P${p.lastSeasonRank} (${p.lastSeasonPts || 0} pts${p.lastSeasonWins ? ', ' + p.lastSeasonWins + ' V' : ''}) — ${trend}`;
@@ -14543,9 +14547,11 @@ async function handleInteraction(interaction) {
     });
 
     // Stats OVR + pilotage
-    const stats1 = [p1.vitesse, p1.regularite, p1.gestionPneus, p1.reactions, p1.controle, p1.experience, p1.agressivite];
-    const stats2 = [p2.vitesse, p2.regularite, p2.gestionPneus, p2.reactions, p2.controle, p2.experience, p2.agressivite];
-    const statLabels = ['Vitesse', 'Régularité', 'Gestion pneus', 'Réactions', 'Contrôle', 'Expérience', 'Agressivité'];
+    // BUG FIX : utilise les vraies stats du PilotSchema (depassement, freinage, defense,
+    //           adaptabilite, reactions, controle, gestionPneus) — pas vitesse/regularite/etc.
+    const stats1 = [p1.depassement, p1.freinage, p1.defense, p1.adaptabilite, p1.reactions, p1.controle, p1.gestionPneus];
+    const stats2 = [p2.depassement, p2.freinage, p2.defense, p2.adaptabilite, p2.reactions, p2.controle, p2.gestionPneus];
+    const statLabels = ['Dépassement', 'Freinage', 'Défense', 'Adaptabilité', 'Réactions', 'Contrôle', 'Gestion Pneus'];
     const ovr1 = ovr(p1), ovr2 = ovr(p2);
 
     embed.addFields({
@@ -14558,22 +14564,25 @@ async function handleInteraction(interaction) {
     const cW1 = (p1.careerWins || 0) + s1.wins, cW2 = (p2.careerWins || 0) + s2.wins;
     const cP1 = (p1.careerPodiums || 0) + s1.podiums, cP2 = (p2.careerPodiums || 0) + s2.podiums;
     const cD1 = (p1.careerDnfs || 0) + s1.dnfs, cD2 = (p2.careerDnfs || 0) + s2.dnfs;
+    const careerRankLine = (p1.careerBestRank || p2.careerBestRank)
+      ? `\n🏆 Meilleur rang carrière : **P${p1.careerBestRank || '—'}** vs **P${p2.careerBestRank || '—'}**`
+      : '';
     embed.addFields({
       name: '🏆 Carrière',
-      value:
+      value: (
         barStat(cW1, cW2, '🥇 Victoires') + '\n' +
         barStat(cP1, cP2, '🥈 Podiums') + '\n' +
-        barStat(cD1, cD2, '💥 DNFs', false) + '\n' +
-        (p1.careerBestRank || p2.careerBestRank
-          ? `🏆 Meilleur rang carrière : **P${p1.careerBestRank || '—'}** vs **P${p2.careerBestRank || '—'}**`
-          : ''),
+        barStat(cD1, cD2, '💥 DNFs', false) +
+        careerRankLine
+      ) || '—',
       inline: false,
     });
 
     // Inter-saisons
-    const is1 = interSeasonLine(p1);
-    const is2 = interSeasonLine(p2);
-    if (is1 !== '—' || is2 !== '—') {
+    // BUG FIX : passe le rang propre à chaque pilote (rank1 pour p1, rank2 pour p2)
+    const is1 = interSeasonLine(p1, rank1);
+    const is2 = interSeasonLine(p2, rank2);
+    if (p1.lastSeasonRank || p2.lastSeasonRank) {
       embed.addFields({
         name: '📅 Contexte inter-saisons',
         value: `${e1}**${p1.name}** : ${is1}\n${e2}**${p2.name}** : ${is2}`,
