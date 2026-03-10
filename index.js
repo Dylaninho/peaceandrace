@@ -1369,6 +1369,20 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false,
     const lapsRaced = (totalLaps || 60) - lapsRemaining;
     if (lapsRaced < (totalLaps || 60) * 0.22) return { pit: false, reason: null };
   }
+  // ── Fenêtre du 2ème arrêt pour les stratèges 2-stop ─────────
+  // Sans cette règle, les pneus HARD post-1er arrêt durent trop longtemps
+  // et le 2ème arrêt n'est jamais déclenché par l'usure seule.
+  if (pitStrategy === 'two_stop' && (pitStops || 0) === 1) {
+    const lapsRaced = (totalLaps || 60) - lapsRemaining;
+    const pct       = lapsRaced / (totalLaps || 60);
+    // Fenêtre 2ème arrêt : entre 58% et 80% de la course
+    if (pct >= 0.58 && lapsRemaining > 12) {
+      const urgency = Math.min(1, (pct - 0.58) / 0.20); // 0→1 entre 58% et 78%
+      if (Math.random() < 0.15 + urgency * 0.65) return { pit: true, reason: 'two_stop_plan' };
+    }
+    // Filet de sécurité : >82% de la course sans 2ème stop → forcer
+    if (pct > 0.82 && lapsRemaining > 8) return { pit: true, reason: 'two_stop_plan' };
+  }
 
   // Mode overcut : reste dehors intentionnellement
   if (overcutMode && (tireWear || 0) < 30 && lapsRemaining > 12) return { pit: false, reason: null };
@@ -2283,12 +2297,19 @@ function defenseDescription(defender, attacker, gpStyle) {
 function counterAttackDescription(attacker, defender, gpStyle) {
   const a = `${attacker.team.emoji}**${attacker.pilot.name}**`;
   const d = `${defender.team.emoji}**${defender.pilot.name}**`;
+  const freinage = gpStyle === 'technique' || gpStyle === 'urbain';
+  const drs      = gpStyle === 'rapide' || gpStyle === 'mixte';
   return pick([
     `***⚡ CONTRE-ATTAQUE IMMÉDIATE !*** ${d} avait cru avoir fait le plus dur, mais ${a} retarde son freinage au maximum — ***il REPASSE !*** Incroyable !`,
     `***🔄 IL REPREND SA PLACE !*** ${a} passe à l'intérieur du prochain virage — ${d} ne s'y attendait pas ! ***INVERSION !***`,
     `***😤 PAS QUESTION DE LAISSER ÇA !*** ${a} répond dans la foulée — il force son chemin et reprend la position ! ***FANTASTIQUE !***`,
     `***💥 RÉPONSE IMMÉDIATE !*** ${d} avait cru avoir fait le plus dur, mais ${a} est là — freinage tardif, corde parfaite. ***Il revient !***`,
-    `🔄 ${a} ne se laisse pas faire — il trouve l'ouverture au virage suivant et récupère sa position dans la foulée !`,
+    `🔄 ${a} ne se laisse pas faire — il trouve l'ouverture ${freinage ? 'au freinage suivant' : drs ? 'en DRS, ligne droite' : 'en sortie de virage'} et récupère sa position dans la foulée !`,
+    `⚡ ${d} pensait avoir réglé le problème. Mais ${a} avait une réponse sous la pédale droite — il repasse, brutal.`,
+    `🔁 Échange de coups sur la piste — ${a} refuse de rester derrière. Il revient fort et reprend ce qui lui appartient.`,
+    `😤 ${d} a ouvert la porte une fraction de seconde de trop. ${a} n'en demandait pas plus.`,
+    `***🔥 LA REVANCHE !*** Passé au tour précédent, ${a} n'a pas digéré. Il attaque en force et reprend la position — magistral.`,
+    `💫 ${a} garde la tête froide après s'être fait passer. Un tour plus tard, c'est réglé — il est devant. Classe.`,
   ]);
 }
 
@@ -2772,7 +2793,7 @@ function buildPressBlock(ctx, angle) {
           `"Il y a eu des moments de doute — mais l'équipe m'a donné un bon pit stop et j'ai pu gérer."`,
           `"Je ne vais pas mentir, j'ai eu de la chance à un moment. Mais il faut la provoquer."`,
           `"La stratégie a été parfaite. Je suis fier du travail de tout le monde en dehors de la piste."`,
-          `"C'était serré. P${second ? ranked?.find(r=>r?.pilot?.name===name)?.pos||1 : 1} au final — mais une victoire est une victoire."`,
+          `"C'était serré. P1 au final — mais une victoire est une victoire."`,
         ]);
         const middle = `"${styleStr}. Ça nous a bien convenu aujourd'hui."`;
         const closer = champPos === 1
@@ -4709,10 +4730,21 @@ function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear, dnfThi
   };
 }
 
-function genTeammateDuelArticle(winner, loser, teamObj, winsW, winsL, seasonYear) {
+function genTeammateDuelArticle(winner, loser, teamObj, winsW, winsL, seasonYear, winnerChampPos = null, loserChampPos = null, winnerPts = null, loserPts = null) {
   const source = pick(['f1_weekly', 'pl_racing_news', 'pitlane_insider']);
 
-  const headlines = [
+  // Contexte classement : l'article n'a de sens que si le vainqueur des duels
+  // est aussi devant AU CLASSEMENT (ou presque). Sinon on adopte un angle différent.
+  const champAhead  = winnerChampPos !== null && loserChampPos !== null && winnerChampPos < loserChampPos;
+  const champBehind = winnerChampPos !== null && loserChampPos !== null && winnerChampPos > loserChampPos;
+  const champGap    = (winnerPts !== null && loserPts !== null) ? Math.abs(winnerPts - loserPts) : null;
+
+  const headlines = champBehind ? [
+    // Paradoxe : domine en duel mais derrière au championnat
+    `${winner.name} s'impose en interne mais reste derrière ${loser.name} au championnat — l'énigme de la saison`,
+    `Duel interne ${teamObj.emoji}${teamObj.name} : ${winner.name} gagne les batailles, ${loser.name} mène la guerre`,
+    `${winsW}–${winsL} en duels — mais ${loser.name} garde l'avantage au classement général`,
+  ] : [
     `${winner.name} écrase ${loser.name} en interne — le statut N°1 ne fait plus débat`,
     `Duel interne ${teamObj.emoji}${teamObj.name} : ${winner.name} prend le dessus`,
     `${loser.name} dans l'ombre de ${winner.name} — la situation devient inconfortable`,
@@ -4734,6 +4766,13 @@ function genTeammateDuelArticle(winner, loser, teamObj, winsW, winsL, seasonYear
       `la tendance semble s'installer. La question : ${loser.name} va-t-il accepter ce rôle ?`,
       `${loser.name} a demandé une réunion technique en interne. Pas de résultat pour l'instant.`,
     ]),
+
+    // Article avec contexte classement pilotes
+    champBehind
+      ? `**${winsW}–${winsL}** en duels internes pour ${winner.name} — et pourtant, c'est ${loser.name} qui pointe P${loserChampPos} au championnat (${loserPts !== null ? loserPts + ' pts' : ''}) contre P${winnerChampPos} pour ${winner.name}${winnerPts !== null ? ' (' + winnerPts + ' pts)' : ''}.\n\nCe paradoxe nourrit les débats dans le paddock : ${winner.name} bat son coéquipier en piste, mais ${loser.name} a su capitaliser sur les points là où ça compte. ${champGap ? `L'écart de **${champGap} points** au championnat** raconte une autre histoire que les duels directs.` : ''}\n\n*\"Les duels internes ne valent rien si t'as pas les points au bout,\"* glisse une source proche de l'équipe.`
+      : champAhead && champGap !== null && champGap >= 10
+        ? `**${winsW}–${winsL}** en duels ET P${winnerChampPos} au championnat (${winnerPts} pts) contre P${loserChampPos} (${loserPts} pts) pour ${loser.name} — la hiérarchie est totale chez ${teamObj.emoji}${teamObj.name}.\n\n${winner.name} s'est imposé sur tous les terrains : en piste, à l'arrivée, et au classement général. **${champGap} points d'écart** entre les deux pilotes de la même écurie. L'écurie ne peut plus faire semblant d'entretenir un duo égalitaire.\n\nSeule question restante : quand le team order officiel sera-t-il prononcé ?`
+        : `${winner.name} s'impose **${winsW}–${winsL}** face à ${loser.name} cette saison chez ${teamObj.emoji}${teamObj.name}.\n\n${winnerChampPos && loserChampPos ? `Au classement pilotes, ${winner.name} occupe la P${winnerChampPos} contre la P${loserChampPos} pour ${loser.name}${champGap ? ` — **${champGap} pts** d'écart`.replace('- **', '— **') : ''}.` : ''} Les chiffres plaident clairement pour ${winner.name}, mais ${loser.name} refuse de s'avouer vaincu.`,
   ];
 
   return {
@@ -5037,6 +5076,75 @@ function genDriverInterviewArticle(pilot, team, standing, contract, teammate, te
   };
 }
 
+// ─── SCÉNARIOS TITRE EN FIN DE SAISON ─────────────────────────────────────────
+// Génère jusqu'à 2 articles "peut encore gagner le titre si..." lorsqu'il reste
+// ≤ 5 GPs et qu'au moins 2 pilotes sont mathématiquement en course pour le titre.
+// maxPtsPerGP = 26 (25 pts victoire + 1 FL)
+function genTitleScenariosArticles(allStandings, pilotMap, teamMap, gpsLeft, seasonYear) {
+  const MAX_PTS_PER_GP = 26;
+  const maxRemaining   = gpsLeft * MAX_PTS_PER_GP;
+  const sorted = [...allStandings].sort((a, b) => b.points - a.points);
+  if (!sorted.length) return [];
+  const leaderPts = sorted[0].points;
+  const contenders = sorted.filter(s => (leaderPts - s.points) <= maxRemaining);
+  if (contenders.length < 2) return []; // personne ne peut rattraper le leader
+
+  const articles = [];
+  const source = 'f1_weekly';
+
+  for (let i = 1; i < Math.min(contenders.length, 3); i++) {
+    const challenger = contenders[i];
+    const leader     = contenders[0];
+    const cPilot     = pilotMap.get(String(challenger.pilotId));
+    const lPilot     = pilotMap.get(String(leader.pilotId));
+    if (!cPilot || !lPilot) continue;
+    const cTeam      = cPilot.teamId ? teamMap.get(String(cPilot.teamId)) : null;
+    const lTeam      = lPilot.teamId ? teamMap.get(String(lPilot.teamId)) : null;
+    if (!cTeam || !lTeam) continue;
+
+    const deficit = leaderPts - challenger.points;
+    const ptsNeeded = deficit + 1; // points nécessaires pour dépasser
+    // Scénario minimum : gagner N GPs + FL, leader marque le minimum
+    const winsNeeded = Math.ceil(deficit / MAX_PTS_PER_GP);
+    const scenario = winsNeeded === 0
+      ? `une seule victoire suffit si ${lPilot.name} termine derrière`
+      : winsNeeded === 1
+        ? `une victoire avec meilleur tour + ${lPilot.name} hors des points dans le prochain GP`
+        : `${winsNeeded} victoires consécutives avec meilleur tour, et ${lPilot.name} à zéro point sur la période`;
+
+    const headlinePool = [
+      `${cPilot.name} peut encore être champion du monde — voilà comment`,
+      `Scénario titre : ce qu'il faut pour que ${cPilot.name} renverse ${lPilot.name}`,
+      `${gpsLeft} GPs restants — ${cTeam.emoji}${cPilot.name} est encore mathématiquement en lice`,
+      `-${deficit} pts : le chemin existe encore pour ${cPilot.name}`,
+    ];
+    const bodyPool = [
+      `**${deficit} points de retard** sur ${lTeam.emoji}${lPilot.name} — c'est la situation de ${cTeam.emoji}${cPilot.name} à ${gpsLeft} GPs de la fin.\n\n` +
+      `*Le scénario minimum :* ${scenario}.\n\n` +
+      `Avec ${maxRemaining} points encore distribués, ${cPilot.name} reste mathématiquement en course. Mais le temps presse.` +
+      pick([
+        ` *\"Je ne calcule pas. Je cours,\"* a-t-il déclaré cette semaine.`,
+        ` Son ingénieur de course parle de \"concentration absolue sur les prochains GPs\".`,
+        ` L'écurie refuse d'évoquer les probabilités — signe que l'espoir est bien là.`,
+      ]),
+
+      `Il reste ${gpsLeft} Grands Prix. ${cTeam.emoji}**${cPilot.name}** est à ${deficit} unités de ${lTeam.emoji}**${lPilot.name}** au championnat.\n\n` +
+      `Pour renverser la tendance, ${cPilot.name} devrait au minimum **${scenario}**. Le calcul est serré — mais possible.\n\n` +
+      `L'histoire du sport automobile est pleine de retournements en fin de saison. Senna 88, Prost 89, Hamilton 08... Le championnat n'est jamais terminé sur le papier.`,
+    ];
+
+    articles.push({
+      type: 'title_scenario', source,
+      headline: pick(headlinePool),
+      body: pick(bodyPool),
+      pilotIds: [cPilot._id, lPilot._id],
+      teamIds:  [cTeam._id, lTeam._id],
+      seasonYear,
+    });
+  }
+  return articles;
+}
+
 function genTitleFightArticle(leader, challenger, leaderTeam, challengerTeam, gap, gpLeft, seasonYear) {
   const source = pick(['f1_weekly', 'pl_racing_news', 'pitlane_insider']);
 
@@ -5305,6 +5413,16 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     }
   }
 
+  // 2-bis. SCÉNARIOS TITRE — seulement si ≤ 5 GPs restants
+  // Génère 1-2 articles "voilà comment X peut encore gagner le titre"
+  if (gpLeft <= 5 && gpLeft > 0 && Math.random() < 0.80) {
+    try {
+      const titleScenarios = genTitleScenariosArticles(standings, pilotMap, teamMap, gpLeft, season.year);
+      // Prendre max 1 article scénario titre par GP post-race
+      if (titleScenarios.length > 0) articlesToPost.push(titleScenarios[0]);
+    } catch(e) { console.error('[title_scenarios]', e.message); }
+  }
+
   // 3. HYPE — surtout début/milieu
   const hypeChance = isEarly ? 0.6 : isMid ? 0.45 : isLate ? 0.25 : 0.15;
   for (let i = 0; i < Math.min(standings.length, 5); i++) {
@@ -5358,7 +5476,13 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
         const team = teamMap.get(tid);
         if (!team) continue;
         const winner = wA > wB ? a : b, loser = wA > wB ? b : a;
-        articlesToPost.push(genTeammateDuelArticle(winner, loser, team, Math.max(wA, wB), Math.min(wA, wB), season.year));
+        // Classement pilotes pour contextualiser l'article
+        const champSorted = [...standings].sort((x, y) => y.points - x.points);
+        const wStanding = champSorted.find(s => String(s.pilotId) === String(winner._id));
+        const lStanding = champSorted.find(s => String(s.pilotId) === String(loser._id));
+        const wPos = wStanding ? champSorted.indexOf(wStanding) + 1 : null;
+        const lPos = lStanding ? champSorted.indexOf(lStanding) + 1 : null;
+        articlesToPost.push(genTeammateDuelArticle(winner, loser, team, Math.max(wA, wB), Math.min(wA, wB), season.year, wPos, lPos, wStanding?.points || null, lStanding?.points || null));
       }
     }
   }
@@ -6567,7 +6691,13 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
       const team = teamMap.get(tid); if (!team) continue;
       markUsed(a, b);
       const [winner, loser] = (a.teammateDuelWins||0) > (b.teammateDuelWins||0) ? [a,b] : [b,a];
-      return genTeammateDuelArticle(winner, loser, team, Math.max(a.teammateDuelWins||0, b.teammateDuelWins||0), Math.min(a.teammateDuelWins||0, b.teammateDuelWins||0), season.year);
+      const schedStandings = await getStandings();
+      const schedSorted = [...schedStandings].sort((x, y) => y.points - x.points);
+      const wSt = schedSorted.find(s => String(s.pilotId) === String(winner._id));
+      const lSt = schedSorted.find(s => String(s.pilotId) === String(loser._id));
+      const wPos2 = wSt ? schedSorted.indexOf(wSt) + 1 : null;
+      const lPos2 = lSt ? schedSorted.indexOf(lSt) + 1 : null;
+      return genTeammateDuelArticle(winner, loser, team, Math.max(a.teammateDuelWins||0, b.teammateDuelWins||0), Math.min(a.teammateDuelWins||0, b.teammateDuelWins||0), season.year, wPos2, lPos2, wSt?.points || null, lSt?.points || null);
     }
     return null;
 
@@ -6899,6 +7029,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       homeGP          : isHomeGP(pilot, race), // true si le pilote court à domicile ce GP
     };
   }).filter(Boolean);
+
+  // ── Tiebreaker : micro-décalage unique par pilote ──────────
+  // Évite que 2+ pilotes aient exactement le même totalTime,
+  // ce qui faisait "zapper" les dépassements dans les packs serrés.
+  drivers.forEach((d, i) => { if (d) d.totalTime += i * 3; }); // 3ms par slot = imperceptible
 
   // ── Stratégies de course (1 ou 2 arrêts) ──────────────────
   const twoStopBias = gpStyle === 'rapide' ? 0.6 : gpStyle === 'endurance' ? 0.7 : 0.4;
@@ -7548,11 +7683,15 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           // Max 1 message "se dégage du trafic" par tour — évite le spam multi-pilotes
           if (driver.trafficLapsLeft === 0 && !trafficEscapeAnnouncedThisLap) {
             trafficEscapeAnnouncedThisLap = true;
-            events.push({ priority: 2, text:
-              `🚦 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** parvient à se dégager du trafic après son arrêt.`
-            });
+            // "après son arrêt" seulement si le pilote a réellement pité récemment
+            const hasPitted = (driver.pitStops || 0) > 0 && (driver.lastPitLap || 0) > 0
+              && (lap - (driver.lastPitLap || 0)) <= 6;
+            const trafficMsg = hasPitted
+              ? `🚦 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** parvient à se dégager du trafic après son arrêt.`
+              : `🚦 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** sort du trafic dense et retrouve de l'air.`;
+            events.push({ priority: 2, text: trafficMsg });
           }
-        }
+          }
 
         // ── Défense agressive = usure pneus extra ──
         const behindDrv = drivers.find(d => !d.dnf && d.pos === driver.pos + 1);
@@ -8018,7 +8157,8 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const battle = battleMap.get(bkey);
         const isCounterAttack = battle &&
           battle.lastPasser === String(passed.pilot._id) &&
-          (lap - battle.lastPasserLap) <= 2;
+          (lap - battle.lastPasserLap) <= 1 &&   // max 1 tour (pas 2) — moins d'abus
+          Math.random() < 0.55;                  // 45% de suppression même si éligible
 
         const updatedBattle = battle
           ? { ...battle, lastPasser: String(driver.pilot._id), lastPasserLap: lap }
@@ -8043,7 +8183,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
           ? counterAttackDescription(driver, passed, gpStyle)
           : overtakeDescription(driver, passed, gpStyle);
 
-        const posBlock = `⬆️ **${driver.pilot.name}** → P${ovNewPos}\n⬇️ **${passed.pilot.name}** → P${ovLostPos}`;
+        const posBlock = `⬆️ ${driver.team.emoji}**${driver.pilot.name}** → P${ovNewPos}\n⬇️ ${passed.team.emoji}**${passed.pilot.name}** → P${ovLostPos}`;
         const gifCat   = ovForLead ? 'overtake_lead' : ovIsTop3 ? 'overtake_podium' : 'overtake_normal';
 
         events.push({
@@ -8203,7 +8343,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
           const roll = Math.random();
           if (roll < 0.5) {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), type: 'light' });
-            pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap });
+            pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light' });
             const lightContactText = lightAreRivals ? pick([
               `⚔️ **T${lap} — CONTACT ENTRE RIVAUX !** ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}** — *encore eux.* Sous investigation FIA.${lightRivalHeat >= 40 ? ` Le paddock commence à s'inquiéter.` : ''}`,
               `⚠️ **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** touche ${victim.team.emoji}**${victim.pilot.name}** — les deux rivaux encore en contact. *La FIA surveille.*`,
@@ -8214,7 +8354,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
             events.push({ priority: lightAreRivals ? 7 : 5, text: lightContactText });
           } else {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), type: 'light' });
-            pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap });
+            pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light' });
             const lightContact2Text = lightAreRivals ? pick([
               `⚔️ **T${lap}** — Contact discutable entre les rivaux ${attacker.team.emoji}**${attacker.pilot.name}** et ${victim.team.emoji}**${victim.pilot.name}**. *Enquête FIA — mais la rivalité, elle, ne s'arrête pas là.*`,
             ]) : pick([
@@ -8263,7 +8403,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
             if (incidentRoll < 0.70) {
               // Contact → investigation post-course
               raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), type: 'light' });
-              pendingInvestigations.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), lap });
+              pendingInvestigations.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), lap, severity: 'medium' });
               battleMap.delete(bkey);
               const contactFlavors = isTeamBattle ? [
                 `💢 **T${lap} — CONTACT INTERNE !** Après ${battle.lapsClose} tours de duel, ${aggr.team.emoji}**${aggr.pilot.name}** touche son coéquipier **${ahead.pilot.name}**. *Sous investigation FIA — décision post-course.*`,
@@ -8290,14 +8430,29 @@ const exitNeighborStr = neighborAhead && neighborBehind
                   lapDnfs.push({ driver: victim, type: 'CRASH' });
                   lapIncidents.push({ type: 'CRASH', onTrack: true });
                   battleMap.delete(bkey);
-                  const crashTexts = battleAreRivals ? [
-                    `💥 **T${lap} — CRASH !** La bataille entre rivaux tourne au drame : ${victim.team.emoji}**${victim.pilot.name}** sort de la piste après un contact avec ${other.team.emoji}**${other.pilot.name}**. **ABANDON.** *La rivalité vient de coûter une course entière.*`,
-                    `🔴 **T${lap} — RIVAL HORS COURSE !** ${victim.team.emoji}**${victim.pilot.name}** abandonne suite au contact avec ${other.team.emoji}**${other.pilot.name}**. ${battleRivalHeat >= 50 ? `*Cette rivalité ne connaît plus de limite.*` : `*Le duel tourne à la catastrophe.*`}`,
-                  ] : [
-                    `💥 **T${lap} — CRASH !** ${victim.team.emoji}**${victim.pilot.name}** sort de la piste lors de la bataille avec ${other.team.emoji}**${other.pilot.name}**. **ABANDON.**`,
-                    `🚨 **T${lap}** — Duel fatal ! ${victim.team.emoji}**${victim.pilot.name}** perd le contrôle en défendant face à ${other.team.emoji}**${other.pilot.name}**. **DNF.**`,
+                  // ── Descriptions d'accident plus riches ──────────────
+                  const vpos  = victim.pos;
+                  const opos  = other.pos;
+                  const isP1P2 = (vpos <= 2 || opos <= 2) && vpos <= 3 && opos <= 3;
+                  const accidentTypes = [
+                    `contact roue dans roue au freinage`, `choc violent en sortie d'épingle`,
+                    `collision côte à côte dans la grande courbe`, `accrochage à la chicane`,
+                    `touche à l'arrière au freinage`, `contact en défendant le dedans`,
                   ];
-                  events.push({ priority: battleAreRivals ? 10 : 9, text: pick(crashTexts) });
+                  const accDesc = pick(accidentTypes);
+                  const crashTexts = battleAreRivals ? [
+                    `***💥 T${lap} — CRASH ! LA RIVALITÉ VIENT DE TOUT EMPORTER !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) et ${other.team.emoji}**${other.pilot.name}** (P${opos}) — ${accDesc}. ***${victim.pilot.name} sort de la piste, voiture détruite. ABANDON.*** La rivalité vient de coûter une course entière. *Le paddock va parler de ça pendant des semaines.*`,
+                    `🔴 ***T${lap} — RIVAL HORS COURSE !***\nAprès ${battle.lapsClose} tours de duel tendu, ${victim.team.emoji}**${victim.pilot.name}** abandonne suite au contact avec ${other.team.emoji}**${other.pilot.name}**. ${accDesc}. ${battleRivalHeat >= 50 ? `***Cette rivalité ne connaît plus de limite.***` : `*Le duel tourne à la catastrophe.*`}`,
+                  ] : isP1P2 ? [
+                    `***💥 T${lap} — CATASTROPHE EN TÊTE DE COURSE !!!***\nP${vpos} vs P${opos} — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent : ${accDesc}. ***${victim.pilot.name} dans le mur, ABANDON.*** Le GP vient de basculer. Incroyable.`,
+                    `🚨 ***T${lap} — LE CRASH QUI CHANGE TOUT !***\nLa bataille entre P${vpos} et P${opos} se termine dans les barrières : ${victim.team.emoji}**${victim.pilot.name}** perd le contrôle après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}**. ***FIN DE COURSE. Le podium s'écrit entièrement en 3 secondes.***`,
+                  ] : [
+                    `***💥 T${lap} — CRASH !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) sort violemment après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}** (P${opos}). Voiture dans le bac à graviers — ***ABANDON.***`,
+                    `🚨 ***T${lap} — INCIDENT GRAVE !***\n${victim.team.emoji}**${victim.pilot.name}** perd le contrôle en défendant face à ${other.team.emoji}**${other.pilot.name}** — ${accDesc}. ***DNF. Race over.***`,
+                    `💥 ***T${lap}*** — La bataille P${vpos}/P${opos} entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** finit mal : ${accDesc}, voiture dans les barrières. ***ABANDON.***`,
+                  ];
+                  const crashGif = isP1P2 ? pickGif('crash_collision') : pick([pickGif('crash_collision'), pickGif('crash_solo')]);
+                  events.push({ priority: battleAreRivals ? 10 : isP1P2 ? 10 : 9, text: pick(crashTexts), gif: crashGif });
                 }
               } else if (rollInc < 0.55) {
                 // Crash des deux
@@ -8533,7 +8688,21 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
   for (const inv of dedupInvestigations) {
     if (Math.random() < 0.55) { // 55% de chance de pénalité post-course
-      const penSec = pick([5, 5, 10]);  // max 10s par incident, plus de 20s
+      // Proportionnel à la sévérité : contact léger = 5s max (souvent 0), battle = 5-10s
+      const severity = inv.severity || 'medium';
+      const penOptions = severity === 'light'
+        ? [0, 5, 5, 5]           // 25% absous, 75% → 5s seulement
+        : [5, 5, 10];            // battle contact : 5 ou 10s (10s seulement si grave)
+      const penSec = pick(penOptions);
+      if (penSec === 0) {
+        // Absous explicitement
+        const atk2 = drivers.find(d => String(d.pilot._id) === inv.attackerId);
+        const vic2 = drivers.find(d => String(d.pilot._id) === inv.victimId);
+        if (atk2 && vic2) postRacePenaltyMsgs.push(
+          `✅ *Absous* — Contact T${inv.lap} ${atk2.team.emoji}**${atk2.pilot.name}** / ${vic2.team.emoji}**${vic2.pilot.name}** → *Incident de course*`
+        );
+        continue;
+      }
       const penMs  = penSec * 1000;
       const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
       const vic = drivers.find(d => String(d.pilot._id) === inv.victimId);
