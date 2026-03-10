@@ -9259,12 +9259,15 @@ async function createNewSeason() {
         await Pilot.findByIdAndUpdate(st.pilotId, { careerBestRank: rankLast });
       }
       // Cumuler wins/podiums/dnfs/races en carrière
+      // BUG FIX : careerRaces était calculé comme (wins + podiums + 1) — formule sans sens.
+      // Correction : comptage réel des PilotGPRecord pour cette saison.
+      const realRaceCount = await PilotGPRecord.countDocuments({ pilotId: st.pilotId, seasonId: lastSeason._id });
       await Pilot.findByIdAndUpdate(st.pilotId, {
         $inc: {
           careerWins    : st.wins    || 0,
           careerPodiums : st.podiums || 0,
           careerDnfs    : st.dnfs    || 0,
-          careerRaces   : (st.wins || 0) + (st.podiums || 0) + 1, // approx
+          careerRaces   : realRaceCount,
         },
       });
     }
@@ -9272,6 +9275,14 @@ async function createNewSeason() {
 
   // Réinitialiser rivalités et streak upgrade en début de saison
   await Pilot.updateMany({}, { $set: { rivalId: null, rivalContacts: 0, rivalHeat: 0, rivalDeclaredAt: null, upgradeStreak: 0, lastUpgradeStat: null } });
+
+  // BUG FIX : CommandCooldown n'était jamais purgé → croissance infinie de la collection MongoDB.
+  // Correction : suppression des entrées de plus de 30 jours à chaque nouvelle saison.
+  try {
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const deleted = await CommandCooldown.deleteMany({ usedAt: { $lt: cutoff } });
+    console.log(`[createNewSeason] CommandCooldown purgé : ${deleted.deletedCount} entrée(s) supprimée(s).`);
+  } catch(e) { console.error('[createNewSeason] Erreur purge CommandCooldown :', e.message); }
 
   // ── Décroissance mémorielle des affinités inter-saisons ────
   // Les affinités NE SONT PAS effacées : un ennemi reste un ennemi.
@@ -9792,15 +9803,17 @@ async function startTransferPeriod() {
         const baseSalaire    = Math.round((expContract.salaireParCourse || 10) * perfMultiplier);
         const salaireRenew   = Math.max(5, Math.min(team.budget * 0.40, baseSalaire));
         const dureeRenew     = perf.isChamp ? 3 : perf.isOverperf ? 2 : 1;
+        // BUG FIX : utilisait 'salaire', 'duree', 'statut', 'isRenewal' qui n'existent pas dans
+        // TransferOfferSchema → champs ignorés par Mongoose, offre créée avec valeurs par défaut
+        // (salaireBase:100, seasons:1). Correction : vrais noms du schema.
         await TransferOffer.create({
-          teamId   : team._id,
-          pilotId  : tp._id,
-          status   : 'pending',
-          salaire  : salaireRenew,
-          duree    : dureeRenew,
-          statut   : expContract.statut || 'titulaire',
-          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-          isRenewal: true,
+          teamId       : team._id,
+          pilotId      : tp._id,
+          status       : 'pending',
+          salaireBase  : salaireRenew,
+          seasons      : dureeRenew,
+          driverStatus : expContract.driverStatus || null,
+          expiresAt    : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
         });
       }
     } catch(e) { console.error('[renouvellement IA]', e.message); }
@@ -13886,11 +13899,14 @@ async function handleInteraction(interaction) {
 
 
   // ── /reveal_grille ────────────────────────────────────────
+  // BUG FIX : reply() appelée APRÈS revealFinalGrid() (opération lente ~10s) → timeout Discord (3s)
+  // Correction : reply() immédiat, puis revealFinalGrid(), puis editReply() pour confirmation
   if (commandName === 'reveal_grille') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     const season = await getActiveSeason();
-    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
+    if (!season) return interaction.reply({ content: '❌ Aucune saison active.', ephemeral: true });
+    await interaction.reply({ content: '⏳ Révélation de la grille en cours...', ephemeral: true });
     await revealFinalGrid(season, interaction.channel);
     await Season.findByIdAndUpdate(season._id, { gridRevealedAt: new Date() });
     return interaction.editReply({ content: '✅ Grille révélée !', ephemeral: true });
