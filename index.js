@@ -5261,21 +5261,98 @@ function genDriverInterviewArticle(pilot, team, standing, contract, teammate, te
   };
 }
 
-// ─── SCÉNARIOS TITRE EN FIN DE SAISON ─────────────────────────────────────────
-// Génère jusqu'à 2 articles "peut encore gagner le titre si..." lorsqu'il reste
-// ≤ 5 GPs et qu'au moins 2 pilotes sont mathématiquement en course pour le titre.
-// maxPtsPerGP = 26 (25 pts victoire + 1 FL)
+// ─── MOTEUR DE SCÉNARIOS TITRE — calcul réaliste à l'unité près ────────────────
+// Points F1 par position (P1–P10, 0 au-delà)
+const F1_PTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
+function ptsByPos(pos) { return F1_PTS[pos - 1] || 0; }
+
+// Calcule la liste de TOUS les combos (challenger_pos, leader_pos) pour 1 GP
+// qui permettraient au challenger de gagner DU TERRAIN (gap réduit).
+// Retourne {cPos, lPos, gain, cPts, lPts} trié par gain desc.
+function titleCombosPerGP() {
+  const combos = [];
+  for (let cPos = 1; cPos <= 20; cPos++) {
+    for (let lPos = 1; lPos <= 20; lPos++) {
+      if (cPos === lPos) continue;
+      const cPts = ptsByPos(cPos);
+      const lPts = ptsByPos(lPos);
+      const gain = cPts - lPts;
+      if (gain > 0) combos.push({ cPos, lPos, gain, cPts, lPts });
+    }
+  }
+  return combos.sort((a, b) => b.gain - a.gain || a.cPos - b.cPos);
+}
+
+// Pour un déficit donné et N GPs restants, génère des scénarios RÉALISTES :
+// - "optimiste"  : challenger P1 + leader P5 (gain 15pts/GP)
+// - "classique"  : challenger P1 + leader P3 (gain 10pts/GP)
+// - "réaliste"   : challenger P2 + leader P5 (gain 6pts/GP)
+// - "serré"      : challenger P1 + leader P2 (gain 7pts/GP)
+// Chaque scénario indique combien de GPs sur les N restants, et le gap final.
+function buildRealisticScenarios(deficit, gpsLeft) {
+  if (deficit <= 0 || gpsLeft <= 0) return [];
+
+  // Scénarios modèles (cPos, lPos, label)
+  const templates = [
+    { cPos: 1, lPos: 5,  label: 'Victoire + leader P5',   tag: '🔥 Optimiste'     },
+    { cPos: 1, lPos: 3,  label: 'Victoire + leader podium', tag: '⚡ Classique'   },
+    { cPos: 1, lPos: 2,  label: 'Victoire + leader P2',    tag: '📊 Serré'        },
+    { cPos: 2, lPos: 5,  label: 'P2 + leader P5',         tag: '📉 Conservateur'  },
+    { cPos: 1, lPos: 10, label: 'Victoire + leader hors top 5', tag: '💥 Idéal'   },
+  ];
+
+  const scenarios = [];
+  for (const t of templates) {
+    const gainPerGP = ptsByPos(t.cPos) - ptsByPos(t.lPos);
+    if (gainPerGP <= 0) continue;
+    // Combien de GPs à ce rythme pour combler le déficit ?
+    const gpsNeeded = Math.ceil(deficit / gainPerGP);
+    const achievable = gpsNeeded <= gpsLeft;
+    // Résidu : si on applique ce scénario sur TOUS les GPs restants
+    const gapAfterAll = deficit - gainPerGP * gpsLeft;
+    const cPts = ptsByPos(t.cPos);
+    const lPts = ptsByPos(t.lPos);
+    scenarios.push({
+      tag: t.tag,
+      label: t.label,
+      cPos: t.cPos,
+      lPos: t.lPos,
+      cPts,
+      lPts,
+      gainPerGP,
+      gpsNeeded,
+      gpsLeft,
+      achievable,
+      gapAfterAll,   // négatif = challenger passe devant
+    });
+  }
+  return scenarios.filter(s => s.gainPerGP > 0);
+}
+
+// Formatte un scénario en ligne lisible Discord
+function formatScenario(s, challengerName, leaderName, deficit) {
+  const sign   = s.gapAfterAll < 0 ? `**+${Math.abs(s.gapAfterAll)} pts d'avance**` : s.gapAfterAll === 0 ? 'à égalité' : `-${s.gapAfterAll} pts restants`;
+  const status = s.achievable
+    ? `✅ **${s.gpsNeeded} GP${s.gpsNeeded > 1 ? 's' : ''}** à ce rythme suffisent (sur ${s.gpsLeft})`
+    : `❌ Insuffisant — comblerait seulement **${s.gainPerGP * s.gpsLeft} pts** sur ${deficit} nécessaires`;
+  return (
+    `${s.tag} — *${s.label}*\n` +
+    `${challengerName} **+${s.cPts}pts** (P${s.cPos}) · ${leaderName} **+${s.lPts}pts** (P${s.lPos}) → **+${s.gainPerGP}pts/GP**\n` +
+    `${status} → après ${s.gpsLeft} GPs : ${sign}`
+  );
+}
+
+// Génère jusqu'à 2 articles "peut encore gagner le titre si..." avec scénarios réalistes
 function genTitleScenariosArticles(allStandings, pilotMap, teamMap, gpsLeft, seasonYear) {
-  const MAX_PTS_PER_GP = 26;
-  const maxRemaining   = gpsLeft * MAX_PTS_PER_GP;
+  const maxRemaining = gpsLeft * 26;
   const sorted = [...allStandings].sort((a, b) => b.points - a.points);
   if (!sorted.length) return [];
-  const leaderPts = sorted[0].points;
+  const leaderPts  = sorted[0].points;
   const contenders = sorted.filter(s => (leaderPts - s.points) <= maxRemaining);
-  if (contenders.length < 2) return []; // personne ne peut rattraper le leader
+  if (contenders.length < 2) return [];
 
   const articles = [];
-  const source = 'f1_weekly';
+  const source   = 'f1_weekly';
 
   for (let i = 1; i < Math.min(contenders.length, 3); i++) {
     const challenger = contenders[i];
@@ -5283,45 +5360,47 @@ function genTitleScenariosArticles(allStandings, pilotMap, teamMap, gpsLeft, sea
     const cPilot     = pilotMap.get(String(challenger.pilotId));
     const lPilot     = pilotMap.get(String(leader.pilotId));
     if (!cPilot || !lPilot) continue;
-    const cTeam      = cPilot.teamId ? teamMap.get(String(cPilot.teamId)) : null;
-    const lTeam      = lPilot.teamId ? teamMap.get(String(lPilot.teamId)) : null;
+    const cTeam = cPilot.teamId ? teamMap.get(String(cPilot.teamId)) : null;
+    const lTeam = lPilot.teamId ? teamMap.get(String(lPilot.teamId)) : null;
     if (!cTeam || !lTeam) continue;
 
-    const deficit = leaderPts - challenger.points;
-    const ptsNeeded = deficit + 1; // points nécessaires pour dépasser
-    // Scénario minimum : gagner N GPs + FL, leader marque le minimum
-    const winsNeeded = Math.ceil(deficit / MAX_PTS_PER_GP);
-    const scenario = winsNeeded === 0
-      ? `une seule victoire suffit si ${lPilot.name} termine derrière`
-      : winsNeeded === 1
-        ? `une victoire avec meilleur tour + ${lPilot.name} hors des points dans le prochain GP`
-        : `${winsNeeded} victoires consécutives avec meilleur tour, et ${lPilot.name} à zéro point sur la période`;
+    const deficit   = leaderPts - challenger.points;
+    const scenarios = buildRealisticScenarios(deficit, gpsLeft);
+    const best      = scenarios.find(s => s.achievable);
+    const optimist  = scenarios[0]; // gain max par GP
+
+    // Ligne de résumé du meilleur scénario réaliste
+    const bestLine = best
+      ? `*Scénario le plus accessible :* ${best.label} (${best.cPts} vs ${best.lPts} pts/GP = **+${best.gainPerGP} pts/GP**) — **${best.gpsNeeded} GP${best.gpsNeeded > 1 ? 's' : ''}** suffiraient.`
+      : `*Aucun scénario réaliste ne permet le retournement en ${gpsLeft} GP${gpsLeft > 1 ? 's' : ''} — mais mathématiquement vivant.*`;
+
+    // Tableau compact des 3 meilleurs scénarios
+    const scenarioBlock = scenarios.slice(0, 3).map(s => {
+      const ach = s.achievable ? `✅ ${s.gpsNeeded}GP` : `❌ -${s.gainPerGP * gpsLeft}pts seulement`;
+      return `**${s.tag}** ${s.label} → +${s.gainPerGP}pts/GP (${ach})`;
+    }).join('\n');
 
     const headlinePool = [
       `${cPilot.name} peut encore être champion du monde — voilà comment`,
       `Scénario titre : ce qu'il faut pour que ${cPilot.name} renverse ${lPilot.name}`,
-      `${gpsLeft} GPs restants — ${cTeam.emoji}${cPilot.name} est encore mathématiquement en lice`,
-      `-${deficit} pts : le chemin existe encore pour ${cPilot.name}`,
+      `${gpsLeft} GPs restants — ${cTeam.emoji}${cPilot.name} est encore en lice, les calculs parlent`,
+      `-${deficit} pts : le chemin de ${cPilot.name} vers le titre, GP par GP`,
     ];
-    const bodyPool = [
-      `**${deficit} points de retard** sur ${lTeam.emoji}${lPilot.name} — c'est la situation de ${cTeam.emoji}${cPilot.name} à ${gpsLeft} GPs de la fin.\n\n` +
-      `*Le scénario minimum :* ${scenario}.\n\n` +
-      `Avec ${maxRemaining} points encore distribués, ${cPilot.name} reste mathématiquement en course. Mais le temps presse.` +
-      pick([
-        ` *\"Je ne calcule pas. Je cours,\"* a-t-il déclaré cette semaine.`,
-        ` Son ingénieur de course parle de \"concentration absolue sur les prochains GPs\".`,
-        ` L'écurie refuse d'évoquer les probabilités — signe que l'espoir est bien là.`,
-      ]),
 
-      `Il reste ${gpsLeft} Grands Prix. ${cTeam.emoji}**${cPilot.name}** est à ${deficit} unités de ${lTeam.emoji}**${lPilot.name}** au championnat.\n\n` +
-      `Pour renverser la tendance, ${cPilot.name} devrait au minimum **${scenario}**. Le calcul est serré — mais possible.\n\n` +
-      `L'histoire du sport automobile est pleine de retournements en fin de saison. Senna 88, Prost 89, Hamilton 08... Le championnat n'est jamais terminé sur le papier.`,
-    ];
+    const body =
+      `**${deficit} points de retard** sur ${lTeam.emoji}${lPilot.name} — il reste ${gpsLeft} GP${gpsLeft > 1 ? 's' : ''} et **${maxRemaining} pts** à distribuer.\n\n` +
+      bestLine + '\n\n' +
+      `**Analyse scénario par scénario :**\n${scenarioBlock}\n\n` +
+      pick([
+        `*"Je ne calcule pas. Je cours,"* a déclaré ${cPilot.name} cette semaine.`,
+        `Son ingénieur de course évoque une "concentration totale sur les prochaines qualifs".`,
+        `L'écurie refuse de commenter les probabilités — mais les chiffres sont là.`,
+      ]);
 
     articles.push({
       type: 'title_scenario', source,
       headline: pick(headlinePool),
-      body: pick(bodyPool),
+      body,
       pilotIds: [cPilot._id, lPilot._id],
       teamIds:  [cTeam._id, lTeam._id],
       seasonYear,
@@ -5329,6 +5408,7 @@ function genTitleScenariosArticles(allStandings, pilotMap, teamMap, gpsLeft, sea
   }
   return articles;
 }
+
 
 // ── Génère 1-2 articles "éliminé mathématiquement" ───────
 // Déclenché entre quali et course si des pilotes ne peuvent plus
@@ -15824,135 +15904,176 @@ async function handleInteraction(interaction) {
   // ── /titre_scenario ───────────────────────────────────────
   if (commandName === 'titre_scenario') {
     try {
-    const query   = interaction.options.getString('pilote').toLowerCase();
-    const season  = await getActiveSeason();
-    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.' });
+      const query  = interaction.options.getString('pilote').toLowerCase();
+      const season = await getActiveSeason();
+      if (!season) return interaction.editReply({ content: '❌ Aucune saison active.' });
 
-    const allPilots = await Pilot.find({ teamId: { $ne: null } }).lean();
-    const pilot     = allPilots.find(p => p.name.toLowerCase().includes(query));
-    if (!pilot) return interaction.editReply({ content: `❌ Pilote introuvable : **${query}**` });
+      const allPilots = await Pilot.find({ teamId: { $ne: null } }).lean();
+      const pilot     = allPilots.find(p => p.name.toLowerCase().includes(query));
+      if (!pilot) return interaction.editReply({ content: `❌ Pilote introuvable : **${query}**` });
 
-    const allTeams    = await Team.find().lean();
-    const teamMap     = new Map(allTeams.map(t => [String(t._id), t]));
-    const pilotMap    = new Map(allPilots.map(p => [String(p._id), p]));
-    const team        = pilot.teamId ? teamMap.get(String(pilot.teamId)) : null;
+      const allTeams = await Team.find().lean();
+      const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
+      const pilotMap = new Map(allPilots.map(p => [String(p._id), p]));
+      const team     = pilot.teamId ? teamMap.get(String(pilot.teamId)) : null;
 
-    const standings   = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).lean();
-    const totalRaces  = await Race.countDocuments({ seasonId: season._id });
-    const doneRaces   = await Race.countDocuments({ seasonId: season._id, status: 'done' });
-    const gpsLeft     = totalRaces - doneRaces;
-    const nextRace    = await Race.findOne({ seasonId: season._id, status: { $in: ['upcoming','practice_done','quali_done'] } }).sort({ index: 1 }).lean();
+      const standings  = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+      const totalRaces = await Race.countDocuments({ seasonId: season._id });
+      const doneRaces  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
+      const gpsLeft    = totalRaces - doneRaces;
+      const nextRace   = await Race.findOne({ seasonId: season._id, status: { $in: ['upcoming','practice_done','quali_done'] } }).sort({ index: 1 }).lean();
 
-    if (!standings.length) return interaction.editReply({ content: '❌ Aucune donnée de classement disponible.' });
+      if (!standings.length) return interaction.editReply({ content: '❌ Aucune donnée de classement.' });
 
-    const MAX_PTS_PER_GP = 26;
-    const maxRemaining   = gpsLeft * MAX_PTS_PER_GP;
+      const maxRemaining = gpsLeft * 26;
 
-    const pilotStanding  = standings.find(s => String(s.pilotId) === String(pilot._id));
-    const leaderStanding = standings[0];
-    const leaderPilot    = leaderStanding ? pilotMap.get(String(leaderStanding.pilotId)) : null;
-    const leaderTeam     = leaderPilot?.teamId ? teamMap.get(String(leaderPilot.teamId)) : null;
+      const pilotSt    = standings.find(s => String(s.pilotId) === String(pilot._id));
+      const leaderSt   = standings[0];
+      const leaderP    = leaderSt ? pilotMap.get(String(leaderSt.pilotId)) : null;
+      const leaderTeam = leaderP?.teamId ? teamMap.get(String(leaderP.teamId)) : null;
 
-    if (!pilotStanding) return interaction.editReply({ content: `❌ **${pilot.name}** n'a aucun point enregistré cette saison.` });
+      if (!pilotSt) return interaction.editReply({ content: `❌ **${pilot.name}** n'a aucun point cette saison.` });
 
-    const pilotPts  = pilotStanding.points;
-    const leaderPts = leaderStanding?.points || 0;
-    const isLeader  = String(pilotStanding.pilotId) === String(leaderStanding?.pilotId);
-    const deficit   = leaderPts - pilotPts;
-    const rank      = standings.findIndex(s => String(s.pilotId) === String(pilot._id)) + 1;
-    const flag      = pilot.nationality ? pilot.nationality.split(' ')[0] : '';
+      const myPts    = pilotSt.points;
+      const leadPts  = leaderSt?.points || 0;
+      const isLeader = String(pilotSt.pilotId) === String(leaderSt?.pilotId);
+      const deficit  = leadPts - myPts;
+      const rank     = standings.findIndex(s => String(s.pilotId) === String(pilot._id)) + 1;
+      const flag     = pilot.nationality ? pilot.nationality.split(' ')[0] : '';
 
-    const embed = new EmbedBuilder()
-      .setColor(team?.color || '#FF1801')
-      .setTitle(`🏆 Scénario titre — ${team?.emoji||''}${pilot.name} ${flag}`)
-      .setFooter({ text: `Saison ${season.year} · ${gpsLeft} GP${gpsLeft !== 1 ? 's' : ''} restant${gpsLeft !== 1 ? 's' : ''}` });
+      const embed = new EmbedBuilder()
+        .setColor(team?.color || '#FF1801')
+        .setTitle(`🏆 Scénario titre — ${team?.emoji||''}${pilot.name} ${flag}`)
+        .setFooter({ text: `Saison ${season.year} · ${gpsLeft} GP${gpsLeft !== 1 ? 's' : ''} restant${gpsLeft !== 1 ? 's' : ''}` });
 
-    if (pilot.photoUrl) embed.setThumbnail(pilot.photoUrl);
+      if (pilot.photoUrl) embed.setThumbnail(pilot.photoUrl);
 
-    // ── CAS 1 : Pilote déjà éliminé mathématiquement ─────
-    if (!isLeader && deficit > maxRemaining) {
-      const gap = deficit - maxRemaining;
-      embed
-        .setColor('#555555')
-        .setDescription(
-          `❌ **${pilot.name} est mathématiquement éliminé du championnat.**\n\n` +
-          `Il accuse **${deficit} pts de retard** sur ${leaderTeam?.emoji||''}**${leaderPilot?.name}** ` +
-          `alors qu'il ne reste que **${maxRemaining} pts** à distribuer ` +
-          `(${gpsLeft} GP${gpsLeft !== 1 ? 's' : ''} × 26 pts max).\n\n` +
-          `Il lui aurait fallu **${gap} pts de plus** que le maximum possible pour rester en vie.`
+      // ── CAS 1 : Éliminé mathématiquement ─────────────────
+      if (!isLeader && deficit > maxRemaining) {
+        const manque = deficit - maxRemaining;
+        embed.setColor('#555555').setDescription(
+          `❌ **${pilot.name} est mathématiquement éliminé.**\n\n` +
+          `Retard : **${deficit} pts** sur ${leaderTeam?.emoji||''}**${leaderP?.name}**\n` +
+          `Maximum distribuable : **${maxRemaining} pts** (${gpsLeft} GP × 26 pts)\n\n` +
+          `Même en gagnant tout et ${leaderP?.name} marquant 0, il lui manquerait encore **${manque} pts**.\n\n` +
+          `**Classement :**\n` +
+          standings.slice(0, Math.min(6, standings.length)).map((s, i) => {
+            const p = pilotMap.get(String(s.pilotId));
+            const t = p?.teamId ? teamMap.get(String(p.teamId)) : null;
+            const out = i > 0 && (leadPts - s.points) > maxRemaining;
+            const me  = String(s.pilotId) === String(pilot._id);
+            const mark = out ? '❌' : i === 0 ? '👑' : '⚡';
+            return `${mark}${me ? ' **→**' : ''} P${i+1} ${t?.emoji||''}${p?.name||'?'} — ${s.points}pts`;
+          }).join('\n')
         );
-      return interaction.editReply({ embeds: [embed] });
-    }
-
-    // ── CAS 2 : Leader du championnat ─────────────────────
-    if (isLeader) {
-      const secondStanding = standings[1];
-      const secondPilot    = secondStanding ? pilotMap.get(String(secondStanding.pilotId)) : null;
-      const gapToP2        = pilotPts - (secondStanding?.points || 0);
-
-      let nextGPClinch = null;
-      if (secondStanding && gpsLeft >= 1) {
-        const clinchCondition = pilotPts - (secondStanding.points + (gpsLeft - 1) * MAX_PTS_PER_GP);
-        if (clinchCondition > 0) {
-          nextGPClinch = `✅ **${pilot.name} peut être sacré champion dès ${nextRace ? `${nextRace.emoji||'🏁'} **${nextRace.circuit}**` : 'le prochain GP'}** si ${secondPilot?.name || 'P2'} ne marque pas assez de points.`;
-        }
+        return interaction.editReply({ embeds: [embed] });
       }
 
-      const challengerLines = standings.slice(1).map((s, i) => {
-        const cp    = pilotMap.get(String(s.pilotId));
-        const ct    = cp?.teamId ? teamMap.get(String(cp.teamId)) : null;
-        const diff  = pilotPts - s.points;
-        const still = diff <= maxRemaining;
-        const mark  = still ? '⚠️' : '✅';
-        const cflag = cp?.nationality ? cp.nationality.split(' ')[0] : '';
-        return `${mark} **P${i+2}** ${ct?.emoji||''}${cp?.name||'?'} ${cflag} — -${diff} pts${still ? ' *(en lice)*' : ' *(éliminé)*'}`;
+      // ── CAS 2 : Leader ────────────────────────────────────
+      if (isLeader) {
+        const p2St   = standings[1];
+        const p2P    = p2St ? pilotMap.get(String(p2St.pilotId)) : null;
+        const p2T    = p2P?.teamId ? teamMap.get(String(p2P.teamId)) : null;
+        const gapP2  = myPts - (p2St?.points || 0);
+        const contendersLeft = standings.slice(1).filter(s => (myPts - s.points) <= maxRemaining).length;
+
+        // Calcul sacre anticipé : peut-il être champion dès le prochain GP ?
+        // Condition : même si P2 gagne tous les GPs restants sauf 1 (=gpsLeft-1)
+        // et le leader marque 0, le leader reste devant.
+        let clinchGP = null;
+        if (p2St && gpsLeft >= 1) {
+          // Si après ce prochain GP, P2 ne peut plus rattraper même en gagnant tout :
+          // myPts + 0 > p2St.points + 25*(gpsLeft-1) + 26*(gpsLeft-1)  ← trop strict
+          // Condition réelle : myPts - p2St.points > 26*(gpsLeft-1)
+          if (gapP2 > 26 * (gpsLeft - 1)) {
+            clinchGP = `✅ **Sacre possible dès ${nextRace ? `${nextRace.emoji||'🏁'} ${nextRace.circuit}` : 'le prochain GP'}** — même si ${p2P?.name||'P2'} gagne, l'écart est infranchissable sur les GPs restants.`;
+          } else {
+            // Quel résultat pour se rapprocher du sacre ?
+            const ptsToSecure = 26 * (gpsLeft - 1) - gapP2 + 1;
+            const neededPos   = [25,18,15,12,10,8,6,4,2,1].findIndex(v => v >= ptsToSecure);
+            if (ptsToSecure <= 0) clinchGP = `✅ Sacre garanti quelle que soit la course.`;
+            else clinchGP = `⏳ Pour valider le titre dès ce GP, besoin que **${p2P?.name||'P2'}** marque ≤ ${Math.max(0, ptsByPos(1) - ptsToSecure)} pts (P${neededPos >= 0 ? neededPos + 2 : '11+'}).`;
+          }
+        }
+
+        // Scénarios inversés : risque que P2 revienne
+        const dangerScenarios = buildRealisticScenarios(gapP2, gpsLeft);
+        const dangerLines = dangerScenarios.filter(s => s.achievable).slice(0, 3).map(s =>
+          `⚠️ ${s.tag} *${s.label}* — ${p2P?.name||'P2'} gagne **${s.gainPerGP}pts/GP** sur toi → peut revenir en **${s.gpsNeeded} GP${s.gpsNeeded > 1 ? 's' : ''}**`
+        );
+
+        const desc =
+          `👑 **${pilot.name} est LEADER** — **${myPts} pts** · Avance P2 : **+${gapP2} pts** sur ${p2T?.emoji||''}${p2P?.name||'?'}\n` +
+          `${contendersLeft} adversaire${contendersLeft !== 1 ? 's' : ''} encore mathématiquement en lice.\n\n` +
+          (clinchGP ? clinchGP + '\n\n' : '') +
+          (dangerLines.length ? `**Risques si ${p2P?.name||'P2'} performe :**\n${dangerLines.join('\n')}\n\n` : '') +
+          `**Challengers :**\n` +
+          standings.slice(1, 7).map((s, i) => {
+            const p = pilotMap.get(String(s.pilotId));
+            const t = p?.teamId ? teamMap.get(String(p.teamId)) : null;
+            const diff  = myPts - s.points;
+            const alive = diff <= maxRemaining;
+            const f     = p?.nationality ? p.nationality.split(' ')[0] : '';
+            return `${alive ? '⚠️' : '✅'} P${i+2} ${t?.emoji||''}${p?.name||'?'} ${f} — -${diff}pts${alive ? '' : ' ❌'}`;
+          }).join('\n');
+
+        embed.setDescription(desc);
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      // ── CAS 3 : Challenger — scénarios réalistes chiffrés ─
+      const scenarios = buildRealisticScenarios(deficit, gpsLeft);
+
+      // Classement annoté
+      const classLines = standings.slice(0, Math.min(8, standings.length)).map((s, i) => {
+        const p   = pilotMap.get(String(s.pilotId));
+        const t   = p?.teamId ? teamMap.get(String(p.teamId)) : null;
+        const me  = String(s.pilotId) === String(pilot._id);
+        const out = i > 0 && (leadPts - s.points) > maxRemaining;
+        const mark = out ? '❌' : i === 0 ? '👑' : me ? '🎯' : '⚡';
+        const gap  = i === 0 ? 'LEADER' : `-${leadPts - s.points}pts`;
+        const f    = p?.nationality ? p.nationality.split(' ')[0] : '';
+        return `${mark}${me ? ' **→**' : ''} P${i+1} ${t?.emoji||''}${p?.name||'?'} ${f} — ${s.points}pts *(${gap})*`;
       });
 
-      const contendersLeft = standings.slice(1).filter(s => (pilotPts - s.points) <= maxRemaining).length;
+      // Bloc scénarios (max 4, avec un résumé actionnable)
+      const achievable = scenarios.filter(s => s.achievable);
+      const impossible = scenarios.filter(s => !s.achievable);
+      const scenLines  = [];
+
+      for (const s of scenarios.slice(0, 5)) {
+        const ach = s.achievable
+          ? `✅ **${s.gpsNeeded} GP${s.gpsNeeded > 1 ? 's' : ''}** suffisent (${s.gpsLeft - s.gpsNeeded} GP${s.gpsLeft - s.gpsNeeded !== 1 ? 's' : ''} de marge)`
+          : `❌ Comblerait seulement **${s.gainPerGP * s.gpsLeft} / ${deficit} pts**`;
+        const gapFinal = s.gapAfterAll < 0
+          ? `Avance finale : **+${Math.abs(s.gapAfterAll)} pts**`
+          : s.gapAfterAll === 0 ? 'Égalité exacte'
+          : `Retard résiduel : **${s.gapAfterAll} pts**`;
+        scenLines.push(
+          `${s.tag} — *${s.label}*\n` +
+          `→ ${pilot.name} **P${s.cPos}** (+${s.cPts}pts) · ${leaderP?.name||'leader'} **P${s.lPos}** (+${s.lPts}pts) = **+${s.gainPerGP}pts/GP**\n` +
+          `→ ${ach} — ${gapFinal}`
+        );
+      }
+
+      // Résumé actionnable en haut
+      const bestCase = achievable[0];
+      const summary  = bestCase
+        ? `📍 **P${rank}** — Retard : **${deficit} pts** · ${gpsLeft} GPs restants\n` +
+          `Meilleur scénario réalisable : *${bestCase.label}* → **${bestCase.gainPerGP} pts/GP** → **${bestCase.gpsNeeded} GP${bestCase.gpsNeeded > 1 ? 's' : ''}** nécessaires.`
+        : `📍 **P${rank}** — Retard : **${deficit} pts** · ${gpsLeft} GPs restants\n` +
+          `⚠️ Aucun scénario ne permet le retournement au rythme actuel — il faudrait **${Math.ceil(deficit / (scenarios[0]?.gainPerGP || 1))} GPs** au mieux, mais il n'en reste que **${gpsLeft}**.`;
 
       embed.setDescription(
-        `👑 **${pilot.name} est LEADER** avec **${pilotPts} pts**.\n` +
-        `Avance sur P2 : **+${gapToP2} pts** · ${contendersLeft} adversaire${contendersLeft !== 1 ? 's' : ''} encore en lice.\n\n` +
-        (nextGPClinch ? nextGPClinch + '\n\n' : '') +
-        `**Challengers :**\n${challengerLines.slice(0, 6).join('\n')}`
+        summary + '\n\n' +
+        `**📊 Classement actuel :**\n${classLines.join('\n')}\n\n` +
+        `**🔢 Scénarios possibles (${gpsLeft} GP${gpsLeft !== 1 ? 's' : ''}) :**\n` +
+        scenLines.join('\n\n') +
+        (nextRace ? `\n\n⏭️ Prochain : ${nextRace.emoji||'🏁'} **${nextRace.circuit}** · ${nextRace.gpStyle?.toUpperCase()||'?'}` : '')
       );
+
       return interaction.editReply({ embeds: [embed] });
-    }
 
-    // ── CAS 3 : Challenger — scénario détaillé ────────────
-    const winsNeeded  = Math.ceil(deficit / MAX_PTS_PER_GP);
-    const scenarioMin = winsNeeded === 0
-      ? `une seule victoire suffit si ${leaderPilot?.name || 'le leader'} termine derrière`
-      : winsNeeded === 1
-        ? `une victoire avec meilleur tour + ${leaderPilot?.name || 'le leader'} hors des points`
-        : `${winsNeeded} victoires consécutives avec meilleur tour, ${leaderPilot?.name || 'le leader'} à zéro sur la période`;
-
-    const classementLines = standings.slice(0, Math.min(standings.length, 8)).map((s, i) => {
-      const cp    = pilotMap.get(String(s.pilotId));
-      const ct    = cp?.teamId ? teamMap.get(String(cp.teamId)) : null;
-      const isMe  = String(s.pilotId) === String(pilot._id);
-      const isOut = i > 0 && (leaderPts - s.points) > maxRemaining;
-      const mark  = isOut ? '❌' : i === 0 ? '👑' : isMe ? '🎯' : '⚡';
-      const diff  = i === 0 ? 'LEADER' : `-${leaderPts - s.points} pts`;
-      const cflag = cp?.nationality ? cp.nationality.split(' ')[0] : '';
-      return `${mark} **P${i+1}** ${ct?.emoji||''}${cp?.name||'?'} ${cflag} — ${s.points} pts *(${diff})*`;
-    });
-
-    const idealScenario = [];
-    for (let g = 1; g <= Math.min(gpsLeft, 3); g++) {
-      idealScenario.push(`GP ${g} : ${pilot.name} **1er** (+25 pts) · ${leaderPilot?.name || 'leader'} hors des points (0 pt)`);
-    }
-
-    embed.setDescription(
-      `📍 **P${rank} au championnat** — **${pilotPts} pts** · Retard : **${deficit} pts** sur ${leaderTeam?.emoji||''}${leaderPilot?.name || '?'}\n` +
-      `Il reste **${maxRemaining} pts** à distribuer sur ${gpsLeft} GP${gpsLeft !== 1 ? 's' : ''}.\n\n` +
-      `**🔢 Scénario minimum :**\n> ${scenarioMin}\n\n` +
-      `**📊 Classement actuel :**\n${classementLines.join('\n')}\n\n` +
-      `**🏁 Exemple de scénario idéal :**\n${idealScenario.join('\n')}` +
-      (nextRace ? `\n\n⏭️ Prochain GP : ${nextRace.emoji||'🏁'} **${nextRace.circuit}** · style ${nextRace.gpStyle?.toUpperCase()||'?'}` : '')
-    );
-
-    return interaction.editReply({ embeds: [embed] });
     } catch(e) {
       console.error('[titre_scenario] Erreur :', e.message, e.stack);
       try { await interaction.editReply({ content: `❌ Erreur : ${e.message}` }); } catch(_) {}
