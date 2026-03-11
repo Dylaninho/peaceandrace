@@ -619,9 +619,9 @@ const NATIONALITIES = [
 // ============================================================
 
 const TIRE = {
-  SOFT  : { grip: 1.00, deg: 0.0030, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 18-22, mais RAPIDE
-  MEDIUM: { grip: 0.985, deg: 0.0016, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 32-38
-  HARD  : { grip: 0.970, deg: 0.0010, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 50-58, lent mais sûr
+  SOFT  : { grip: 1.000, deg: 0.0028, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 18-22, mais RAPIDE
+  MEDIUM: { grip: 0.996, deg: 0.0016, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 32-38
+  HARD  : { grip: 0.992, deg: 0.0010, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 50-58, lent mais sûr
   INTER : { grip: 0.99, deg: 0.0013, emoji: '🟢', code: 'I', label: 'Inter'  },
   WET   : { grip: 0.99, deg: 0.0008, emoji: '🔵', code: 'W', label: 'Wet'    },
 };
@@ -1305,12 +1305,12 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const tireLifeBase = tireCompound === 'SOFT' ? 18 : tireCompound === 'HARD' ? 48 : 32;
   const tireLifeRef  = tireLifeBase * (1 + carTireBonus * 0.5 + pilotTireBonus * 0.5);
   const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.0);
-  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×1.8 au-delà
-  // (réduit de ×3.5 à ×1.8 pour éviter des pertes de 5+ places en 1 seul tour)
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.3;
-  // Cap à 0.046 : max ~4.1s de perte par tour sur une voiture en fin de vie de pneu
-  // Réaliste F1 : un pilote sur pneus à bout perd 1-4s/tour, pas 10-16s
-  const wearPenalty  = Math.min(0.022, tireWear * effectiveDeg * cliffFactor);
+  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×2.5 au-delà
+  // (augmenté pour que les pneus usés perdent vraiment du temps)
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 2.5;
+  // Cap à 0.055 : max ~5s de perte par tour sur pneus complètement dépassés
+  // Un pilote avec le panneau d'usure critique DOIT perdre du temps visible
+  const wearPenalty  = Math.min(0.055, tireWear * effectiveDeg * cliffFactor);
   const tireF        = (1 + wearPenalty) / tireData.grip;
 
   // Dirty air — pénalité ~0.1s max sur circuit mixte, jusqu'à ~0.4s sur urbain
@@ -1437,13 +1437,14 @@ function fmtGapSec(s, opts = {}) {
 // ⚠️  Différentiel amplifié — un pilote gestionPneus 80 tient vraiment ~8 tours de plus
 //     qu'un pilote à 40 sur le même compound. La stat doit être visible en course.
 function wornThresholdFor(tireCompound, team, pilot) {
-  // SOFT  : cliff ~18 tours (dégradation forte = fenêtre offensive courte)
-  // MEDIUM: cliff ~32 tours (polyvalent, dominant en race)
-  // HARD  : cliff ~48 tours (long stint, mais lent sur pneus frais)
+  // Seuils exprimés en unités de tireWear (normalisées par compound)
+  // SOFT  : wearRate=1.75/tour → seuil 18 atteint en ~10 tours réels
+  // MEDIUM: wearRate=1.00/tour → seuil 32 atteint en ~32 tours réels  ← référence
+  // HARD  : wearRate=0.63/tour → seuil 48 atteint en ~76 tours réels
   const base = tireCompound === 'SOFT' ? 18 : tireCompound === 'HARD' ? 48 : 32;
-  // Voiture : conservationPneus 70 = neutre. +/- 0.22 tours par point → max ±6.6 tours
+  // Voiture : conservationPneus 70 = neutre. +/- 0.22 par point → max ±6.6 d'usure
   const carBonus   = (team.conservationPneus  - 70) * 0.22;
-  // Pilote : gestionPneus 50 = neutre. +/- 0.20 tours par point → max ±10 tours (gros différentiel)
+  // Pilote : gestionPneus 50 = neutre. +/- 0.20 par point → max ±10 d'usure
   const pilotBonus = (pilot.gestionPneus      - 50) * 0.20;
   return Math.max(8, base + carBonus + pilotBonus);
 }
@@ -2127,7 +2128,6 @@ function overtakeDescription(attacker, defender, gpStyle) {
   if (drs)                     return pick(straights);
   if (freinage)                return pick(braking);
   if (gpStyle === 'technique') return pick(corner);
-  if (gpStyle === 'endurance') return pick(undercut);
   return pick([...straights, ...braking, ...corner]);
 }
 
@@ -8218,9 +8218,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   // PRE-RACE — Grille de départ (format F1 : P1 gauche · P2 droite · P3 gauche · P4 droite...)
   // ══════════════════════════════════════════════════════════
   const makeGridLine = (d, pos) => {
-    const ov   = overallRating(d.pilot);
-    const tier = ratingTier(ov);
-    return `\`P${String(pos).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** ${tier.badge}${ov} ${TIRE[d.tireCompound] ? `${TIRE[d.tireCompound].emoji} ${TIRE[d.tireCompound].code}` : '?'}`;
+    return `\`P${String(pos).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** ${TIRE[d.tireCompound] ? `${TIRE[d.tireCompound].emoji} ${TIRE[d.tireCompound].code}` : '?'}`;
   };
   // Positions impaires → côté gauche (P1, P3, P5...), positions paires → côté droit (P2, P4, P6...)
   const oddLines  = drivers.filter((_, i) => i % 2 === 0).map((d, i) => makeGridLine(d, i * 2 + 1));
@@ -8738,7 +8736,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
 
         driver.totalTime += lt;
-        driver.tireWear  += 1;
+        // Usure normalisée : 1 tour = 1 unité d'usure relative au compound
+        // SOFT  (deg 0.0028) → +1.75/tour → cliff à tireWear~18 en ~10 tours réels
+        // MEDIUM(deg 0.0016) → +1.00/tour → cliff à tireWear~32 en ~32 tours réels
+        // HARD  (deg 0.0010) → +0.625/tour → cliff à tireWear~48 en ~77 tours réels
+        // Ratio basé sur MEDIUM comme référence (deg 0.0016 = 1.0)
+        const wearRate = (TIRE[driver.tireCompound]?.deg || 0.0016) / 0.0016;
+        driver.tireWear  += wearRate;
         driver.tireAge   += 1;
         if (lt < driver.fastestLap) driver.fastestLap = lt;
         if (lt < fastestLapMs) {
@@ -9331,7 +9335,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       const gapStr = fmtGap(gap, { prefix: false });
       events.push({ priority: 6, text: ocWorked
         ? `✅ **T${lap} — L'OVERCUT A FONCTIONNÉ !** ${ocDriver.team.emoji}**${ocDriver.pilot.name}** est devant ${rival.team.emoji}**${rival.pilot.name}** — **${gapStr}** d'avance. Rester dehors était le bon choix.`
-        : `❌ **T${lap} — L'OVERCUT N'A PAS PAYÉ.** ${rival.team.emoji}**${rival.pilot.name}** ressort devant avec des pneus frais — ${ocDriver.team.emoji}**${ocDriver.pilot.name}** a perdu le pari stratégique (${gapStr} derrière).`,
+        : `❌ **T${lap} — L'OVERCUT N'A PAS PAYÉ.** ${rival.team.emoji}**${rival.pilot.name}** tient le rythme sur ses vieux pneus — ${ocDriver.team.emoji}**${ocDriver.pilot.name}** a perdu le pari stratégique (${gapStr} derrière).`,
       });
       overcutTracker.delete(ocId);
     }
@@ -9639,13 +9643,14 @@ const exitNeighborStr = neighborAhead && neighborBehind
       const td = TIRE[d.tireCompound];
       if (!td) return '❓';
       const worn   = d.tireWear || 0;
-      const deg    = td.deg || 0.0016;
-      const cliff  = deg > 0 ? Math.round(0.06 / deg) : 38; // tours avant cliff
+      // Utilise le même seuil que shouldPit/warnThreshold pour cohérence visuelle
+      const cliff  = wornThresholdFor(d.tireCompound, d.team, d.pilot);
       const wup    = (d.warmupLapsLeft || 0) > 0;
       const pct    = Math.min(1, worn / cliff);
       const filled = Math.round(pct * 5);
       const bar    = '▰'.repeat(filled) + '▱'.repeat(5 - filled);
-      const warn   = pct >= 1.0 ? '⚠️' : '';
+      // ⚠️ s'allume exactement quand shouldPit considère les pneus "worn" (seuil urgent)
+      const warn   = worn >= cliff * 1.25 ? '🔥' : pct >= 1.0 ? '⚠️' : '';
       const warmup = wup ? '🌡️' : '';
       return `${td.emoji} ${warmup || td.code} \`${bar}\`${warn}`;
     };
@@ -10288,6 +10293,12 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
     }
   }
 
+  // Ne pas mettre à jour le statut si aucun résultat (course annulée/abortée)
+  // La course reste en "quali_done" pour pouvoir être relancée
+  if (raceResults.length === 0) {
+    console.log(`[applyRaceResults] ⏭️ Aucun résultat — statut non modifié (course annulée).`);
+    return;
+  }
   await Race.findByIdAndUpdate(raceId, { status: 'done', raceResults });
 
   // ── Mise à jour de la forme récente de chaque pilote ──────
@@ -14675,9 +14686,10 @@ async function handleInteraction(interaction) {
     if (!races || races.size === 0)
       return interaction.reply({ content: '❌ Aucune course en cours.', ephemeral: true });
     // Aborter toutes les courses actives (normalement 1 seule)
+    // Le statut reste "quali_done" en DB — la course peut être relancée avec /admin_force_race
     let count = 0;
     for (const [, r] of races) { r.abort(); count++; }
-    return interaction.reply({ content: `🛑 **Arrêt envoyé** — ${count} course(s) interrompue(s). Les résultats ne seront pas comptabilisés.`, ephemeral: false });
+    return interaction.reply({ content: `🛑 **Arrêt envoyé** — ${count} course(s) interrompue(s). Les résultats ne seront pas comptabilisés.\n> ℹ️ Le GP reste en statut \`quali_done\` — relançable avec \`/admin_force_race\`.`, ephemeral: false });
   }
 
   if (commandName === 'admin_scheduler_pause') {
