@@ -272,6 +272,7 @@ const PilotGPRecordSchema = new mongoose.Schema({
   coins        : { type: Number, default: 0 },
   fastestLap   : { type: Boolean, default: false },
   driverOfTheDay: { type: Boolean, default: false },
+  isPole       : { type: Boolean, default: false },   // ← P1 qualifications
   raceDate     : { type: Date, default: Date.now },
 });
 PilotGPRecordSchema.index({ pilotId: 1, raceDate: -1 });
@@ -5327,6 +5328,85 @@ function genTitleScenariosArticles(allStandings, pilotMap, teamMap, gpsLeft, sea
     });
   }
   return articles;
+}
+
+// ── Génère 1-2 articles "éliminé mathématiquement" ───────
+// Déclenché entre quali et course si des pilotes ne peuvent plus
+// mathématiquement remporter le titre.
+function genEliminationArticles(allStandings, pilotMap, teamMap, gpsLeft, seasonYear) {
+  if (!gpsLeft || gpsLeft <= 0) return [];
+  const MAX_PTS_PER_GP = 26;
+  const maxRemaining   = gpsLeft * MAX_PTS_PER_GP;
+  const sorted = [...allStandings].sort((a, b) => b.points - a.points);
+  if (sorted.length < 2) return [];
+  const leaderPts = sorted[0].points;
+  const lPilot    = pilotMap.get(String(sorted[0].pilotId));
+  const lTeam     = lPilot?.teamId ? teamMap.get(String(lPilot.teamId)) : null;
+  if (!lPilot || !lTeam) return [];
+
+  // Pilotes mathématiquement éliminés (ne peuvent plus dépasser le leader)
+  const eliminated = sorted.slice(1).filter(s => (leaderPts - s.points) > maxRemaining);
+  if (!eliminated.length) return [];
+
+  const articles = [];
+
+  // Article groupe si plusieurs éliminés
+  const elimNames = eliminated.slice(0, 4).map(s => {
+    const p = pilotMap.get(String(s.pilotId));
+    const t = p?.teamId ? teamMap.get(String(p.teamId)) : null;
+    return p ? `${t?.emoji || ''}${p.name} (${s.points} pts)` : null;
+  }).filter(Boolean);
+
+  if (elimNames.length) {
+    const singlePilot = eliminated.length === 1;
+    const ePilot = pilotMap.get(String(eliminated[0].pilotId));
+    const eTeam  = ePilot?.teamId ? teamMap.get(String(ePilot.teamId)) : null;
+
+    const headlinePool = singlePilot ? [
+      `❌ ${eTeam?.emoji || ''}${ePilot?.name} éliminé du championnat — le calcul est sans appel`,
+      `Titre 2024 : ${ePilot?.name} ne peut plus mathématiquement rattraper ${lPilot.name}`,
+      `C'est officiel : ${eTeam?.emoji || ''}${ePilot?.name} dit adieu au titre — ${gpsLeft} GP restants, trop peu`,
+    ] : [
+      `❌ Plusieurs pilotes éliminés mathématiquement — le titre se resserre`,
+      `Le championnat se joue désormais à ${sorted.length - eliminated.length} — les autres sont hors course`,
+      `Clarté au championnat : ${eliminated.length} pilotes mathématiquement éliminés à ${gpsLeft} GPs de la fin`,
+    ];
+
+    // Tableau de classement avec croix pour les éliminés
+    const classementLines = sorted.slice(0, Math.min(sorted.length, 8)).map((s, i) => {
+      const p = pilotMap.get(String(s.pilotId));
+      const t = p?.teamId ? teamMap.get(String(p.teamId)) : null;
+      const isOut = (leaderPts - s.points) > maxRemaining;
+      const gap   = i === 0 ? 'LEADER' : `-${leaderPts - s.points} pts`;
+      const mark  = isOut ? '❌' : i === 0 ? '👑' : '✅';
+      return `${mark} **P${i+1}** ${t?.emoji||''}${p?.name||'?'} — ${s.points} pts *(${gap})*`;
+    }).join('\n');
+
+    const bodyPool = [
+      `**Classement championship à ${gpsLeft} GP${gpsLeft > 1 ? 's' : ''} de la fin** — il reste ${maxRemaining} points à distribuer.\n\n` +
+      classementLines +
+      `\n\n*Les ❌ sont mathématiquement hors course pour le titre.*`,
+
+      singlePilot
+        ? `**${eTeam?.emoji || ''}${ePilot?.name}** accuse **${leaderPts - eliminated[0].points} points de retard** sur ${lTeam.emoji}${lPilot.name}. ` +
+          `Avec seulement ${maxRemaining} points encore disponibles, la saison est terminée pour lui sur le plan du championnat.\n\n` +
+          classementLines
+        : `Avec ${maxRemaining} points encore en jeu, voici qui reste en course pour le titre — et qui peut officiellement tirer un trait sur cette saison.\n\n` +
+          classementLines,
+    ];
+
+    articles.push({
+      type: 'elimination_mathematique',
+      source: 'f1_weekly',
+      headline: pick(headlinePool),
+      body: pick(bodyPool),
+      pilotIds: [lPilot._id, ...(ePilot ? [ePilot._id] : [])],
+      teamIds:  [lTeam._id,  ...(eTeam  ? [eTeam._id]  : [])],
+      seasonYear,
+    });
+  }
+
+  return articles.slice(0, 1); // max 1 article d'élimination par session
 }
 
 // ══════════════════════════════════════════════════════════
@@ -12205,6 +12285,7 @@ async function handleInteraction(interaction) {
       const dnfsTotal  = gpRecs.filter(r => r.dnf).length;
       const flaps      = gpRecs.filter(r => r.fastestLap).length;
       const dotdTotal  = gpRecs.filter(r => r.driverOfTheDay).length;
+      const polesTotal = gpRecs.filter(r => r.isPole).length;
       const avgPos     = finished.length ? (finished.reduce((s, r) => s + r.finishPos, 0) / finished.length).toFixed(1) : '—';
       const best       = finished.sort((a, b) => a.finishPos - b.finishPos)[0];
 
@@ -12217,10 +12298,13 @@ async function handleInteraction(interaction) {
         return '▪️';
       }).join('');
 
-      const dotdStr  = dotdTotal > 0 ? ` · 🌟 **${dotdTotal}** DOTD` : '';
+      // Pole & DOTD toujours affichés (même à 0 pour la clarté)
+      const poleStr  = `🏁 **${polesTotal}** Pole${polesTotal > 1 ? 's' : ''}`;
+      const dotdStr  = `🌟 **${dotdTotal}** DOTD`;
       const perfLine =
-        `🥇 **${wins}V** · 🏆 **${podiums}P** · ❌ **${dnfsTotal}** DNF · ⚡ **${flaps}** FL${dotdStr} · moy. **P${avgPos}**` +
-        (best ? `\n⭐ Meilleur : **P${best.finishPos}** ${best.circuitEmoji} ${best.circuit} *(S${best.seasonYear})*` : '');
+        `🥇 **${wins}V** · 🏆 **${podiums}P** · ${poleStr} · ⚡ **${flaps}** FL · ${dotdStr}\n` +
+        `❌ **${dnfsTotal}** DNF · moy. **P${avgPos}**` +
+        (best ? `\n⭐ Meilleur résultat : **P${best.finishPos}** ${best.circuitEmoji} ${best.circuit} *(S${best.seasonYear})*` : '');
 
       embed.addFields({ name: `📊 Carrière — ${totalGPs} GP(s)  ·  Forme : ${formIcons}`, value: perfLine });
     }
@@ -13802,6 +13886,7 @@ async function handleInteraction(interaction) {
 
   // ── /season_recap ────────────────────────────────────────
   if (commandName === 'season_recap') {
+    try {
     const season = await getActiveSeason();
     if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
 
@@ -13820,6 +13905,19 @@ async function handleInteraction(interaction) {
     const progress = totalRaces > 0 ? doneRaces / totalRaces : 0;
     const progressBar = '█'.repeat(Math.round(progress * 10)) + '░'.repeat(10 - Math.round(progress * 10));
     const gpLeft   = totalRaces - doneRaces;
+    const MAX_PTS_PER_GP = 26;
+    const maxRemaining = gpLeft * MAX_PTS_PER_GP;
+    const leaderPts = standings[0]?.points || 0;
+
+    // ── Récupérer poles et DOTD par pilote ───────────────
+    const allGpRecs = await PilotGPRecord.find({ seasonId: season._id }).lean();
+    const polesMap  = new Map(); // pilotId → count poles
+    const dotdMap   = new Map(); // pilotId → count DOTD
+    for (const r of allGpRecs) {
+      const key = String(r.pilotId);
+      if (r.isPole)        polesMap.set(key, (polesMap.get(key) || 0) + 1);
+      if (r.driverOfTheDay) dotdMap.set(key, (dotdMap.get(key) || 0) + 1);
+    }
 
     // ── Top 5 pilotes ─────────────────────────────────────
     const top5Lines = standings.slice(0, 5).map((s, i) => {
@@ -13829,7 +13927,15 @@ async function handleInteraction(interaction) {
       const streak = p?.streakType && p.streakCount >= 2
         ? ` · ${{ wins:'🔥', podiums:'⬆️', dnfs:'💀', points:'📈' }[p.streakType] || ''} ×${p.streakCount}`
         : '';
-      return `\`P${i+1}\` ${t?.emoji||''}**${p?.name||'?'}** — **${s.points} pts** · ${s.wins}V ${s.podiums}P ${s.dnfs}D${streak} ${repT}`;
+      const pKey = String(s.pilotId);
+      const poles = polesMap.get(pKey) || 0;
+      const dotd  = dotdMap.get(pKey)  || 0;
+      const extras = [
+        poles > 0 ? `🏁${poles}PP` : null,
+        dotd  > 0 ? `🌟${dotd}DOTD` : null,
+      ].filter(Boolean).join(' ');
+      const eliminated = (leaderPts - s.points) > maxRemaining ? ' ~~❌~~' : '';
+      return `\`P${i+1}\` ${t?.emoji||''}**${p?.name||'?'}**${eliminated} — **${s.points} pts** · ${s.wins}V ${s.podiums}P ${s.dnfs}D${extras ? ' · '+extras : ''}${streak} ${repT}`;
     }).join('\n');
 
     // ── Top 3 constructeurs ───────────────────────────────
@@ -13910,6 +14016,10 @@ async function handleInteraction(interaction) {
       .setFooter({ text: `Saison ${season.year} · Données après ${doneRaces} GP${doneRaces > 1 ? 's' : ''}` });
 
     return interaction.editReply({ embeds: [embed] });
+    } catch(e) {
+      console.error('[season_recap] Erreur :', e.message, e.stack);
+      return interaction.editReply({ content: `❌ Erreur lors du chargement du bilan : ${e.message}`, ephemeral: true });
+    }
   }
 
   // ── /news ─────────────────────────────────────────────────
@@ -13934,6 +14044,8 @@ async function handleInteraction(interaction) {
       dev_vague     : '⚙️',
       scandal       : '💣',
       title_fight   : '🏆',
+      title_scenario: '🏁',
+      elimination_mathematique: '❌',
     };
 
     const lines = articles.map(a => {
@@ -16018,6 +16130,23 @@ async function runQualifying(override, gpIndex = null) {
     status: 'quali_done',
   });
 
+  // ── Sauvegarder la pole position dans le GPRecord ──────────
+  try {
+    const polePilotId = grid[0]?.pilotId;
+    if (polePilotId) {
+      await PilotGPRecord.findOneAndUpdate(
+        { pilotId: polePilotId, raceId: race._id },
+        { $set: { isPole: true } },
+        { upsert: true, setOnInsert: {
+          pilotId: polePilotId, raceId: race._id,
+          seasonId: season._id, seasonYear: season.year,
+          circuit: race.circuit, circuitEmoji: race.emoji || '🏁',
+          gpStyle: race.gpStyle || 'mixte', finishPos: 0, raceDate: new Date(),
+        }}
+      );
+    }
+  } catch(e) { console.error('[isPole save]', e.message); }
+
   if (!channel) return;
 
   const styleEmojis   = { urbain:'🏙️', rapide:'💨', technique:'⚙️', mixte:'🔀', endurance:'🔋' };
@@ -16361,6 +16490,24 @@ async function runQualifying(override, gpIndex = null) {
     };
     const qualiArticles = genPostQualiArticles(qualiDataForNews, qualiNewsAllPilots, qualiNewsAllTeams,
       qualiNewsStandings, race, season, qualiNewsConstr);
+
+    // ── Scénarios titre entre quali et course ────────────
+    // Déclenché si ≤ 8 GPs restants (élargi vs post-race qui était ≤5)
+    const qualiNewsGpsLeft = qualiNewsTotalRaces - qualiNewsProgress;
+    const qualiPilotMap = new Map(qualiNewsAllPilots.map(p => [String(p._id), p]));
+    const qualiTeamMap  = new Map(qualiNewsAllTeams.map(t => [String(t._id), t]));
+    if (qualiNewsGpsLeft <= 8 && qualiNewsGpsLeft > 0 && Math.random() < 0.75) {
+      try {
+        const titleScenarios = genTitleScenariosArticles(qualiNewsStandings, qualiPilotMap, qualiTeamMap, qualiNewsGpsLeft, season.year);
+        if (titleScenarios.length > 0) qualiArticles.push(titleScenarios[0]);
+      } catch(e) { console.error('[post-quali title_scenarios]', e.message); }
+    }
+    // ── Articles élimination mathématique ─────────────────
+    try {
+      const elimArticles = genEliminationArticles(qualiNewsStandings, qualiPilotMap, qualiTeamMap, qualiNewsGpsLeft, season.year);
+      for (const a of elimArticles) qualiArticles.push(a);
+    } catch(e) { console.error('[post-quali elimination]', e.message); }
+
     // Pause courte pour laisser le classement final s'afficher avant les articles
     await new Promise(r => setTimeout(r, 3000));
     for (const article of qualiArticles) {
