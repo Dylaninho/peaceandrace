@@ -16293,7 +16293,9 @@ async function handleInteraction(interaction) {
 // ============================================================
 
 async function getRaceChannel(override) {
-  if (override) return override;
+  // Si override est un objet Discord channel (envoyé par les anciennes commandes), on le retourne directement.
+  // Si override est un booléen true, on fetch quand même le vrai channel de course.
+  if (override && typeof override === 'object') return override;
   try { return await client.channels.fetch(RACE_CHANNEL); } catch(e) { return null; }
 }
 
