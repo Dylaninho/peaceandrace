@@ -5266,81 +5266,186 @@ function genDriverInterviewArticle(pilot, team, standing, contract, teammate, te
 const F1_PTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
 function ptsByPos(pos) { return F1_PTS[pos - 1] || 0; }
 
-// Calcule la liste de TOUS les combos (challenger_pos, leader_pos) pour 1 GP
-// qui permettraient au challenger de gagner DU TERRAIN (gap réduit).
-// Retourne {cPos, lPos, gain, cPts, lPts} trié par gain desc.
-function titleCombosPerGP() {
-  const combos = [];
-  for (let cPos = 1; cPos <= 20; cPos++) {
-    for (let lPos = 1; lPos <= 20; lPos++) {
-      if (cPos === lPos) continue;
-      const cPts = ptsByPos(cPos);
-      const lPts = ptsByPos(lPos);
-      const gain = cPts - lPts;
-      if (gain > 0) combos.push({ cPos, lPos, gain, cPts, lPts });
-    }
+// ── Scénarios UNIFORMES : même résultat à chaque GP restant ──────────────────
+const UNIFORM_TEMPLATES = [
+  { cPos: 1, lPos: 10, label: 'Victoire + leader hors top 5',  tag: '💥 Idéal'        },
+  { cPos: 1, lPos: 5,  label: 'Victoire + leader P5',           tag: '🔥 Optimiste'    },
+  { cPos: 1, lPos: 3,  label: 'Victoire + leader podium',       tag: '⚡ Classique'    },
+  { cPos: 2, lPos: 5,  label: 'P2 + leader P5',                 tag: '📉 Conservateur' },
+  { cPos: 1, lPos: 2,  label: 'Victoire + leader P2',           tag: '📊 Serré'        },
+  { cPos: 2, lPos: 3,  label: 'P2 + leader podium',             tag: '🔩 Difficile'    },
+];
+
+// ── Scénarios MIXTES : résultats différents GP par GP ───────────────────────
+// Chaque pattern définit une séquence {cPos, lPos} par GP.
+// Pour gpsLeft < pattern.length : on tronque. Pour gpsLeft > : on répète le dernier bloc.
+// Nommage : le label décrit la "narration" de la saison.
+const MIXED_TEMPLATES = [
+  {
+    tag: '🚀 Démarrage canon',
+    label: 'Début de feu puis consolidation',
+    // Exploser sur les premiers GPs, gérer ensuite
+    pattern: [
+      { cPos: 1, lPos: 10 }, // GP1 : victoire + leader hors top5
+      { cPos: 1, lPos: 5  }, // GP2 : victoire + leader P5
+      { cPos: 1, lPos: 3  }, // GP3 : victoire + leader podium
+      { cPos: 2, lPos: 3  }, // GP4 : P2 + leader podium
+      { cPos: 3, lPos: 3  }, // GP5 : P3 + leader P3 (neutre mais géré)
+      { cPos: 2, lPos: 4  }, // GP6+
+    ],
+  },
+  {
+    tag: '📈 Régularité + 1 exploit',
+    label: '1 victoire décisive, reste top 3 régulier',
+    // Podiums réguliers avec un seul grand coup
+    pattern: [
+      { cPos: 2, lPos: 5  }, // GP1 : P2 + leader P5
+      { cPos: 1, lPos: 10 }, // GP2 : victoire + leader hors top5 (le coup de maître)
+      { cPos: 2, lPos: 4  }, // GP3 : P2 + leader P4
+      { cPos: 3, lPos: 5  }, // GP4 : P3 + leader P5
+      { cPos: 2, lPos: 4  }, // GP5
+      { cPos: 3, lPos: 5  }, // GP6+
+    ],
+  },
+  {
+    tag: '🎲 Alternance chaud/froid',
+    label: 'Un GP sur deux parfait, sinon équilibre',
+    // Scénario réaliste : un weekend sur deux vraiment bien
+    pattern: [
+      { cPos: 1, lPos: 5  }, // GP impair : grosse perf
+      { cPos: 3, lPos: 3  }, // GP pair   : neutre (0 gain)
+      { cPos: 1, lPos: 5  },
+      { cPos: 3, lPos: 3  },
+      { cPos: 1, lPos: 5  },
+      { cPos: 3, lPos: 3  },
+    ],
+  },
+  {
+    tag: '⏩ Final rush',
+    label: 'Début conservateur, sprint final',
+    // Lent à démarrer mais explose sur la fin
+    pattern: [
+      { cPos: 3, lPos: 4  }, // GP1 : modeste
+      { cPos: 2, lPos: 4  }, // GP2 : mieux
+      { cPos: 1, lPos: 5  }, // GP3 : victoire + leader P5
+      { cPos: 1, lPos: 3  }, // GP4 : victoire + leader podium
+      { cPos: 1, lPos: 10 }, // GP5 : coup de maître
+      { cPos: 1, lPos: 5  }, // GP6+
+    ],
+  },
+  {
+    tag: '🏆 Double exploit + régularité',
+    label: '2 weekends parfaits encadrés de podiums',
+    pattern: [
+      { cPos: 1, lPos: 10 }, // exploit 1
+      { cPos: 2, lPos: 4  }, // intermédiaire
+      { cPos: 1, lPos: 10 }, // exploit 2
+      { cPos: 3, lPos: 4  }, // gestion
+      { cPos: 2, lPos: 5  }, // bonne fin
+      { cPos: 3, lPos: 5  },
+    ],
+  },
+];
+
+// Calcule le gain total d'un pattern mixte adapté à gpsLeft
+function computeMixedGain(pattern, gpsLeft) {
+  const gpResults = [];
+  for (let i = 0; i < gpsLeft; i++) {
+    // Prendre l'élément du pattern ou répéter le dernier
+    const entry = pattern[Math.min(i, pattern.length - 1)];
+    gpResults.push(entry);
   }
-  return combos.sort((a, b) => b.gain - a.gain || a.cPos - b.cPos);
+  const totalGain = gpResults.reduce((sum, e) => sum + ptsByPos(e.cPos) - ptsByPos(e.lPos), 0);
+  return { gpResults, totalGain };
 }
 
-// Pour un déficit donné et N GPs restants, génère des scénarios RÉALISTES :
-// - "optimiste"  : challenger P1 + leader P5 (gain 15pts/GP)
-// - "classique"  : challenger P1 + leader P3 (gain 10pts/GP)
-// - "réaliste"   : challenger P2 + leader P5 (gain 6pts/GP)
-// - "serré"      : challenger P1 + leader P2 (gain 7pts/GP)
-// Chaque scénario indique combien de GPs sur les N restants, et le gap final.
+// Construit la liste de tous les scénarios (uniformes + mixtes) pour un déficit donné
 function buildRealisticScenarios(deficit, gpsLeft) {
   if (deficit <= 0 || gpsLeft <= 0) return [];
+  const all = [];
 
-  // Scénarios modèles (cPos, lPos, label)
-  const templates = [
-    { cPos: 1, lPos: 5,  label: 'Victoire + leader P5',   tag: '🔥 Optimiste'     },
-    { cPos: 1, lPos: 3,  label: 'Victoire + leader podium', tag: '⚡ Classique'   },
-    { cPos: 1, lPos: 2,  label: 'Victoire + leader P2',    tag: '📊 Serré'        },
-    { cPos: 2, lPos: 5,  label: 'P2 + leader P5',         tag: '📉 Conservateur'  },
-    { cPos: 1, lPos: 10, label: 'Victoire + leader hors top 5', tag: '💥 Idéal'   },
-  ];
-
-  const scenarios = [];
-  for (const t of templates) {
-    const gainPerGP = ptsByPos(t.cPos) - ptsByPos(t.lPos);
+  // ── Uniformes ────────────────────────────────────────────
+  for (const t of UNIFORM_TEMPLATES) {
+    const cPts      = ptsByPos(t.cPos);
+    const lPts      = ptsByPos(t.lPos);
+    const gainPerGP = cPts - lPts;
     if (gainPerGP <= 0) continue;
-    // Combien de GPs à ce rythme pour combler le déficit ?
-    const gpsNeeded = Math.ceil(deficit / gainPerGP);
-    const achievable = gpsNeeded <= gpsLeft;
-    // Résidu : si on applique ce scénario sur TOUS les GPs restants
-    const gapAfterAll = deficit - gainPerGP * gpsLeft;
-    const cPts = ptsByPos(t.cPos);
-    const lPts = ptsByPos(t.lPos);
-    scenarios.push({
-      tag: t.tag,
-      label: t.label,
-      cPos: t.cPos,
-      lPos: t.lPos,
-      cPts,
-      lPts,
-      gainPerGP,
-      gpsNeeded,
-      gpsLeft,
-      achievable,
-      gapAfterAll,   // négatif = challenger passe devant
+    const totalGain   = gainPerGP * gpsLeft;
+    const gapAfterAll = deficit - totalGain;
+    const titleWon    = gapAfterAll < 0;
+    const gpToLead    = Math.ceil(deficit / gainPerGP);
+    all.push({
+      kind: 'uniform', ...t,
+      cPts, lPts, gainPerGP, totalGain,
+      gapAfterAll, titleWon, gpToLead, gpsLeft,
     });
   }
-  return scenarios.filter(s => s.gainPerGP > 0);
+
+  // ── Mixtes ───────────────────────────────────────────────
+  for (const t of MIXED_TEMPLATES) {
+    const { gpResults, totalGain } = computeMixedGain(t.pattern, gpsLeft);
+    const gapAfterAll = deficit - totalGain;
+    const titleWon    = gapAfterAll < 0;
+    // Calculer quand il prend la tête (cumul par GP)
+    let cumul = 0, gpToLead = null;
+    for (let i = 0; i < gpResults.length; i++) {
+      cumul += ptsByPos(gpResults[i].cPos) - ptsByPos(gpResults[i].lPos);
+      if (gpToLead === null && cumul >= deficit) gpToLead = i + 1;
+    }
+    all.push({
+      kind: 'mixed', ...t,
+      gpResults, totalGain,
+      gapAfterAll, titleWon, gpToLead: gpToLead ?? null, gpsLeft,
+    });
+  }
+
+  // Trier : titre d'abord, puis par gain total desc
+  return all.sort((a, b) => {
+    if (a.titleWon && !b.titleWon) return -1;
+    if (!a.titleWon && b.titleWon) return 1;
+    return b.totalGain - a.totalGain;
+  });
 }
 
-// Formatte un scénario en ligne lisible Discord
-function formatScenario(s, challengerName, leaderName, deficit) {
-  const sign   = s.gapAfterAll < 0 ? `**+${Math.abs(s.gapAfterAll)} pts d'avance**` : s.gapAfterAll === 0 ? 'à égalité' : `-${s.gapAfterAll} pts restants`;
-  const status = s.achievable
-    ? `✅ **${s.gpsNeeded} GP${s.gpsNeeded > 1 ? 's' : ''}** à ce rythme suffisent (sur ${s.gpsLeft})`
-    : `❌ Insuffisant — comblerait seulement **${s.gainPerGP * s.gpsLeft} pts** sur ${deficit} nécessaires`;
+// Formatte un scénario uniforme
+function formatUniformLine(s, cName, lName) {
+  const rythme = `*à chaque GP* : ${cName} **P${s.cPos}** (+${s.cPts}pts) · ${lName} **P${s.lPos}** (+${s.lPts}pts) = **+${s.gainPerGP}pts/GP**`;
+  if (s.titleWon) {
+    const avance = Math.abs(s.gapAfterAll);
+    const info   = s.gpToLead <= s.gpsLeft ? ` *(dépasse au GP ${s.gpToLead}/${s.gpsLeft})*` : '';
+    return `${s.tag} — *${s.label}*\n→ ${rythme}\n→ ✅ **Titre remporté** — finit **+${avance}pts**${info}`;
+  }
+  return `${s.tag} — *${s.label}*\n→ ${rythme}\n→ ❌ Comble **${s.totalGain}pts** — retard résiduel **${s.gapAfterAll}pts**`;
+}
+
+// Formatte un scénario mixte avec le détail GP par GP
+function formatMixedLine(s, cName, lName) {
+  const gpDetail = s.gpResults.map((e, i) => {
+    const gain = ptsByPos(e.cPos) - ptsByPos(e.lPos);
+    const sign  = gain > 0 ? `+${gain}` : gain < 0 ? `${gain}` : '±0';
+    return `GP${i+1}: ${cName} P${e.cPos}//${lName} P${e.lPos} (${sign}pts)`;
+  }).join(' · ');
+  const leadInfo = s.gpToLead ? ` *(dépasse au GP ${s.gpToLead}/${s.gpsLeft})*` : '';
+  if (s.titleWon) {
+    return (
+      `${s.tag} — *${s.label}*\n` +
+      `→ ${gpDetail}\n` +
+      `→ Total : **+${s.totalGain}pts** · ✅ **Titre remporté** — finit **+${Math.abs(s.gapAfterAll)}pts**${leadInfo}`
+    );
+  }
   return (
     `${s.tag} — *${s.label}*\n` +
-    `${challengerName} **+${s.cPts}pts** (P${s.cPos}) · ${leaderName} **+${s.lPts}pts** (P${s.lPos}) → **+${s.gainPerGP}pts/GP**\n` +
-    `${status} → après ${s.gpsLeft} GPs : ${sign}`
+    `→ ${gpDetail}\n` +
+    `→ Total : **+${s.totalGain}pts** · ❌ Comble **${s.totalGain}pts** — retard résiduel **${s.gapAfterAll}pts**`
   );
 }
+
+// Dispatcher
+function formatScenarioLine(s, cName, lName) {
+  return s.kind === 'mixed' ? formatMixedLine(s, cName, lName) : formatUniformLine(s, cName, lName);
+}
+
+
 
 // Génère jusqu'à 2 articles "peut encore gagner le titre si..." avec scénarios réalistes
 function genTitleScenariosArticles(allStandings, pilotMap, teamMap, gpsLeft, seasonYear) {
@@ -5366,18 +5471,19 @@ function genTitleScenariosArticles(allStandings, pilotMap, teamMap, gpsLeft, sea
 
     const deficit   = leaderPts - challenger.points;
     const scenarios = buildRealisticScenarios(deficit, gpsLeft);
-    const best      = scenarios.find(s => s.achievable);
-    const optimist  = scenarios[0]; // gain max par GP
+    const best      = scenarios.find(s => s.titleWon);   // ← titre réellement remporté
 
-    // Ligne de résumé du meilleur scénario réaliste
+    // Ligne de résumé du meilleur scénario qui permet le titre
     const bestLine = best
-      ? `*Scénario le plus accessible :* ${best.label} (${best.cPts} vs ${best.lPts} pts/GP = **+${best.gainPerGP} pts/GP**) — **${best.gpsNeeded} GP${best.gpsNeeded > 1 ? 's' : ''}** suffiraient.`
-      : `*Aucun scénario réaliste ne permet le retournement en ${gpsLeft} GP${gpsLeft > 1 ? 's' : ''} — mais mathématiquement vivant.*`;
+      ? `*Scénario le plus accessible pour remporter le titre :* ${best.label} (+${best.gainPerGP}pts/GP sur tous les GPs) → finit avec **+${Math.abs(best.gapAfterAll)} pts d'avance**.`
+      : `*Aucun scénario ne permet le titre en ${gpsLeft} GP${gpsLeft > 1 ? 's' : ''} — mais mathématiquement vivant.*`;
 
-    // Tableau compact des 3 meilleurs scénarios
+    // Tableau compact des 3 premiers scénarios
     const scenarioBlock = scenarios.slice(0, 3).map(s => {
-      const ach = s.achievable ? `✅ ${s.gpsNeeded}GP` : `❌ -${s.gainPerGP * gpsLeft}pts seulement`;
-      return `**${s.tag}** ${s.label} → +${s.gainPerGP}pts/GP (${ach})`;
+      const res = s.titleWon
+        ? `✅ Titre (+${Math.abs(s.gapAfterAll)}pts d'avance finale)`
+        : `❌ Insuffisant (retard résiduel ${s.gapAfterAll}pts)`;
+      return `**${s.tag}** ${s.label} → +${s.gainPerGP}pts/GP → ${res}`;
     }).join('\n');
 
     const headlinePool = [
@@ -15996,10 +16102,10 @@ async function handleInteraction(interaction) {
           }
         }
 
-        // Scénarios inversés : risque que P2 revienne
+        // Scénarios inversés : risque que P2 revienne (titleWon = P2 reprend le titre)
         const dangerScenarios = buildRealisticScenarios(gapP2, gpsLeft);
-        const dangerLines = dangerScenarios.filter(s => s.achievable).slice(0, 3).map(s =>
-          `⚠️ ${s.tag} *${s.label}* — ${p2P?.name||'P2'} gagne **${s.gainPerGP}pts/GP** sur toi → peut revenir en **${s.gpsNeeded} GP${s.gpsNeeded > 1 ? 's' : ''}**`
+        const dangerLines = dangerScenarios.filter(s => s.titleWon).slice(0, 3).map(s =>
+          `⚠️ ${s.tag} *${s.label}* — ${p2P?.name||'P2'} gagne **+${s.gainPerGP}pts/GP** sur toi sur tous les GPs → reprend le titre avec **+${Math.abs(s.gapAfterAll)} pts d'avance**`
         );
 
         const desc =
@@ -16024,6 +16130,10 @@ async function handleInteraction(interaction) {
       // ── CAS 3 : Challenger — scénarios réalistes chiffrés ─
       const scenarios = buildRealisticScenarios(deficit, gpsLeft);
 
+      // Séparer les deux types
+      const uniformScens = scenarios.filter(s => s.kind === 'uniform');
+      const mixedScens   = scenarios.filter(s => s.kind === 'mixed');
+
       // Classement annoté
       const classLines = standings.slice(0, Math.min(8, standings.length)).map((s, i) => {
         const p   = pilotMap.get(String(s.pilotId));
@@ -16036,40 +16146,50 @@ async function handleInteraction(interaction) {
         return `${mark}${me ? ' **→**' : ''} P${i+1} ${t?.emoji||''}${p?.name||'?'} ${f} — ${s.points}pts *(${gap})*`;
       });
 
-      // Bloc scénarios (max 4, avec un résumé actionnable)
-      const achievable = scenarios.filter(s => s.achievable);
-      const impossible = scenarios.filter(s => !s.achievable);
-      const scenLines  = [];
+      // Résumé actionnable
+      const bestCase = scenarios.find(s => s.titleWon);
+      const bestLabel = bestCase
+        ? bestCase.kind === 'uniform'
+          ? `*${bestCase.label}* (même résultat à chaque GP, +${bestCase.totalGain}pts au total)`
+          : `*${bestCase.label}* (scénario mixte, +${bestCase.totalGain}pts au total)`
+        : null;
+      const summary = bestCase
+        ? `📍 **P${rank}** — Retard : **${deficit} pts** · ${gpsLeft} GPs restants · ${maxRemaining} pts distribuables\n` +
+          `Meilleur scénario pour le titre : ${bestLabel} → finit **+${Math.abs(bestCase.gapAfterAll)}pts** d'avance.`
+        : `📍 **P${rank}** — Retard : **${deficit} pts** · ${gpsLeft} GPs restants · ${maxRemaining} pts distribuables\n` +
+          `⚠️ Aucun scénario suffisant — le plus favorable comblerait **${scenarios[0]?.totalGain||0}pts** sur **${deficit}** nécessaires.`;
 
-      for (const s of scenarios.slice(0, 5)) {
-        const ach = s.achievable
-          ? `✅ **${s.gpsNeeded} GP${s.gpsNeeded > 1 ? 's' : ''}** suffisent (${s.gpsLeft - s.gpsNeeded} GP${s.gpsLeft - s.gpsNeeded !== 1 ? 's' : ''} de marge)`
-          : `❌ Comblerait seulement **${s.gainPerGP * s.gpsLeft} / ${deficit} pts**`;
-        const gapFinal = s.gapAfterAll < 0
-          ? `Avance finale : **+${Math.abs(s.gapAfterAll)} pts**`
-          : s.gapAfterAll === 0 ? 'Égalité exacte'
-          : `Retard résiduel : **${s.gapAfterAll} pts**`;
-        scenLines.push(
-          `${s.tag} — *${s.label}*\n` +
-          `→ ${pilot.name} **P${s.cPos}** (+${s.cPts}pts) · ${leaderP?.name||'leader'} **P${s.lPos}** (+${s.lPts}pts) = **+${s.gainPerGP}pts/GP**\n` +
-          `→ ${ach} — ${gapFinal}`
-        );
-      }
+      // Bloc uniformes (max 4)
+      const uniformBlock = uniformScens.slice(0, 4)
+        .map(s => formatScenarioLine(s, pilot.name, leaderP?.name || 'leader'))
+        .join('\n\n');
 
-      // Résumé actionnable en haut
-      const bestCase = achievable[0];
-      const summary  = bestCase
-        ? `📍 **P${rank}** — Retard : **${deficit} pts** · ${gpsLeft} GPs restants\n` +
-          `Meilleur scénario réalisable : *${bestCase.label}* → **${bestCase.gainPerGP} pts/GP** → **${bestCase.gpsNeeded} GP${bestCase.gpsNeeded > 1 ? 's' : ''}** nécessaires.`
-        : `📍 **P${rank}** — Retard : **${deficit} pts** · ${gpsLeft} GPs restants\n` +
-          `⚠️ Aucun scénario ne permet le retournement au rythme actuel — il faudrait **${Math.ceil(deficit / (scenarios[0]?.gainPerGP || 1))} GPs** au mieux, mais il n'en reste que **${gpsLeft}**.`;
+      // Bloc mixtes (max 3, GP par GP détaillé)
+      const mixedBlock = mixedScens.slice(0, 3)
+        .map(s => formatScenarioLine(s, pilot.name, leaderP?.name || 'leader'))
+        .join('\n\n');
 
       embed.setDescription(
         summary + '\n\n' +
-        `**📊 Classement actuel :**\n${classLines.join('\n')}\n\n` +
-        `**🔢 Scénarios possibles (${gpsLeft} GP${gpsLeft !== 1 ? 's' : ''}) :**\n` +
-        scenLines.join('\n\n') +
-        (nextRace ? `\n\n⏭️ Prochain : ${nextRace.emoji||'🏁'} **${nextRace.circuit}** · ${nextRace.gpStyle?.toUpperCase()||'?'}` : '')
+        `**📊 Classement actuel :**\n${classLines.join('\n')}`
+      );
+
+      embed.addFields(
+        {
+          name: `🔁 Scénarios uniformes — même résultat à chaque GP`,
+          value: uniformBlock || '—',
+          inline: false,
+        },
+        {
+          name: `🎲 Scénarios mixtes — résultats variés GP par GP`,
+          value: mixedBlock || '—',
+          inline: false,
+        },
+        ...(nextRace ? [{
+          name: '⏭️ Prochain GP',
+          value: `${nextRace.emoji||'🏁'} **${nextRace.circuit}** · style ${nextRace.gpStyle?.toUpperCase()||'?'}`,
+          inline: false,
+        }] : [])
       );
 
       return interaction.editReply({ embeds: [embed] });
