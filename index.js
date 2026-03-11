@@ -418,6 +418,9 @@ const RaceSchema = new mongoose.Schema({
   status        : { type: String, enum: ['upcoming','practice_done','quali_done','race_computed','done'], default: 'upcoming' },
   qualiGrid     : { type: Array, default: [] },
   raceResults   : { type: Array, default: [] },
+  // Bonus de setup issus des E3 — tableau [{ pilotId, bonusMs }]
+  // Appliqué comme gain constant par tour en course (avantage setup weekend)
+  weekendSetup  : { type: Array, default: [] },
 });
 const Race = mongoose.model('Race', RaceSchema);
 
@@ -591,9 +594,9 @@ const NATIONALITIES = [
 // ============================================================
 
 const TIRE = {
-  SOFT  : { grip: 1.00, deg: 0.0024, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 25
-  MEDIUM: { grip: 0.99, deg: 0.0016, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 38
-  HARD  : { grip: 0.98, deg: 0.0010, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 60
+  SOFT  : { grip: 1.00, deg: 0.0030, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 18-22, mais RAPIDE
+  MEDIUM: { grip: 0.985, deg: 0.0016, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 32-38
+  HARD  : { grip: 0.970, deg: 0.0010, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 50-58, lent mais sûr
   INTER : { grip: 0.99, deg: 0.0013, emoji: '🟢', code: 'I', label: 'Inter'  },
   WET   : { grip: 0.99, deg: 0.0008, emoji: '🔵', code: 'W', label: 'Wet'    },
 };
@@ -1161,7 +1164,7 @@ function pilotScore(pilot, gpStyle) {
 }
 
 // ─── Calcul du lap time ───────────────────────────────────
-function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0, homeGPF = 1.0) {
+function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpStyle, position, scCooldown = 0, homeGPF = 1.0, setupBonusMs = 0) {
   const BASE = 90_000;
   const w = GP_STYLE_WEIGHTS[gpStyle] || GP_STYLE_WEIGHTS['mixte'];
 
@@ -1198,8 +1201,8 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const pilotTireBonus = Math.max(-0.28, Math.min(0.28, (pilot.gestionPneus - 50) / 50 * 0.28));
   const effectiveDeg   = Math.max(0.0001, tireData.deg * (1 - carTireBonus - pilotTireBonus));
   // tireLifeRef = durée de vie nominale par compound (tours avant cliff)
-  // Cohérent avec wornThresholdFor : SOFT~20, MEDIUM~32, HARD~48
-  const tireLifeBase = tireCompound === 'SOFT' ? 20 : tireCompound === 'HARD' ? 48 : 32;
+  // Cohérent avec wornThresholdFor : SOFT~18, MEDIUM~32, HARD~48
+  const tireLifeBase = tireCompound === 'SOFT' ? 18 : tireCompound === 'HARD' ? 48 : 32;
   const tireLifeRef  = tireLifeBase * (1 + carTireBonus * 0.5 + pilotTireBonus * 0.5);
   const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.0);
   // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×1.8 au-delà
@@ -1251,7 +1254,7 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const slickInInter = ['SOFT','MEDIUM','HARD'].includes(tireCompound) && weather === 'INTER';
   const wetInDry    = ['WET','INTER'].includes(tireCompound) && (weather === 'DRY' || weather === 'HOT');
   const mismatchF   = slickInWet ? 1.10 : slickInInter ? 1.04 : wetInDry ? 1.06 : 1.0;
-  return Math.round(BASE * carF * pilotF * specF * formF * tireF * dirtyAirF * trackF * randF * weatherF * mismatchF * homeGPF);
+  return Math.round(BASE * carF * pilotF * specF * formF * tireF * dirtyAirF * trackF * randF * weatherF * mismatchF * homeGPF) - Math.round(setupBonusMs);
 }
 
 // ─── Calcul Q time (tour lancé, pneus neufs) ──────────────
@@ -1275,11 +1278,36 @@ function msToLapStr(ms) {
 }
 
 // ─── Stratégie pneus ──────────────────────────────────────
-function chooseStartCompound(laps, weather) {
+function chooseStartCompound(laps, weather, pilot = null) {
   if (weather === 'WET')   return 'WET';
   if (weather === 'INTER') return 'INTER';
-  if (laps < 55) return Math.random() > 0.5 ? 'MEDIUM' : 'SOFT';
-  return Math.random() > 0.6 ? 'HARD' : 'MEDIUM';
+
+  // Agressivité pilote : gestionPneus bas = agressif = plus enclin au SOFT
+  const aggression = pilot ? Math.max(0, (60 - (pilot.gestionPneus || 50)) / 60) : 0.3;
+
+  if (laps >= 60) {
+    // Long GP : quasi personne ne démarre en SOFT (trop risqué)
+    // Agressifs ou qualifiés devant peuvent tenter le SOFT pour sous-cutter tôt
+    const softChance = aggression * 0.20; // max ~20% pour les très agressifs
+    const r = Math.random();
+    if (r < softChance)          return 'SOFT';
+    if (r < softChance + 0.40)   return 'MEDIUM';
+    return 'HARD';
+  } else if (laps >= 45) {
+    // GP moyen : SOFT possible pour stratégie 2-stop
+    const softChance = 0.15 + aggression * 0.20;
+    const r = Math.random();
+    if (r < softChance)          return 'SOFT';
+    if (r < softChance + 0.55)   return 'MEDIUM';
+    return 'HARD';
+  } else {
+    // Court GP (<45 tours) : SOFT très viable, MEDIUM dominant
+    const softChance = 0.30 + aggression * 0.25;
+    const r = Math.random();
+    if (r < softChance)          return 'SOFT';
+    if (r < softChance + 0.50)   return 'MEDIUM';
+    return 'HARD';
+  }
 }
 
 // ─── Format d'écart intelligent selon la taille ──────────
@@ -1309,7 +1337,10 @@ function fmtGapSec(s, opts = {}) {
 // ⚠️  Différentiel amplifié — un pilote gestionPneus 80 tient vraiment ~8 tours de plus
 //     qu'un pilote à 40 sur le même compound. La stat doit être visible en course.
 function wornThresholdFor(tireCompound, team, pilot) {
-  const base = tireCompound === 'SOFT' ? 20 : tireCompound === 'HARD' ? 48 : 32; // MEDIUM=32
+  // SOFT  : cliff ~18 tours (dégradation forte = fenêtre offensive courte)
+  // MEDIUM: cliff ~32 tours (polyvalent, dominant en race)
+  // HARD  : cliff ~48 tours (long stint, mais lent sur pneus frais)
+  const base = tireCompound === 'SOFT' ? 18 : tireCompound === 'HARD' ? 48 : 32;
   // Voiture : conservationPneus 70 = neutre. +/- 0.22 tours par point → max ±6.6 tours
   const carBonus   = (team.conservationPneus  - 70) * 0.22;
   // Pilote : gestionPneus 50 = neutre. +/- 0.20 tours par point → max ±10 tours (gros différentiel)
@@ -1405,10 +1436,45 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false,
   return { pit: false, reason: null };
 }
 
-function choosePitCompound(currentCompound, lapsRemaining, usedCompounds) {
-  if (!usedCompounds.includes('HARD')   && lapsRemaining > 20) return 'HARD';
-  if (!usedCompounds.includes('MEDIUM') && lapsRemaining > 10) return 'MEDIUM';
-  if (lapsRemaining <= 15) return 'SOFT';
+function choosePitCompound(currentCompound, lapsRemaining, usedCompounds, driver = null) {
+  const laps = lapsRemaining;
+  const aggression = driver?.pilot ? Math.max(0, (60 - (driver.pilot.gestionPneus || 50)) / 60) : 0.3;
+  const isSecondStop = (driver?.pitStops || 0) >= 1;
+
+  // ── Règle F1 : obligation d'utiliser 2 compounds différents ──
+  // Si on n'a utilisé que SOFT, choisir MEDIUM ou HARD
+  // Si on n'a utilisé que HARD, choisir MEDIUM ou SOFT selon les tours restants
+  const needsDiff = usedCompounds.length === 1;
+
+  // ── SOFT — fenêtre offensive ──────────────────────────────
+  // Utilisable pour : undercut agressif, 2ème arrêt d'un 2-stop, fin de course rapide
+  const softWindow = laps <= 28;       // réaliste : SOFT tient ~20-25 tours
+  const softAllowed = softWindow && !(usedCompounds.length === 1 && usedCompounds[0] === 'SOFT');
+
+  // ── Fin de course : SOFT si ≤ 20 tours ───────────────────
+  if (laps <= 20) {
+    // Fin de GP : SOFT pour les agressifs, MEDIUM sinon
+    if (softAllowed && (Math.random() < 0.35 + aggression * 0.35)) return 'SOFT';
+    if (!usedCompounds.includes('MEDIUM')) return 'MEDIUM';
+    return 'SOFT';
+  }
+
+  // ── Deuxième arrêt d'une strat 2-stop ────────────────────
+  if (isSecondStop) {
+    // 2ème pit : choisir le compound le plus rapide pour finir fort
+    if (softAllowed && aggression > 0.35 && laps <= 26) return 'SOFT'; // finisher agressif
+    if (!usedCompounds.includes('MEDIUM') && laps > 15) return 'MEDIUM';
+    if (softAllowed) return 'SOFT';
+    return 'MEDIUM';
+  }
+
+  // ── Premier arrêt ─────────────────────────────────────────
+  // Priorité : utiliser un compound pas encore utilisé
+  if (!usedCompounds.includes('HARD') && laps > 25) return 'HARD';
+  if (!usedCompounds.includes('MEDIUM') && laps > 12) return 'MEDIUM';
+
+  // Dernier recours : SOFT si bon timing, MEDIUM sinon
+  if (softAllowed && aggression > 0.4) return 'SOFT';
   return 'MEDIUM';
 }
 
@@ -1762,6 +1828,24 @@ async function simulatePractice(race, pilots, teams) {
   const e2 = sessionResults(2800);      // encore aléatoire
   const e3 = sessionResults(600, 180);  // représentatif, tous en SOFT
 
+  // ── Calcul des bonus setup pour la course ─────────────────
+  // Les pilotes qui performent bien en E3 ont un meilleur setup race.
+  // Bonus graduel : P1 E3 = +80ms/tour, P2 = +55ms, P3 = +35ms,
+  // milieu de peloton = +5-15ms, fond = 0ms (mauvais réglage = pas de bonus)
+  const e3Sorted = [...e3.results.filter(r => r.time !== null)];
+  const e3Bonuses = [];
+  e3Sorted.forEach((r, i) => {
+    const n = e3Sorted.length;
+    let bonusMs = 0;
+    if      (i === 0) bonusMs = 80;
+    else if (i === 1) bonusMs = 55;
+    else if (i === 2) bonusMs = 35;
+    else if (i < Math.floor(n * 0.4)) bonusMs = 15;
+    else if (i < Math.floor(n * 0.7)) bonusMs = 8;
+    else bonusMs = 0; // fond de tableau : mauvais setup
+    if (bonusMs > 0) e3Bonuses.push({ pilotId: String(r.pilot._id), bonusMs });
+  });
+
   function pickIncidents(results) {
     return results.filter(r => r.noTime).map(r => ({ type: 'no_time', pilot: r.pilot, team: r.team }));
   }
@@ -1771,6 +1855,7 @@ async function simulatePractice(race, pilots, teams) {
     e1: { results: e1, incidents: pickIncidents(e1) },
     e2: { results: e2, incidents: pickIncidents(e2) },
     e3: { results: e3, incidents: pickIncidents(e3) },
+    weekendSetupBonuses: e3Bonuses,
   };
 }
 
@@ -6925,6 +7010,16 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const totalLaps = race.laps;
   const gpStyle   = race.gpStyle;
 
+  // ── Bonus setup weekend (E3) ───────────────────────────────
+  // Avantage constant par tour pour les pilotes bien réglés en essais libres.
+  // Max +80ms/tour pour le P1 E3 → ~5s de gain sur 60 tours vs fond de tableau.
+  const setupBonusMap = new Map(); // pilotId → bonusMs
+  if (race.weekendSetup?.length) {
+    for (const entry of race.weekendSetup) {
+      setupBonusMap.set(String(entry.pilotId), entry.bonusMs || 0);
+    }
+  }
+
   // ── Chimie d'écurie — pré-calcul avant la course ─────────
   // Calcule la moyenne des affinités coéquipiers pour chaque écurie.
   // Si la moyenne est négative → les mécaniciens sont démotivés → malus de fiabilité.
@@ -6996,7 +7091,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     const pilot = pilots.find(p => String(p._id) === String(g.pilotId));
     const team  = teams.find(t => String(t._id) === String(pilot?.teamId));
     if (!pilot || !team) return null;
-    const startCompound = chooseStartCompound(totalLaps, weather);
+    const startCompound = chooseStartCompound(totalLaps, weather, pilot);
     return {
       pilot, team,
       pos          : idx + 1,
@@ -7013,6 +7108,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       pittedThisLap   : false,
       lastPitLap      : 0,
       dnf             : false,
+      setupBonusMs    : setupBonusMap.get(String(pilot._id)) || 0, // bonus E3 constant/tour
       dnfLap          : null,
       dnfReason       : '',
       fastestLap      : Infinity,
@@ -7649,7 +7745,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           driver.tireCompound, driver.tireWear,
           weather, trackEvo, gpStyle, driver.pos,
           scCooldown,
-          driver.homeGP ? 0.9980 : 1.0   // GP à domicile : ~-180ms/tour (0.2% plus rapide)
+          driver.homeGP ? 0.9980 : 1.0,   // GP à domicile : ~-180ms/tour (0.2% plus rapide)
+          driver.setupBonusMs || 0         // bonus setup E3 — constant tout le race
         );
 
         // ── DRS réaliste : bonus si < 1.2s du pilote devant ──
@@ -7871,7 +7968,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       if (doPit && driver.pitStops < 3 && lapsRemaining > 8) {
         const posIn      = driver.pos;
         const oldTire    = driver.tireCompound;
-        const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds);
+        const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds, driver);
 
         // Pit de réparation : aileron = +12-20s, suspension = +8-14s
         let pitTime;
@@ -14826,7 +14923,11 @@ async function runPractice(override, gpIndex = null) {
   const { pilots, teams } = await getAllPilotsWithTeams();
   if (!pilots.length) return;
 
-  const { weather, e1, e2, e3 } = await simulatePractice(race, pilots, teams);
+  const { weather, e1, e2, e3, weekendSetupBonuses } = await simulatePractice(race, pilots, teams);
+  // Persister les bonus setup E3 sur le document Race pour usage en course
+  if (weekendSetupBonuses?.length) {
+    await Race.findByIdAndUpdate(race._id, { weekendSetup: weekendSetupBonuses });
+  }
   const channel = await getRaceChannel(override);
   if (!channel) { await Race.findByIdAndUpdate(race._id, { status: 'practice_done' }); return; }
 
