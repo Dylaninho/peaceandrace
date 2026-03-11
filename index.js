@@ -5409,13 +5409,27 @@ function buildRealisticScenarios(deficit, gpsLeft) {
 
 // Formatte un scénario uniforme
 function formatUniformLine(s, cName, lName) {
-  const rythme = `*à chaque GP* : ${cName} **P${s.cPos}** (+${s.cPts}pts) · ${lName} **P${s.lPos}** (+${s.lPts}pts) = **+${s.gainPerGP}pts/GP**`;
+  const rythme = `${cName} **P${s.cPos}** (+${s.cPts}pts) · ${lName} **P${s.lPos}** (+${s.lPts}pts) = **+${s.gainPerGP}pts/GP**`;
+  const condition = `Ce résultat doit se reproduire sur **chacun des ${s.gpsLeft} GPs restants**.`;
   if (s.titleWon) {
     const avance = Math.abs(s.gapAfterAll);
-    const info   = s.gpToLead <= s.gpsLeft ? ` *(dépasse au GP ${s.gpToLead}/${s.gpsLeft})*` : '';
-    return `${s.tag} — *${s.label}*\n→ ${rythme}\n→ ✅ **Titre remporté** — finit **+${avance}pts**${info}`;
+    const gpNeeded = s.gpToLead;
+    const margin   = s.gpsLeft - gpNeeded;
+    const marginStr = margin > 0 ? ` (${margin} GP${margin > 1 ? 's' : ''} de marge)` : ` (titre validé au dernier GP, pas de marge)`;
+    return (
+      `${s.tag} — *${s.label}*\n` +
+      `→ À chaque GP : ${rythme}\n` +
+      `→ ${condition}\n` +
+      `→ ✅ **Titre remporté** — dépasse au **GP ${gpNeeded}/${s.gpsLeft}**, finit **+${avance}pts**${marginStr}`
+    );
   }
-  return `${s.tag} — *${s.label}*\n→ ${rythme}\n→ ❌ Comble **${s.totalGain}pts** — retard résiduel **${s.gapAfterAll}pts**`;
+  const needed = s.gpsLeft > 0 ? Math.ceil((s.gapAfterAll) / s.gainPerGP) : '?';
+  return (
+    `${s.tag} — *${s.label}*\n` +
+    `→ À chaque GP : ${rythme}\n` +
+    `→ ${condition}\n` +
+    `→ ❌ Insuffisant — comble **${s.totalGain}pts** sur **${s.totalGain + s.gapAfterAll}** nécessaires · Retard résiduel : **${s.gapAfterAll}pts** (il faudrait ~${needed} GPs de plus)`
+  );
 }
 
 // Formatte un scénario mixte avec le détail GP par GP
@@ -5423,20 +5437,21 @@ function formatMixedLine(s, cName, lName) {
   const gpDetail = s.gpResults.map((e, i) => {
     const gain = ptsByPos(e.cPos) - ptsByPos(e.lPos);
     const sign  = gain > 0 ? `+${gain}` : gain < 0 ? `${gain}` : '±0';
-    return `GP${i+1}: ${cName} P${e.cPos}//${lName} P${e.lPos} (${sign}pts)`;
+    return `**GP${i+1}** : ${cName} P${e.cPos} · ${lName} P${e.lPos} (${sign}pts)`;
   }).join(' · ');
-  const leadInfo = s.gpToLead ? ` *(dépasse au GP ${s.gpToLead}/${s.gpsLeft})*` : '';
+  const leadInfo = s.gpToLead ? ` — dépasse au GP ${s.gpToLead}/${s.gpsLeft}` : '';
+  const totalGainPerGPAvg = s.gpsLeft > 0 ? Math.round(s.totalGain / s.gpsLeft) : 0;
   if (s.titleWon) {
     return (
       `${s.tag} — *${s.label}*\n` +
       `→ ${gpDetail}\n` +
-      `→ Total : **+${s.totalGain}pts** · ✅ **Titre remporté** — finit **+${Math.abs(s.gapAfterAll)}pts**${leadInfo}`
+      `→ Gain moyen : **+${totalGainPerGPAvg}pts/GP** · Total : **+${s.totalGain}pts** · ✅ **Titre remporté** — finit **+${Math.abs(s.gapAfterAll)}pts**${leadInfo}`
     );
   }
   return (
     `${s.tag} — *${s.label}*\n` +
     `→ ${gpDetail}\n` +
-    `→ Total : **+${s.totalGain}pts** · ❌ Comble **${s.totalGain}pts** — retard résiduel **${s.gapAfterAll}pts**`
+    `→ Gain moyen : **+${totalGainPerGPAvg}pts/GP** · Total : **+${s.totalGain}pts** · ❌ Insuffisant — retard résiduel **${s.gapAfterAll}pts**`
   );
 }
 
@@ -16084,29 +16099,50 @@ async function handleInteraction(interaction) {
         const contendersLeft = standings.slice(1).filter(s => (myPts - s.points) <= maxRemaining).length;
 
         // Calcul sacre anticipé : peut-il être champion dès le prochain GP ?
-        // Condition : même si P2 gagne tous les GPs restants sauf 1 (=gpsLeft-1)
-        // et le leader marque 0, le leader reste devant.
         let clinchGP = null;
         if (p2St && gpsLeft >= 1) {
-          // Si après ce prochain GP, P2 ne peut plus rattraper même en gagnant tout :
-          // myPts + 0 > p2St.points + 25*(gpsLeft-1) + 26*(gpsLeft-1)  ← trop strict
-          // Condition réelle : myPts - p2St.points > 26*(gpsLeft-1)
           if (gapP2 > 26 * (gpsLeft - 1)) {
-            clinchGP = `✅ **Sacre possible dès ${nextRace ? `${nextRace.emoji||'🏁'} ${nextRace.circuit}` : 'le prochain GP'}** — même si ${p2P?.name||'P2'} gagne, l'écart est infranchissable sur les GPs restants.`;
+            // Même si P2 gagne tous les GPs restants sauf 1, il ne peut plus rattraper
+            clinchGP = `✅ **Sacre possible dès ${nextRace ? `${nextRace.emoji||'🏁'} ${nextRace.circuit}` : 'le prochain GP'}**\n` +
+              `Même si **${p2P?.name||'P2'}** gagne les ${gpsLeft - 1} GP(s) suivants (+${26*(gpsLeft-1)}pts max), l'écart de **+${gapP2}pts** est infranchissable.`;
           } else {
-            // Quel résultat pour se rapprocher du sacre ?
-            const ptsToSecure = 26 * (gpsLeft - 1) - gapP2 + 1;
-            const neededPos   = [25,18,15,12,10,8,6,4,2,1].findIndex(v => v >= ptsToSecure);
-            if (ptsToSecure <= 0) clinchGP = `✅ Sacre garanti quelle que soit la course.`;
-            else clinchGP = `⏳ Pour valider le titre dès ce GP, besoin que **${p2P?.name||'P2'}** marque ≤ ${Math.max(0, ptsByPos(1) - ptsToSecure)} pts (P${neededPos >= 0 ? neededPos + 2 : '11+'}).`;
+            // Ce qu'il faut pour valider le titre CE GP précisément
+            // Condition : myPts + myGain > p2St.points + p2MaxGain(gpsLeft-1)
+            // → myGain - p2Gain > p2St.points + 26*(gpsLeft-1) - myPts
+            // Pour simplifier : on calcule combien le P2 doit être bridé
+            const p2MaxFuture = 26 * (gpsLeft - 1); // max que P2 peut encore marquer après ce GP
+            const safeLead = p2St.points + p2MaxFuture; // score max possible de P2 à la fin
+            // Pour être champion : myPts + myGain > safeLead dans tous les cas
+            // Donc myGain > safeLead - myPts, soit myGain > safeLead - myPts
+            // En pratique : il faut que P2 marque peu MAINTENANT, car après on peut rien y faire
+            const needP2Max = myPts - p2MaxFuture - 1; // P2 ne doit pas dépasser ce score ce GP
+            const p2MaxThisGP = Math.max(0, needP2Max - p2St.points);
+            if (p2MaxThisGP <= 0) {
+              clinchGP = `⏳ **Titre pas encore validable ce GP** — ${p2P?.name||'P2'} peut encore théoriquement revenir (+${p2MaxFuture}pts sur ${gpsLeft-1} GP restant${gpsLeft-1>1?'s':''}).\n` +
+                `L'avance actuelle de **+${gapP2}pts** ne suffit pas à effacer ${gpsLeft > 1 ? `les ${gpsLeft-1} GP${gpsLeft-1>1?'s':''} suivants` : 'le GP suivant'}.`;
+            } else {
+              const ptsToSecure = 26 * (gpsLeft - 1) - gapP2 + 1;
+              const neededPos   = [25,18,15,12,10,8,6,4,2,1].findIndex(v => v >= ptsToSecure);
+              const p2MaxAllowed = Math.max(0, ptsByPos(1) - ptsToSecure);
+              clinchGP = `⏳ **Pour valider le titre dès ce GP**, besoin que **${p2P?.name||'P2'}** marque ≤ ${p2MaxAllowed}pts` +
+                ` (${p2MaxAllowed === 0 ? 'hors des points, P11+' : `P${neededPos >= 0 ? neededPos + 2 : '11+'} ou moins`}).\n` +
+                `→ Si P2 marque plus, le titre reste en jeu sur les ${gpsLeft-1} GP${gpsLeft-1>1?'s':''} suivants.`;
+            }
           }
         }
 
-        // Scénarios inversés : risque que P2 revienne (titleWon = P2 reprend le titre)
+        // Scénarios inversés : risque que P2 reprenne le titre
         const dangerScenarios = buildRealisticScenarios(gapP2, gpsLeft);
-        const dangerLines = dangerScenarios.filter(s => s.titleWon).slice(0, 3).map(s =>
-          `⚠️ ${s.tag} *${s.label}* — ${p2P?.name||'P2'} gagne **+${s.gainPerGP}pts/GP** sur toi sur tous les GPs → reprend le titre avec **+${Math.abs(s.gapAfterAll)} pts d'avance**`
-        );
+        const dangerLines = dangerScenarios.filter(s => s.titleWon).slice(0, 3).map(s => {
+          // Pour les scénarios mixtes, gainPerGP n'existe pas → calculer le gain moyen
+          const gainDisplay = s.kind === 'mixed'
+            ? (s.gpsLeft > 0 ? Math.round(s.totalGain / s.gpsLeft) : '?')
+            : s.gainPerGP;
+          const detail = s.kind === 'mixed'
+            ? `gagne en moyenne **+${gainDisplay}pts/GP** sur toi (scénario varié GP par GP)`
+            : `gagne **+${gainDisplay}pts/GP** sur toi à chaque GP`;
+          return `⚠️ ${s.tag} *${s.label}* — ${p2P?.name||'P2'} ${detail} → reprend le titre avec **+${Math.abs(s.gapAfterAll)}pts d'avance**`;
+        });
 
         const desc =
           `👑 **${pilot.name} est LEADER** — **${myPts} pts** · Avance P2 : **+${gapP2} pts** sur ${p2T?.emoji||''}${p2P?.name||'?'}\n` +
@@ -16169,28 +16205,37 @@ async function handleInteraction(interaction) {
         .map(s => formatScenarioLine(s, pilot.name, leaderP?.name || 'leader'))
         .join('\n\n');
 
+      // Sécurité Discord : value ne peut pas être vide et max 1024 chars
+      function safeField(str) {
+        if (!str || str.trim() === '') return '—';
+        return str.length > 1024 ? str.slice(0, 1020) + '…' : str;
+      }
+
       embed.setDescription(
         summary + '\n\n' +
         `**📊 Classement actuel :**\n${classLines.join('\n')}`
       );
 
-      embed.addFields(
+      const fieldsToAdd = [
         {
           name: `🔁 Scénarios uniformes — même résultat à chaque GP`,
-          value: uniformBlock || '—',
+          value: safeField(uniformBlock),
           inline: false,
         },
         {
           name: `🎲 Scénarios mixtes — résultats variés GP par GP`,
-          value: mixedBlock || '—',
+          value: safeField(mixedBlock),
           inline: false,
         },
-        ...(nextRace ? [{
+      ];
+      if (nextRace) {
+        fieldsToAdd.push({
           name: '⏭️ Prochain GP',
-          value: `${nextRace.emoji||'🏁'} **${nextRace.circuit}** · style ${nextRace.gpStyle?.toUpperCase()||'?'}`,
+          value: safeField(`${nextRace.emoji||'🏁'} **${nextRace.circuit}** · style ${nextRace.gpStyle?.toUpperCase()||'?'}`),
           inline: false,
-        }] : [])
-      );
+        });
+      }
+      embed.addFields(...fieldsToAdd);
 
       return interaction.editReply({ embeds: [embed] });
 
