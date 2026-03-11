@@ -7928,11 +7928,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   console.log(`[simulateRace] ▶️ Début — ${race?.circuit} · ${grid?.length} pilotes · ${race?.laps} tours`);
   if (!race?.laps || !race?.gpStyle) {
     console.error('[simulateRace] ❌ race invalide :', JSON.stringify({ laps: race?.laps, gpStyle: race?.gpStyle }));
-    return { results: [], collisions: [] };
+    return { results: [], collisions: [], penalties: [] };
   }
   if (!season) {
     console.error('[simulateRace] ❌ season null — abandon.');
-    return { results: [], collisions: [] };
+    return { results: [], collisions: [], penalties: [] };
   }
   const totalLaps = race.laps;
   const gpStyle   = race.gpStyle;
@@ -9713,7 +9713,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
   }
 
   global.activeRaces?.delete(raceKey);
-  if (raceAborted) return { results: [], collisions: [] };
+  if (raceAborted) return { results: [], collisions: [], penalties: [] };
 
   // ── Résolution des investigations post-course ─────────────
   // Pour chaque contact "sous investigation", décider maintenant si pénalité
@@ -14423,7 +14423,7 @@ async function handleInteraction(interaction) {
     if (!raceChannel) {
       try { raceChannel = await client.channels.fetch(interaction.channelId); } catch(e) { raceChannel = null; }
     }
-    runRace(raceChannel, gpIndex).catch(e => {
+    runRace(true, gpIndex).catch(e => {
       console.error('❌ [admin_force_race] CRASH DE COURSE :', e.message);
       console.error(e.stack);
     });
