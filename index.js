@@ -8118,6 +8118,14 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const stratWindowFired = new Set(); // pilotId_stintIndex → max 1 alerte par stint
   const radioFiredLaps   = new Set(); // `${pilotId}_${lap}` → évite les doublons radio
 
+  // Timeout pour éviter un blocage infini sur rate limit Discord (retry automatique discord.js)
+  const sendWithTimeout = (fn, label = '') => {
+    return Promise.race([
+      fn(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`TIMEOUT 30s${label ? ' — ' + label : ''}`)), 30_000)),
+    ]);
+  };
+
   const send = async (msg) => {
     if (!channel) {
       console.warn('[simulateRace] channel est null — les messages de course ne peuvent pas être envoyés !');
@@ -8125,16 +8133,18 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     }
     if (msg.length > 1950) msg = msg.slice(0, 1947) + '…';
     try {
-      await channel.send(msg);
+      await sendWithTimeout(() => channel.send(msg), 'send');
     } catch(e) {
-      console.error('[simulateRace] send error T' + lap + ':', e.message, '— Code:', e.code || 'N/A');
+      console.error('[simulateRace] send error:', e.message, '— Code:', e.code || 'N/A');
     }
     await sleep(9000); // toujours attendre, même en cas d'erreur Discord
   };
 
   const sendEmbed = async (embed) => {
     if (!channel) return;
-    try { await channel.send({ embeds: [embed] }); } catch(e) {
+    try {
+      await sendWithTimeout(() => channel.send({ embeds: [embed] }), 'sendEmbed');
+    } catch(e) {
       console.error('[simulateRace] sendEmbed error:', e.message, '— Code:', e.code || 'N/A');
     }
     await sleep(9000);
@@ -8266,7 +8276,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   await sleep(4000);
   await send(`🟢⚫ **EXTINCTION DES FEUX — C'EST PARTI !!** 🏁`);
   const startGif = pickGif('race_start');
-  if (startGif && channel) { try { await channel.send(startGif); } catch(e) {} await sleep(2000); }
+  if (startGif && channel) { try { await sendWithTimeout(() => channel.send(startGif), 'startGif'); } catch(e) { console.error('[simulateRace] startGif error:', e.message); } await sleep(2000); }
 
   // ══════════════════════════════════════════════════════════
   // BOUCLE PRINCIPALE
@@ -8326,7 +8336,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         const msg = transitionMsgs[key] || `🌡️ **T${lap} — Changement météo !** ${weatherLabelsShort[prevWeather]} → ${weatherLabelsShort[weather]}`;
 
         if (channel) {
-          try { await channel.send(msg); await sleep(2500); } catch(e) {}
+          try { await sendWithTimeout(() => channel.send(msg), 'météo'); await sleep(2500); } catch(e) { console.error('[simulateRace] météo send error:', e.message); }
         }
 
         // Forcer les pilotes sur pneus inadaptés à pit au prochain tour si météo radicale
@@ -9691,7 +9701,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
     // GIF d'abord — apparaît avant le commentaire pour éviter le décalage
     if (topGif && channel) {
-      try { await channel.send(topGif); } catch(e) {}
+      try { await sendWithTimeout(() => channel.send(topGif), 'topGif'); } catch(e) { console.error('[simulateRace] topGif error:', e.message); }
       await sleep(3500);
     }
 
@@ -14405,9 +14415,15 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_force_race') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    if (interaction.replied || interaction.deferred) return;
     const gpIndex = interaction.options.getInteger('gp_index');
     await interaction.reply({ content: `🏁 Course lancée${gpIndex !== null ? ` (GP index ${gpIndex})` : ''} ! Suivez le direct dans le channel de course.`, ephemeral: true });
-    runRace(interaction.channel, gpIndex).catch(e => {
+    // interaction.channel peut être null si non mis en cache après redémarrage
+    let raceChannel = interaction.channel;
+    if (!raceChannel) {
+      try { raceChannel = await client.channels.fetch(interaction.channelId); } catch(e) { raceChannel = null; }
+    }
+    runRace(raceChannel, gpIndex).catch(e => {
       console.error('❌ [admin_force_race] CRASH DE COURSE :', e.message);
       console.error(e.stack);
     });
@@ -17205,6 +17221,7 @@ async function runRace(override, gpIndex = null) {
 
   // ── Grille de départ animée — publiée avant le départ ────
   if (channel) {
+    try {
     const W = ms => new Promise(r => setTimeout(r, ms));
     const allStandingsSnap = standingsBefore.slice().sort((a,b) => b.points - a.points);
     const champMap   = new Map(allStandingsSnap.map((s, i) => [String(s.pilotId), { pts: s.points, rank: i + 1 }]));
@@ -17273,12 +17290,20 @@ async function runRace(override, gpIndex = null) {
       await channel.send({ embeds: [preRaceEmbed] });
     }
     await W(4000);
-    await channel.send(pick([
-      `🚦 **FEU ROUGE...** Tout le monde est en position. Le silence avant la tempête.`,
-      `🚦 *Les mécaniciens quittent la grille... La tension est à son comble.*`,
-      `🚦 *5 feux... 4... 3... 2... 1...*`,
-    ]));
+    try {
+      await Promise.race([
+        channel.send(pick([
+          `🚦 **FEU ROUGE...** Tout le monde est en position. Le silence avant la tempête.`,
+          `🚦 *Les mécaniciens quittent la grille... La tension est à son comble.*`,
+          `🚦 *5 feux... 4... 3... 2... 1...*`,
+        ])),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT feux rouges')), 30_000)),
+      ]);
+    } catch(e) { console.error('[runRace] feux rouges send error:', e.message); }
     await W(3000);
+    } catch(e) {
+      console.error('[runRace] ⚠️ Erreur bloc pré-course (non bloquant) :', e.message);
+    }
   }
 
   const { results, collisions, penalties } = await simulateRace(race, grid, pilots, teams, contracts, channel, season);
