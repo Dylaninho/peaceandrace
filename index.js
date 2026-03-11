@@ -1942,7 +1942,7 @@ async function simulatePractice(race, pilots, teams) {
   // Les pilotes qui performent bien en E3 ont un meilleur setup race.
   // Bonus graduel : P1 E3 = +80ms/tour, P2 = +55ms, P3 = +35ms,
   // milieu de peloton = +5-15ms, fond = 0ms (mauvais réglage = pas de bonus)
-  const e3Sorted = [...e3.results.filter(r => r.time !== null)];
+  const e3Sorted = [...e3.filter(r => r.time !== null)];
   const e3Bonuses = [];
   e3Sorted.forEach((r, i) => {
     const n = e3Sorted.length;
