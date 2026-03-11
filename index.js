@@ -1304,13 +1304,13 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   // Cohérent avec wornThresholdFor : SOFT~18, MEDIUM~32, HARD~48
   const tireLifeBase = tireCompound === 'SOFT' ? 18 : tireCompound === 'HARD' ? 48 : 32;
   const tireLifeRef  = tireLifeBase * (1 + carTireBonus * 0.5 + pilotTireBonus * 0.5);
-  const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.0);
-  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×1.4 au-delà
-  // (réduit de ×1.8 à ×1.4 pour un cliff progressif — pas une falaise verticale)
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.0;
-  // Cap à 0.018 : max ~1.6s de perte par tour sur une voiture en fin de vie de pneu
-  // Réaliste F1 : un pilote sur pneus à bout perd 0.5-1.5s/tour, pas 4-5s
-  const wearPenalty  = Math.min(0.018, tireWear * effectiveDeg * cliffFactor);
+  const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.5);
+  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération forte au-delà.
+  // Le "cliff" F1 réel est brutal — au-delà du seuil, les pneus s'effondrent rapidement.
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 2.2;
+  // Cap à 0.030 : max ~2.7s de perte par tour sur pneus à bout (réaliste F1 cliff).
+  // Un pilote sur SOFT à 130% du seuil perd 1.8-2.5s/tour — écart visible et décisif.
+  const wearPenalty  = Math.min(0.030, tireWear * effectiveDeg * cliffFactor);
   const tireF        = (1 + wearPenalty) / tireData.grip;
 
   // Dirty air — pénalité ~0.1s max sur circuit mixte, jusqu'à ~0.4s sur urbain
@@ -1318,7 +1318,8 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   // flux d'air très perturbé par les bâtiments, pas de DRS efficace.
   let dirtyAirF = 1.0;
   // Fond de peloton : dirty air amplifié (trafic dense, dépassements difficiles)
-  const backmarkerMult = (position >= 12) ? 1.5 : (position >= 8) ? 1.25 : 1.0;
+  // P12+ = 1.8× (renforcé vs 1.5× pour freiner les remontées express depuis le fond)
+  const backmarkerMult = (position >= 12) ? 1.8 : (position >= 8) ? 1.35 : 1.0;
   if (position > 1) {
     const baseDAMultiplier = gpStyle === 'urbain' ? 3.5   // rues étroites — suivi très coûteux
                            : gpStyle === 'technique' ? 1.8  // virages lents — difficile à suivre
@@ -1378,34 +1379,59 @@ function msToLapStr(ms) {
 }
 
 // ─── Stratégie pneus ──────────────────────────────────────
-function chooseStartCompound(laps, weather, pilot = null) {
+function chooseStartCompound(laps, weather, pilot = null, gridPos = 10) {
   if (weather === 'WET')   return 'WET';
   if (weather === 'INTER') return 'INTER';
 
   // Agressivité pilote : gestionPneus bas = agressif = plus enclin au SOFT
   const aggression = pilot ? Math.max(0, (60 - (pilot.gestionPneus || 50)) / 60) : 0.3;
 
+  // ── Restriction réaliste : le SOFT au départ est une arme tactique rare ──
+  // Seuls les pilotes en P1-P3 peuvent l'envisager (stratégie undercut précoce).
+  // P4-P6 : SOFT très exceptionnel (max 5% pour les plus agressifs).
+  // P7+ : jamais de SOFT au départ — trop risqué dans le trafic, pneus détruits T1.
+  const isTop3  = gridPos <= 3;
+  const isMid   = gridPos <= 6;  // P4-P6
+
+  if (!isTop3 && !isMid) {
+    // P7+ : MEDIUM ou HARD uniquement
+    const r = Math.random();
+    if (laps < 45) {
+      return r < 0.70 ? 'MEDIUM' : 'HARD';
+    }
+    return r < 0.45 ? 'MEDIUM' : 'HARD';
+  }
+
+  if (isMid && !isTop3) {
+    // P4-P6 : SOFT exceptionnel seulement (max 6% même pour très agressif)
+    const softChance = aggression * 0.06;
+    const r = Math.random();
+    if (r < softChance) return 'SOFT';
+    if (laps >= 60) return r < softChance + 0.38 ? 'MEDIUM' : 'HARD';
+    return r < softChance + 0.55 ? 'MEDIUM' : 'HARD';
+  }
+
+  // P1-P3 : SOFT tactiquement viable mais pas dominant
   if (laps >= 60) {
-    // Long GP : quasi personne ne démarre en SOFT (trop risqué)
-    // Agressifs ou qualifiés devant peuvent tenter le SOFT pour sous-cutter tôt
-    const softChance = aggression * 0.20; // max ~20% pour les très agressifs
+    // Long GP : SOFT reste risqué même devant — max ~15% pour les très agressifs
+    const softChance = aggression * 0.15;
     const r = Math.random();
     if (r < softChance)          return 'SOFT';
     if (r < softChance + 0.40)   return 'MEDIUM';
     return 'HARD';
   } else if (laps >= 45) {
-    // GP moyen : SOFT possible pour stratégie 2-stop
-    const softChance = 0.15 + aggression * 0.20;
+    // GP moyen : SOFT possible pour stratégie 2-stop anticipée
+    const softChance = 0.10 + aggression * 0.15;
     const r = Math.random();
     if (r < softChance)          return 'SOFT';
     if (r < softChance + 0.55)   return 'MEDIUM';
     return 'HARD';
   } else {
-    // Court GP (<45 tours) : SOFT très viable, MEDIUM dominant
-    const softChance = 0.30 + aggression * 0.25;
+    // Court GP (<45 tours) : SOFT viable pour P1-P3, mais MEDIUM reste dominant
+    const softChance = 0.20 + aggression * 0.18;
     const r = Math.random();
     if (r < softChance)          return 'SOFT';
-    if (r < softChance + 0.50)   return 'MEDIUM';
+    if (r < softChance + 0.52)   return 'MEDIUM';
     return 'HARD';
   }
 }
@@ -1503,12 +1529,36 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false,
   // Stratégie 1-stop : attend 38% de la course avant le 1er arrêt
   if (pitStrategy === 'one_stop' && (pitStops || 0) === 0) {
     const lapsRaced = (totalLaps || 60) - lapsRemaining;
-    if (lapsRaced < (totalLaps || 60) * 0.38) return { pit: false, reason: null };
+    if (lapsRaced < (totalLaps || 60) * 0.38) {
+      // ── Anticipation : si pneus >=70% usés et < 22 tours restants, ne pas attendre ──
+      // Évite le scénario "pneus foutus mais strat dit d'attendre → rentre dans la fenêtre 8 tours"
+      const wornThrAnti = wornThresholdFor(tireCompound, team, pilot);
+      const antiPct = (tireWear || 0) / wornThrAnti;
+      if (antiPct >= 0.70 && lapsRemaining <= 22 && lapsRemaining > 8) {
+        const antiChance = 0.40 + (antiPct - 0.70) * 2.0;
+        if (Math.random() < Math.min(0.90, antiChance)) return { pit: true, reason: 'tires_worn' };
+      }
+      return { pit: false, reason: null };
+    }
+    // Même après 38% : ne pas piter si les pneus sont encore frais (< 40% du seuil d'usure)
+    const wornThrOne = wornThresholdFor(tireCompound, team, pilot);
+    if ((tireWear || 0) < wornThrOne * 0.40) return { pit: false, reason: null };
   }
   // Stratégie 2-stop : 1er arrêt tôt (~22%), 2ème en fin
   if (pitStrategy === 'two_stop' && (pitStops || 0) === 0) {
     const lapsRaced = (totalLaps || 60) - lapsRemaining;
-    if (lapsRaced < (totalLaps || 60) * 0.22) return { pit: false, reason: null };
+    if (lapsRaced < (totalLaps || 60) * 0.22) {
+      // Même logique d'anticipation pour le 1er arrêt 2-stop
+      const wornThrAnti2 = wornThresholdFor(tireCompound, team, pilot);
+      const antiPct2 = (tireWear || 0) / wornThrAnti2;
+      if (antiPct2 >= 0.70 && lapsRemaining <= 22 && lapsRemaining > 8) {
+        if (Math.random() < 0.55) return { pit: true, reason: 'tires_worn' };
+      }
+      return { pit: false, reason: null };
+    }
+    // Ne pas piter si pneus < 35% usés (strat 2-stop anticipée mais pneus encore bons)
+    const wornThrTwo = wornThresholdFor(tireCompound, team, pilot);
+    if ((tireWear || 0) < wornThrTwo * 0.35) return { pit: false, reason: null };
   }
   // ── Fenêtre du 2ème arrêt pour les stratèges 2-stop ─────────
   // Sans cette règle, les pneus HARD post-1er arrêt durent trop longtemps
@@ -1516,13 +1566,19 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false,
   if (pitStrategy === 'two_stop' && (pitStops || 0) === 1) {
     const lapsRaced = (totalLaps || 60) - lapsRemaining;
     const pct       = lapsRaced / (totalLaps || 60);
-    // Fenêtre 2ème arrêt : entre 58% et 80% de la course
-    if (pct >= 0.58 && lapsRemaining > 12) {
-      const urgency = Math.min(1, (pct - 0.58) / 0.20); // 0→1 entre 58% et 78%
+    // ── Adaptation réelle : ne piter que si les pneus le justifient ──
+    // Un pilote sur HARD à 40 tours encore neufs ne devrait pas piter à T58 par principe.
+    const wornThr2s = wornThresholdFor(tireCompound, team, pilot);
+    const wornPct2s = (tireWear || 0) / wornThr2s;
+    // Fenêtre 2ème arrêt : entre 58% et 80% de la course, MAIS seulement si >= 45% usé
+    if (pct >= 0.58 && lapsRemaining > 12 && wornPct2s >= 0.45) {
+      const urgency = Math.min(1, (pct - 0.58) / 0.20);
       if (Math.random() < 0.15 + urgency * 0.65) return { pit: true, reason: 'two_stop_plan' };
     }
-    // Filet de sécurité : >82% de la course sans 2ème stop → forcer
-    if (pct > 0.82 && lapsRemaining > 8) return { pit: true, reason: 'two_stop_plan' };
+    // Filet de sécurité : >82% de la course sans 2ème stop ET pneus >= 55% usés → forcer
+    if (pct > 0.82 && lapsRemaining > 8 && wornPct2s >= 0.55) return { pit: true, reason: 'two_stop_plan' };
+    // Si pneus vraiment trop usés (>85%) → pit de toute façon même hors fenêtre
+    if (wornPct2s >= 0.85 && lapsRemaining > 8) return { pit: true, reason: 'tires_worn' };
   }
 
   // Mode overcut : reste dehors intentionnellement
@@ -2132,13 +2188,20 @@ function overtakeDescription(attacker, defender, gpStyle) {
     `${ae}**${a}** prend l'extérieur avec du culot — enroule et ressort devant ${de}**${d}**.`,
   ];
   const undercut = [
-    `${ae}**${a}** refait son retard sur pneus frais — double ${de}**${d}** qui n'a aucune réponse.`,
+    `${ae}**${a}** profite de ses pneus plus frais — déborde ${de}**${d}** qui commence à souffrir en gestion.`,
+    `${ae}**${a}** remonte sur ses pneus d'un meilleur âge — double ${de}**${d}** qui n'a aucune réponse.`,
   ];
+  const pureSpeed = [
+    `${ae}**${a}** surgit dans la ligne droite${drs ? ' en DRS 📡' : ''} — passe côté intérieur, ${de}**${d}** ne peut rien faire.`,
+    `${ae}**${a}** prend le sillage de ${de}**${d}**${drs ? ' et active le DRS 📡' : ''} — déborde proprement.`,
+  ];
+  // "pneus frais post-pit" uniquement si l'attaquant a réellement pité
+  const hasFreshTires = (attacker.pitStops || 0) > 0 && (attacker.tireAge || 0) < 12;
   if (drs)                     return pick(straights);
   if (freinage)                return pick(braking);
   if (gpStyle === 'technique') return pick(corner);
-  if (gpStyle === 'endurance') return pick(undercut);
-  return pick([...straights, ...braking, ...corner]);
+  if (gpStyle === 'endurance' && hasFreshTires) return pick(undercut);
+  return pick([...straights, ...braking, ...corner, ...(hasFreshTires ? undercut : pureSpeed)]);
 }
 
 // Description physique d'un accident solo — drama selon la position
@@ -5279,12 +5342,16 @@ function ptsByPos(pos) { return F1_PTS[pos - 1] || 0; }
 
 // ── Scénarios UNIFORMES : même résultat à chaque GP restant ──────────────────
 const UNIFORM_TEMPLATES = [
-  { cPos: 1, lPos: 10, label: 'Victoire + leader hors top 5',  tag: '💥 Idéal'        },
-  { cPos: 1, lPos: 5,  label: 'Victoire + leader P5',           tag: '🔥 Optimiste'    },
-  { cPos: 1, lPos: 3,  label: 'Victoire + leader podium',       tag: '⚡ Classique'    },
-  { cPos: 2, lPos: 5,  label: 'P2 + leader P5',                 tag: '📉 Conservateur' },
-  { cPos: 1, lPos: 2,  label: 'Victoire + leader P2',           tag: '📊 Serré'        },
-  { cPos: 2, lPos: 3,  label: 'P2 + leader podium',             tag: '🔩 Difficile'    },
+  // ── Scénarios minimalistes (fin de saison serrée) ────────────
+  { cPos: 1, lPos: 2,  label: 'Victoire + leader P2',            tag: '🪡 Ultra-serré'  },
+  { cPos: 1, lPos: 3,  label: 'Victoire + leader podium',        tag: '⚡ Classique'    },
+  { cPos: 2, lPos: 3,  label: 'P2 + leader podium',              tag: '🔩 Difficile'    },
+  { cPos: 2, lPos: 4,  label: 'P2 + leader P4',                  tag: '🔧 Serré'        },
+  // ── Scénarios intermédiaires ─────────────────────────────────
+  { cPos: 1, lPos: 5,  label: 'Victoire + leader P5',            tag: '🔥 Optimiste'    },
+  { cPos: 2, lPos: 5,  label: 'P2 + leader P5',                  tag: '📉 Conservateur' },
+  // ── Scénarios optimistes ─────────────────────────────────────
+  { cPos: 1, lPos: 10, label: 'Victoire + leader hors top 5',    tag: '💥 Idéal'        },
 ];
 
 // ── Scénarios MIXTES : résultats différents GP par GP ───────────────────────
@@ -5410,10 +5477,14 @@ function buildRealisticScenarios(deficit, gpsLeft) {
     });
   }
 
-  // Trier : titre d'abord, puis par gain total desc
+  // Trier : titre d'abord (avance minimale en premier = scénario le plus facile),
+  // puis par gain total desc pour les scénarios sans titre
   return all.sort((a, b) => {
     if (a.titleWon && !b.titleWon) return -1;
     if (!a.titleWon && b.titleWon) return 1;
+    // Les deux gagnent le titre : préférer celui qui finit avec le moins d'avance
+    // (= le plus facile à atteindre, ex: +1pt suffit vs +18pts)
+    if (a.titleWon && b.titleWon) return Math.abs(a.gapAfterAll) - Math.abs(b.gapAfterAll);
     return b.totalGain - a.totalGain;
   });
 }
@@ -5497,11 +5568,13 @@ function genTitleScenariosArticles(allStandings, pilotMap, teamMap, gpsLeft, sea
 
     const deficit   = leaderPts - challenger.points;
     const scenarios = buildRealisticScenarios(deficit, gpsLeft);
-    const best      = scenarios.find(s => s.titleWon);   // ← titre réellement remporté
+    // best = scénario avec titre qui demande le moins d'avance (le plus accessible)
+    const winnableScens = scenarios.filter(s => s.titleWon);
+    const best      = winnableScens.length ? winnableScens[0] : null; // déjà trié par avance min
 
-    // Ligne de résumé du meilleur scénario qui permet le titre
+    // Ligne de résumé du scénario minimal pour le titre
     const bestLine = best
-      ? `*Scénario le plus accessible pour remporter le titre :* ${best.label} (+${best.gainPerGP}pts/GP sur tous les GPs) → finit avec **+${Math.abs(best.gapAfterAll)} pts d'avance**.`
+      ? `*Scénario le plus accessible :* ${best.label} → finit avec seulement **+${Math.abs(best.gapAfterAll)} pt${Math.abs(best.gapAfterAll) > 1 ? 's' : ''} d'avance** — chaque point compte.`
       : `*Aucun scénario ne permet le titre en ${gpsLeft} GP${gpsLeft > 1 ? 's' : ''} — mais mathématiquement vivant.*`;
 
     // Tableau compact des 3 premiers scénarios
@@ -8029,7 +8102,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     const pilot = pilots.find(p => String(p._id) === String(g.pilotId));
     const team  = teams.find(t => String(t._id) === String(pilot?.teamId));
     if (!pilot || !team) return null;
-    const startCompound = chooseStartCompound(totalLaps, weather, pilot);
+    const startCompound = chooseStartCompound(totalLaps, weather, pilot, idx + 1);
     return {
       pilot, team,
       pos          : idx + 1,
@@ -8551,7 +8624,24 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           incidentText = crashSoloDescription(driver, lap, gpStyle);
           if (incidentText) {
             events.push({ priority: 10, text: incidentText, gif: pickGif('crash_solo') });
-            if (driver.pilot?.personality && Math.random() < 0.4) {
+            // Radio réaction crash solo — plus émotionnelle que le getRadioQuote générique
+            if (Math.random() < 0.70) {
+              const nmC = driver.pilot.name;
+              const teC = driver.team.emoji;
+              const posC = driver.pos;
+              const crashRadio = posC <= 3 ? pick([
+                `📻 *${teC} Muret → ${nmC} : "T'es blessé ? Réponds-nous."*\n› *${nmC} : "Non, ça va... mais la voiture est fichue."*`,
+                `📻 *${nmC} à la radio : "${pick(['Merde...','Impossible...','J\'arrive pas à y croire.'])}"*\n› *${teC} Muret : "C'est la course — t'étais fort aujourd'hui. Tout va bien ?"*`,
+                `📻 *${teC} Ingénieur : "${nmC}, tu vas bien ?" — ${nmC} : "Oui... mais ${posC === 1 ? 'j\'avais la course en main' : 'on perdait rien'}. C'est dur."*`,
+              ]) : posC <= 8 ? pick([
+                `📻 *${teC} Muret : "${nmC}, tu es OK ?" — ${nmC} : "Oui. Désolé pour la voiture."*`,
+                `📻 *${nmC} radio : "${pick(['Ça arrive...','C\'est ma faute.','J\'ai perdu l\'arrière.'])}"*`,
+              ]) : pick([
+                `📻 *${teC} ${nmC} : "Ça glissait depuis quelques tours. J'ai rien pu faire."*`,
+                `📻 *${teC} Muret : "${nmC}, gare la voiture si tu peux. T'es OK ?"*`,
+              ]);
+              events.push({ priority: 4, text: crashRadio });
+            } else if (driver.pilot?.personality && Math.random() < 0.4) {
               const rq = getRadioQuote(driver.pilot, 'dnf');
               if (rq) events.push({ priority: 2, text: `📻 *Radio ${driver.pilot.name} :* *"${rq}"*` });
             }
@@ -8582,6 +8672,25 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         ];
         incidentText = pick(mechFlavors);
         if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('mechanical') });
+
+        // ── Radio réaction panne mécanique (pilote ou muret) ──
+        if (Math.random() < 0.75) {
+          const nmRadio = driver.pilot.name;
+          const teRadio = driver.team.emoji;
+          const arch = driver.pilot.personality?.archetype || null;
+          const mechRadioLines = pos <= 3 ? pick([
+            `📻 *${teRadio} Muret → ${nmRadio} : "Arrête la voiture — moteur hors service. C'est terminé. Désolé."*\n› *${nmRadio} coupe le moteur en silence. Pas un mot. La déception parle d'elle-même.*`,
+            `📻 *${nmRadio} : "${pick(['Putain...','Non, non, non...','C\'est quoi ça ?!'])}"*\n› *${teRadio} Muret : "On sait, on analyse. Gare la voiture en sécurité."*`,
+            `📻 *${teRadio} Ingénieur : "Box, box — arrêt moteur. Immobilise la voiture maintenant, ${nmRadio}."*\n› *Une course de **P${pos}** réduite à néant. Le silence dans le box en dit long.*`,
+          ]) : pos <= 8 ? pick([
+            `📻 *${teRadio} Muret → ${nmRadio} : "Anomalie sévère — gare la voiture. C'est fini pour aujourd'hui."*`,
+            `📻 *${nmRadio} radio : "${pick(['Problème moteur...','Je perds tout.','Qu\'est-ce qui se passe ?'])}" — ${teRadio} muret : "On voit. Arrête-toi en sécurité."*`,
+          ]) : pick([
+            `📻 *${teRadio} ${nmRadio} : "Quelque chose a lâché à l'arrière. Je peux pas continuer."*`,
+            `📻 *${teRadio} Muret : "${nmRadio}, immobilise la voiture. DNF confirmé."*`,
+          ]);
+          events.push({ priority: 6, text: mechRadioLines });
+        }
 
       } else if (incident.type === 'PUNCTURE') {
         const canRecover = lapsRemaining > 5 && (driver.pitStops || 0) < 3 && Math.random() < 0.40;
@@ -8779,7 +8888,38 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
 
         driver.totalTime += lt;
-        driver.tireWear  += 1;
+
+        // ── Économie de pneus selon l'avance sur la voiture derrière ──────────
+        // Si le pilote a un gap confortable derrière lui ET n'est pas attaqué,
+        // il "gère" naturellement et ses pneus s'usent moins vite.
+        // Basé sur la stat gestionPneus du pilote (meilleur gestionnaire = économise plus).
+        // Ne s'active pas sous SC ni pendant les 2 tours post-pit (warmup).
+        let tireWearInc = 1.0;
+        if (!scActive && (driver.warmupLapsLeft || 0) === 0) {
+          const behindDrvEco = drivers.find(d => !d.dnf && d.pos === driver.pos + 1);
+          const gapBehindMs = behindDrvEco
+            ? Math.abs(
+                (preLapTimes.get(String(driver.pilot._id)) ?? driver.totalTime)
+                - (preLapTimes.get(String(behindDrvEco.pilot._id)) ?? behindDrvEco.totalTime)
+              )
+            : Infinity;
+          // Fenêtre d'économie : gap > 3s derrière → légère réduction d'usure
+          // Gap > 8s → réduction maximale (pilote "gère" vraiment)
+          // gestionPneus amplifie l'effet (bon gestionnaire profite plus de l'espace)
+          if (gapBehindMs > 3000) {
+            const pilotEcoBonus = (driver.pilot.gestionPneus || 50) / 100; // 0.4-0.99
+            const gapFactor = Math.min(1, (gapBehindMs - 3000) / 5000); // 0→1 entre 3s et 8s
+            // Économie max : -0.40 d'usure/tour pour un gestionnaire 99 avec 8s+ d'avance
+            const ecoReduction = gapFactor * pilotEcoBonus * 0.40;
+            tireWearInc = Math.max(0.60, 1.0 - ecoReduction);
+            driver.managingTires = gapFactor > 0.5; // flag pour narration potentielle
+          } else {
+            driver.managingTires = false;
+          }
+        } else {
+          driver.managingTires = false;
+        }
+        driver.tireWear  += tireWearInc;
         driver.tireAge   += 1;
         if (lt < driver.fastestLap) driver.fastestLap = lt;
         if (lt < fastestLapMs) {
@@ -8887,7 +9027,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       const doPit  = pit && reason !== null;
 
       // ── 📻 Radio "box box" — discret, avant l'annonce officielle du pit ──
-      if (doPit && driver.pos <= 12) {
+      // Ne pas envoyer si lapsRemaining <= 8 (le pit ne s'exécutera pas de toute façon)
+      if (doPit && driver.pos <= 12 && lapsRemaining > 8) {
         const radioKey = `${String(driver.pilot._id)}_${driver.pitStops}`;
         if (!radioFiredLaps.has(radioKey)) {
           radioFiredLaps.add(radioKey);
@@ -9292,9 +9433,10 @@ const exitNeighborStr = neighborAhead && neighborBehind
     // ⚠️  Pas avant T5 hors DNF — les micro-variances des premiers tours ne doivent pas
     //     générer une vague de messages "grapille/recule" irréaliste.
     if (!scActive && !justRestarted && lap > 2) {
-      // Compteur de messages narratifs ce tour (hors DNF/fresh tires) — max 2 par tour
+      // Compteur de messages narratifs ce tour (hors DNF/fresh tires) — max 2 par tour en milieu de course
+      // En début de GP (T3-T6), on monte à 4 pour couvrir le bordel du premier peloton
       let multiPosNarrCount = 0;
-      const MAX_MULTI_NARR = 2;
+      const MAX_MULTI_NARR = (lap <= 6) ? 4 : 2;
 
       for (const driver of ranked) {
         if (driver.pittedThisLap) continue;
@@ -9358,9 +9500,11 @@ const exitNeighborStr = neighborAhead && neighborBehind
             multiPosNarrCount++;
             // Gain de 3+ places en 1 tour sans fresh tires
             if (gained >= 3) {
-              // Ajouter resistance trafic : ralentir ce pilote legerement les prochains tours
+              // Ajouter resistance trafic : ralentir ce pilote les prochains tours
+              // Remontée depuis le fond = trafic dense devant → friction plus longue
+              const trafficPenalty = (driver.startPos >= 12) ? randInt(2, 4) : randInt(1, 2);
               if (!driver.trafficLapsLeft || driver.trafficLapsLeft === 0) {
-                driver.trafficLapsLeft = 1;
+                driver.trafficLapsLeft = trafficPenalty;
               }
               events.push({ priority: 3, text: pick([
                 `📈 **T${lap}** — ${n} progresse de P${driver.lastPos}→**P${driver.pos}** — belles séquences de dépassements mais le trafic se densifie devant.`,
@@ -9621,26 +9765,26 @@ const exitNeighborStr = neighborAhead && neighborBehind
             ]) });
           }
 
-          if (battle.lapsClose === 5 && !radioFiredLaps.has(battleRadioKey5)) {
+          if (battle.lapsClose === 6 && !radioFiredLaps.has(battleRadioKey5)) {
             radioFiredLaps.add(battleRadioKey5);
             const radio5 = battleAreRivals ? pick([
-              `📻 *Ingénieur → **${ahead.pilot.name}** : "**${behind.pilot.name}** est là depuis 5 tours. Tu sais ce qu'il veut. Reste devant."*`,
-              `📻 *${behind.team.emoji} Wall → **${behind.pilot.name}** : "5 tours au contact. Continue — il commence à faire des erreurs."*`,
+              `📻 *Ingénieur → **${ahead.pilot.name}** : "**${behind.pilot.name}** est là depuis 6 tours. Tu sais ce qu'il veut. Reste devant."*`,
+              `📻 *${behind.team.emoji} Wall → **${behind.pilot.name}** : "6 tours au contact. Continue — il commence à faire des erreurs."*`,
               `📻 *"**${ahead.pilot.name}** — il ne lâchera pas. C'est ta rivalité. Gagne-la."*`,
             ]) : pick([
-              `📻 *Ingénieur → **${ahead.pilot.name}** : "P${ahead.pos}, **${behind.pilot.name}** est dans ton DRS depuis 5 tours. Reste propre."*`,
+              `📻 *Ingénieur → **${ahead.pilot.name}** : "P${ahead.pos}, **${behind.pilot.name}** est dans ton DRS depuis 6 tours. Reste propre."*`,
               `📻 *"**${ahead.pilot.name}**, garde la tête froide — **${behind.pilot.name}** est juste derrière depuis ${battle.lapsClose} tours."*`,
               `📻 *${ahead.team.emoji} Wall → cockpit : "Push, push — **${behind.pilot.name}** essaie de te faire une erreur. Reste concentré."*`,
             ]);
             events.push({ priority: battleAreRivals ? 5 : 3, text: radio5 });
-          } else if (battle.lapsClose === 7 && !radioFiredLaps.has(battleRadioKey7)) {
+          } else if (battle.lapsClose === 9 && !radioFiredLaps.has(battleRadioKey7)) {
             radioFiredLaps.add(battleRadioKey7);
             const radio7 = battleAreRivals ? pick([
-              `📻 *"**${ahead.pilot.name}** — ÇA FAIT 7 TOURS. AVEC TON RIVAL. Donne-lui une réponse définitive."*`,
-              `📻 *${behind.team.emoji} Wall → **${behind.pilot.name}** : "7 tours. Il résiste encore. Mais ses pneus ne résisteront pas indéfiniment."*`,
+              `📻 *"**${ahead.pilot.name}** — ÇA FAIT 9 TOURS. AVEC TON RIVAL. Donne-lui une réponse définitive."*`,
+              `📻 *${behind.team.emoji} Wall → **${behind.pilot.name}** : "9 tours. Il résiste encore. Mais ses pneus ne résisteront pas indéfiniment."*`,
               `📻 *"**${behind.pilot.name}**, reste calme. Il craque. Tu le sens. Continue à pousser."* ${battleRivalHeat >= 50 ? `\n› *La tension entre les deux rivaux est palpable sur les ondes radio.*` : ''}`,
             ]) : pick([
-              `📻 *"**${ahead.pilot.name}** — ÇA FAIT 7 TOURS. **${behind.pilot.name}** est toujours là. Donne tout !"*`,
+              `📻 *"**${ahead.pilot.name}** — ÇA FAIT 9 TOURS. **${behind.pilot.name}** est toujours là. Donne tout !"*`,
               `📻 *${behind.team.emoji} Wall → **${behind.pilot.name}** : "Il commence à craquer. Continue à pousser, la position est à toi."*`,
               `📻 *"**${behind.pilot.name}**, reste patient — ses pneus vont lâcher avant les tiens. Continue."*`,
             ]);
@@ -11578,6 +11722,10 @@ const commands = [
     .addIntegerOption(o => o.setName('quantite').setDescription('Nombre de points à ajouter (défaut: 1). Le coût est cumulatif !').setMinValue(1).setMaxValue(10))
     .addIntegerOption(o => o.setName('pilote').setDescription('Ton Pilote 1 ou Pilote 2 à améliorer (défaut: 1)').setMinValue(1).setMaxValue(2)),
 
+  new SlashCommandBuilder().setName('amelioration')
+    .setDescription('Voir le profil complet de ton pilote avec les coûts d\'upgrade de chaque stat')
+    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+
   new SlashCommandBuilder().setName('ecuries')
     .setDescription('Liste des 8 écuries'),
 
@@ -12591,6 +12739,89 @@ async function handleInteraction(interaction) {
 
       embed.addFields({ name: `📊 Carrière — ${totalGPs} GP(s)  ·  Forme : ${formIcons}`, value: perfLine });
     }
+
+    return interaction.editReply({ embeds: [embed] });
+  }
+
+  // ── /ameliorer ────────────────────────────────────────────
+  // ── /amelioration — profil complet avec coûts d'upgrade ─────
+  if (commandName === 'amelioration') {
+    const pilotIndex = interaction.options.getInteger('pilote') || 1;
+    const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
+    if (!pilot) {
+      const allP = await getAllPilotsForUser(interaction.user.id);
+      if (!allP.length) return interaction.editReply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
+      return interaction.editReply({ content: `❌ Tu n'as pas de Pilote ${pilotIndex}.`, ephemeral: true });
+    }
+
+    const team  = pilot.teamId ? await Team.findById(pilot.teamId).lean() : null;
+    const ov    = overallRating(pilot);
+    const tier  = ratingTier(ov);
+    const MAX_STAT = 99;
+
+    // ── Construction du bloc stats ────────────────────────────
+    const STATS_DEF = [
+      { key: 'freinage',      label: 'Freinage',       emoji: '🛑', weight: '17%', role: 'Perf en Q + zones de freinage tardif' },
+      { key: 'controle',      label: 'Contrôle',       emoji: '🎯', weight: '17%', role: 'Consistance, gestion des limites de piste' },
+      { key: 'depassement',   label: 'Dépassement',    emoji: '⚔️', weight: '15%', role: 'Attaque en piste, DRS, undercut' },
+      { key: 'gestionPneus',  label: 'Gestion Pneus',  emoji: '🏎️', weight: '15%', role: 'Durée de vie pneus + économie en avance' },
+      { key: 'defense',       label: 'Défense',        emoji: '🛡️', weight: '13%', role: 'Résistance aux dépassements' },
+      { key: 'adaptabilite',  label: 'Adaptabilité',   emoji: '🌦️', weight: '12%', role: 'Météo, SC, conditions variables' },
+      { key: 'reactions',     label: 'Réactions',      emoji: '⚡', weight: '11%', role: 'Départ, opportunisme, incidents' },
+    ];
+
+    // Barre de progression visuelle (10 blocs)
+    function statBar(val) {
+      const filled = Math.round(val / 10);
+      const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
+      const color = val >= 80 ? '🟩' : val >= 65 ? '🟨' : val >= 50 ? '🟧' : '🟥';
+      return `${color} \`${bar}\` **${val}**`;
+    }
+
+    const statLines = STATS_DEF.map(({ key, label, emoji, weight, role }) => {
+      const cur  = pilot[key] ?? 50;
+      const cost = cur < MAX_STAT ? calcUpgradeCost(key, cur) : null;
+      const maxd = cur >= MAX_STAT;
+      const spec = pilot.specialization === key ? ` 🏅 *spé active*` : '';
+      const costStr = maxd ? '🔒 MAX' : `**${cost} 🪙** → ${cur + 1}`;
+      return `${emoji} **${label}** *(${weight} overall · ${role})*\n  ${statBar(cur)}${spec}\n  └ Prochain upgrade : ${costStr}`;
+    });
+
+    // Streak spécialisation
+    let streakLine = '';
+    if (pilot.specialization) {
+      const specMeta2 = SPECIALIZATION_META[pilot.specialization];
+      streakLine = `\n🏅 **Spécialisation active : ${specMeta2?.label || pilot.specialization}**\n*${specMeta2?.desc || ''}*`;
+    } else if (pilot.lastUpgradeStat && pilot.upgradeStreak > 0) {
+      const bar3 = '🔥'.repeat(Math.min(pilot.upgradeStreak, 3)) + '⬜'.repeat(Math.max(0, 3 - pilot.upgradeStreak));
+      const statLbl = STATS_DEF.find(s => s.key === pilot.lastUpgradeStat)?.label || pilot.lastUpgradeStat;
+      streakLine = `\n🔥 **Streak spécialisation :** ${bar3} ${pilot.upgradeStreak}/3 sur *${statLbl}*\n*Continue sur cette stat pour débloquer la spécialisation !*`;
+    }
+
+    // Total coins + prochains upgrades abordables
+    const affordableStats = STATS_DEF
+      .filter(({ key }) => (pilot[key] ?? 50) < MAX_STAT && calcUpgradeCost(key, pilot[key] ?? 50) <= pilot.plcoins)
+      .map(({ key, label, emoji }) => `${emoji} ${label} (${calcUpgradeCost(key, pilot[key] ?? 50)} 🪙)`)
+      .join(' · ');
+
+    const flag = pilot.nationality ? pilot.nationality.split(' ')[0] : '';
+    const teamStr = team ? `${team.emoji} ${team.name}` : '*Sans écurie*';
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📊 Profil upgrades — ${pilot.name} ${flag} · Pilote ${pilot.pilotIndex}`)
+      .setColor(tier.color || '#FFD700')
+      .setDescription(
+        `${tier.badge} **${tier.label}** · Overall **${ov}** · ${teamStr}\n` +
+        `💰 **${pilot.plcoins} 🪙** disponibles\n` +
+        streakLine +
+        `\n\n─────────────────────────────\n` +
+        statLines.join('\n\n') +
+        `\n\n─────────────────────────────` +
+        (affordableStats ? `\n✅ **Améliorations accessibles maintenant :**\n${affordableStats}` : `\n💸 *Aucune amélioration accessible avec le solde actuel.*`) +
+        `\n\n💡 *Utilise \`/ameliorer\` pour acheter une amélioration.*`
+      );
+
+    if (pilot.photoUrl) embed.setThumbnail(pilot.photoUrl);
 
     return interaction.editReply({ embeds: [embed] });
   }
@@ -16266,16 +16497,17 @@ async function handleInteraction(interaction) {
         return `${mark}${me ? ' **→**' : ''} P${i+1} ${t?.emoji||''}${p?.name||'?'} ${f} — ${s.points}pts *(${gap})*`;
       });
 
-      // Résumé actionnable
-      const bestCase = scenarios.find(s => s.titleWon);
+      // Résumé actionnable — on cherche le scénario avec le titre ET l'avance la plus petite
+      const winnableScens2 = scenarios.filter(s => s.titleWon);
+      const bestCase = winnableScens2.length ? winnableScens2[0] : null; // trié par avance min
       const bestLabel = bestCase
         ? bestCase.kind === 'uniform'
-          ? `*${bestCase.label}* (même résultat à chaque GP, +${bestCase.totalGain}pts au total)`
-          : `*${bestCase.label}* (scénario mixte, +${bestCase.totalGain}pts au total)`
+          ? `*${bestCase.label}* → +${Math.abs(bestCase.gapAfterAll)} pt${Math.abs(bestCase.gapAfterAll) > 1 ? 's' : ''} d'avance finale (scénario minimal)`
+          : `*${bestCase.label}* (mixte, +${Math.abs(bestCase.gapAfterAll)} pt${Math.abs(bestCase.gapAfterAll) > 1 ? 's' : ''} final)`
         : null;
       const summary = bestCase
         ? `📍 **P${rank}** — Retard : **${deficit} pts** · ${gpsLeft} GPs restants · ${maxRemaining} pts distribuables\n` +
-          `Meilleur scénario pour le titre : ${bestLabel} → finit **+${Math.abs(bestCase.gapAfterAll)}pts** d'avance.`
+          `🎯 Scénario minimal : ${bestLabel}`
         : `📍 **P${rank}** — Retard : **${deficit} pts** · ${gpsLeft} GPs restants · ${maxRemaining} pts distribuables\n` +
           `⚠️ Aucun scénario suffisant — le plus favorable comblerait **${scenarios[0]?.totalGain||0}pts** sur **${deficit}** nécessaires.`;
 
