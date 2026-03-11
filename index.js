@@ -7925,13 +7925,13 @@ async function runScheduledNews(discordClient, slotName = 'soir') {
 
 // ─── SIMULATION COURSE COMPLÈTE ───────────────────────────
 async function simulateRace(race, grid, pilots, teams, contracts, channel, season) {
-  console.log(`[simulateRace] ▶️ Début — ${race.circuit} · ${grid.length} pilotes · ${race.laps} tours`);
-  if (!race || !race.laps || !race.gpStyle) {
-    console.error('[simulateRace] ❌ race invalide :', JSON.stringify({ laps: race?.laps, gpStyle: race?.gpStyle, circuit: race?.circuit }));
+  console.log(`[simulateRace] ▶️ Début — ${race?.circuit} · ${grid?.length} pilotes · ${race?.laps} tours`);
+  if (!race?.laps || !race?.gpStyle) {
+    console.error('[simulateRace] ❌ race invalide :', JSON.stringify({ laps: race?.laps, gpStyle: race?.gpStyle }));
     return { results: [], collisions: [] };
   }
   if (!season) {
-    console.error('[simulateRace] ❌ season est null/undefined — abandon.');
+    console.error('[simulateRace] ❌ season null — abandon.');
     return { results: [], collisions: [] };
   }
   const totalLaps = race.laps;
@@ -8144,7 +8144,6 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   // 🎬  INTRO VIDÉO + PRÉSENTATION TV
   // ══════════════════════════════════════════════════════════
   if (channel && (raceIntroUrl || raceIntroPath)) {
-    console.log('[simulateRace] 🎬 Envoi intro vidéo...');
     try {
       // ── Envoi de la vidéo comme fichier (player Discord click-to-play, pas d'autoplay) ──
       if (raceIntroUrl) {
@@ -8230,23 +8229,32 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   // PRE-RACE — Grille de départ (format F1 : P1 gauche · P2 droite · P3 gauche · P4 droite...)
   // ══════════════════════════════════════════════════════════
   const makeGridLine = (d, pos) => {
-    const ov   = overallRating(d.pilot);
-    const tier = ratingTier(ov);
-    return `\`P${String(pos).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** ${tier.badge}${ov} ${TIRE[d.tireCompound] ? `${TIRE[d.tireCompound].emoji} ${TIRE[d.tireCompound].code}` : '?'}`;
+    if (!d || !d.pilot || !d.team) return `\`P${String(pos).padStart(2,' ')}\` ❓ *Pilote inconnu*`;
+    return `\`P${String(pos).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** ${TIRE[d.tireCompound] ? `${TIRE[d.tireCompound].emoji} ${TIRE[d.tireCompound].code}` : '?'}`;
   };
   // Positions impaires → côté gauche (P1, P3, P5...), positions paires → côté droit (P2, P4, P6...)
   const oddLines  = drivers.filter((_, i) => i % 2 === 0).map((d, i) => makeGridLine(d, i * 2 + 1));
   const evenLines = drivers.filter((_, i) => i % 2 === 1).map((d, i) => makeGridLine(d, i * 2 + 2));
+
+  // Discord field value limit = 1024 chars — tronquer si nécessaire
+  const truncateField = (lines) => {
+    let out = '';
+    for (const l of lines) {
+      if ((out + l + '\n').length > 1020) { out += '*…*'; break; }
+      out += l + '\n';
+    }
+    return out.trim() || '—';
+  };
 
   const gridEmbed = new EmbedBuilder()
     .setTitle(`🏎️ GRILLE DE DÉPART — ${race.emoji} ${race.circuit}`)
     .setColor('#FF1801')
     .setDescription(`${styleEmojis[gpStyle]} **${gpStyle.toUpperCase()}** · ${weatherLabels[weather]} · **${totalLaps} tours**`)
     .addFields(
-      { name: '◀️ Côté gauche (impairs)', value: oddLines.join('\n')  || '—', inline: true },
-      { name: '▶️ Côté droit (pairs)',    value: evenLines.join('\n') || '—', inline: true },
+      { name: '◀️ Côté gauche (impairs)', value: truncateField(oddLines),  inline: true },
+      { name: '▶️ Côté droit (pairs)',    value: truncateField(evenLines), inline: true },
     );
-  await sendEmbed(gridEmbed);
+  try { await sendEmbed(gridEmbed); } catch(e) { console.error('[simulateRace] Erreur embed grille:', e.message); }
   await sleep(3000);
 
   // Formation lap narrative
@@ -8266,12 +8274,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   // ── Safety Car state — initialisé avant la boucle ──────────
   let scState = { state: 'NONE', lapsLeft: 0 };
 
-  // Stocker la référence abort dans un Map global pour que /admin_stop_race puisse l'invoquer
   if (!global.activeRaces) global.activeRaces = new Map();
   let raceAborted = false;
   const raceKey = String(race._id);
   global.activeRaces.set(raceKey, { abort: () => { raceAborted = true; } });
-  console.log(`[simulateRace] 🏁 Boucle de course démarrée — ${totalLaps} tours`);
+  console.log(`[simulateRace] 🏁 Boucle démarrée — ${totalLaps} tours, ${drivers.length} pilotes`);
 
   for (let lap = 1; lap <= totalLaps; lap++) {
     if (raceAborted) {
@@ -17170,6 +17177,7 @@ async function runRace(override, gpIndex = null) {
   }
   console.log(`[runRace] ✅ Lancement course ${race.circuit} (status=${race.status}, slot=${race.slot ?? 'N/A'})`);
 
+  try {
   const { pilots, teams } = await getAllPilotsWithTeams();
   const contracts = await Contract.find({ active: true });
   if (!pilots.length) { console.log('[runRace] ❌ Aucun pilote trouvé — abandon.'); return; }
@@ -17197,7 +17205,6 @@ async function runRace(override, gpIndex = null) {
 
   // ── Grille de départ animée — publiée avant le départ ────
   if (channel) {
-    try {
     const W = ms => new Promise(r => setTimeout(r, ms));
     const allStandingsSnap = standingsBefore.slice().sort((a,b) => b.points - a.points);
     const champMap   = new Map(allStandingsSnap.map((s, i) => [String(s.pilotId), { pts: s.points, rank: i + 1 }]));
@@ -17272,9 +17279,6 @@ async function runRace(override, gpIndex = null) {
       `🚦 *5 feux... 4... 3... 2... 1...*`,
     ]));
     await W(3000);
-    } catch(e) {
-      console.error('[runRace] Erreur bloc pré-course (non bloquant) :', e.message);
-    }
   }
 
   const { results, collisions, penalties } = await simulateRace(race, grid, pilots, teams, contracts, channel, season);
@@ -17467,6 +17471,14 @@ async function runRace(override, gpIndex = null) {
         }, 3 * 24 * 60 * 60 * 1000); // 3 jours après la 1ère vague
       } catch(e) { console.error('Transfer announcement error:', e.message); }
     }, 24 * 60 * 60 * 1000);
+  }
+  } catch(e) {
+    console.error(`[runRace] ❌ CRASH FATAL — ${race?.circuit || '?'} :`, e.message);
+    console.error(e.stack);
+    try {
+      const ch = await getRaceChannel(override);
+      if (ch) await ch.send(`🚨 **Erreur interne** — La course a planté : \`${e.message}\`. Contactez un admin.`);
+    } catch(_) {}
   }
 }
 
