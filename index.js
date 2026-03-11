@@ -619,9 +619,9 @@ const NATIONALITIES = [
 // ============================================================
 
 const TIRE = {
-  SOFT  : { grip: 1.00, deg: 0.0030, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 18-22, mais RAPIDE
-  MEDIUM: { grip: 0.985, deg: 0.0016, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 32-38
-  HARD  : { grip: 0.970, deg: 0.0010, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 50-58, lent mais sûr
+  SOFT  : { grip: 0.993, deg: 0.0026, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 18-22 — avantage ~0.5-0.8s/tour sur pneus frais vs hard
+  MEDIUM: { grip: 0.984, deg: 0.0016, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 32-38
+  HARD  : { grip: 0.976, deg: 0.0010, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 50-58 — pénalité de base réaliste (~0.5s/tour vs soft neuf)
   INTER : { grip: 0.99, deg: 0.0013, emoji: '🟢', code: 'I', label: 'Inter'  },
   WET   : { grip: 0.99, deg: 0.0008, emoji: '🔵', code: 'W', label: 'Wet'    },
 };
@@ -1305,12 +1305,12 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const tireLifeBase = tireCompound === 'SOFT' ? 18 : tireCompound === 'HARD' ? 48 : 32;
   const tireLifeRef  = tireLifeBase * (1 + carTireBonus * 0.5 + pilotTireBonus * 0.5);
   const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.0);
-  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×1.8 au-delà
-  // (réduit de ×3.5 à ×1.8 pour éviter des pertes de 5+ places en 1 seul tour)
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.3;
-  // Cap à 0.046 : max ~4.1s de perte par tour sur une voiture en fin de vie de pneu
-  // Réaliste F1 : un pilote sur pneus à bout perd 1-4s/tour, pas 10-16s
-  const wearPenalty  = Math.min(0.022, tireWear * effectiveDeg * cliffFactor);
+  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération ×1.4 au-delà
+  // (réduit de ×1.8 à ×1.4 pour un cliff progressif — pas une falaise verticale)
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 1.0;
+  // Cap à 0.018 : max ~1.6s de perte par tour sur une voiture en fin de vie de pneu
+  // Réaliste F1 : un pilote sur pneus à bout perd 0.5-1.5s/tour, pas 4-5s
+  const wearPenalty  = Math.min(0.018, tireWear * effectiveDeg * cliffFactor);
   const tireF        = (1 + wearPenalty) / tireData.grip;
 
   // Dirty air — pénalité ~0.1s max sur circuit mixte, jusqu'à ~0.4s sur urbain
@@ -1472,6 +1472,16 @@ function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false,
       if (Math.random() < 0.62) return { pit: true, reason: 'sc_opportunity' };
     }
     return { pit: false, reason: null };
+  }
+
+  // ── SOFT au cliff critique : pit forcé (milieu de course uniquement) ──────
+  // Un pilote en SOFT bien au-delà du seuil ne peut pas raisonnablement continuer
+  // sans perdre massivement du temps — on force le pit SAUF en fin de GP (>8 tours restants).
+  // En fin de GP, un pilote en soft usé reste dehors : pitter n'a plus d'intérêt stratégique.
+  if (tireCompound === 'SOFT' && lapsRemaining > 8) {
+    const wornThreshSoft = wornThresholdFor('SOFT', team, pilot);
+    if (tireWear > wornThreshSoft * 1.3) return { pit: true, reason: 'tires_worn' };
+    if (tireWear > wornThreshSoft * 1.1 && Math.random() < 0.85) return { pit: true, reason: 'tires_worn' };
   }
 
   // Minimum de tours sur les pneus (sauf réparation forcée via tireAge=99)
@@ -2657,6 +2667,7 @@ if (finishedSorted[0]) {
       rivalAffinity,
       seasonPhase,
       totalTeams    : allTeams?.length || 10,
+      cStandSorted,
     };
 
     const block = buildPressBlockWithPersonality(ctx, angle, pilot);
@@ -2943,8 +2954,8 @@ function buildPressBlock(ctx, angle) {
           `"Victoire propre. Le team a été irréprochable ce week-end — en qualif', au pit stop, partout."`,
         ]);
         // Seuil "beaucoup de victoires" relatif à l'envergure de l'équipe
-        const _vrank  = cStandSorted.findIndex(s => String(s.teamId) === String(team._id)) + 1 || 5;
-        const _vperf  = evalPilotPerf(pilot, team, form, _vrank, cStandSorted.length || 10, null);
+        const _vrank  = (ctx.cStandSorted||[]).findIndex(s => String(s.teamId) === String(team._id)) + 1 || 5;
+        const _vperf  = evalPilotPerf(pilot, team, form, _vrank, (ctx.cStandSorted||[]).length || 10, null);
         const isMultiWin = wins >= Math.max(2, _vperf.winTarget);
         const middle = isMultiWin
           ? pick([
@@ -3140,8 +3151,8 @@ function buildPressBlock(ctx, angle) {
           `"Leader, ça n'a de valeur que si ça l'est à la fin de la saison."`,
           `"${pts} points, ${wins} victoires. ${seasonPhase === 'fin' ? 'La course au titre est ouverte.' : 'Saison solide jusqu\'ici.'}"`,
         ]);
-        const _clRank = cStandSorted.findIndex(s => String(s.teamId) === String(team._id)) + 1 || 5;
-        const _clPerf = evalPilotPerf(pilot, team, form, _clRank, cStandSorted.length || 10, null);
+        const _clRank = (ctx.cStandSorted||[]).findIndex(s => String(s.teamId) === String(team._id)) + 1 || 5;
+        const _clPerf = evalPilotPerf(pilot, team, form, _clRank, (ctx.cStandSorted||[]).length || 10, null);
         const closer = wins >= Math.max(2, _clPerf.winTarget)
           ? `"${wins} victoires — ${_clPerf.isTopTeam ? "c'est notre meilleur bilan depuis longtemps" : "personne ne nous attendait là"}. L'équipe est en feu."`
           : `"Régularité avant tout. Chaque point compte dans un championnat comme celui-là."`;
@@ -9135,6 +9146,24 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const preLapP = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
         const bigGap  = Math.abs(preLapP - preLapD) > 5000; // > 5s = changement stratégique, pas un dépassement en piste
 
+        // ── Tours 1-4 : stabiliser la grille — seuls les duels réels passent ───
+        // Un dépassement légitime en début de GP nécessite un gap pré-tour < 1.5s
+        // (les voitures sont proches sur une grille serrée).
+        // Gap > 1.5s sur ces tours = "rangement naturel" selon le rythme, pas un duel narratable.
+        // On annule le changement de position physiquement pour éviter l'effet "6 dépassements en T3".
+        const isEarlyRace = lap <= 4;
+        if (isEarlyRace && !bigGap) {
+          const preGap = Math.abs(preLapP - preLapD);
+          if (preGap > 1500) {
+            // Annuler le dépassement physiquement : remettre les totalTime pour que le classement ne change pas
+            const tmpTime = driver.totalTime;
+            driver.totalTime = passed.totalTime - 1;
+            passed.totalTime = tmpTime + 1;
+            // Re-sync des positions sera fait au prochain sort — skip la narration
+            continue;
+          }
+        }
+
         // Gap > 3s : pas un dépassement en piste (pit, SC, dégâts...) — narration sobre
         // Gap > 5s avant le tour : changement de position dû à la stratégie (pit, pénalité…), pas un vrai dépassement
         if (bigGap) {
@@ -9214,6 +9243,12 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const ovLostPos = passed.lastPos + 1;
         const ovForLead = ovNewPos === 1;
         const ovIsTop3  = ovNewPos <= 3 || ovLostPos <= 3;
+
+        // ── Flavour début de GP : trafic dense, dépassements tendus ──
+        const earlyRaceTag = isEarlyRace && !ovForLead && !ovIsTop3
+          ? `\n🚦 *Début de GP — le trafic est dense, chaque mètre compte.*`
+          : '';
+
         const ovHeader  = ovForLead
           ? `***🏆 T${lap} — CHANGEMENT EN TÊTE !!!***${drsTag}`
           : ovIsTop3
@@ -9222,7 +9257,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
               ? `👥 **T${lap} — DUEL INTERNE !**${drsTag}`
               : isCounterAttack
                 ? `🔄 **T${lap} — CONTRE-ATTAQUE !**${drsTag}`
-                : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
+                : isEarlyRace
+                  ? `⚔️ **T${lap} — DÉPASSEMENT ! Trafic dense en début de course !**${drsTag}`
+                  : `⚔️ **T${lap} — DÉPASSEMENT !**${drsTag}`;
 
         const howDesc = isCounterAttack
           ? counterAttackDescription(driver, passed, gpStyle)
@@ -9233,7 +9270,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
         events.push({
           priority: ovForLead ? 9 : ovIsTop3 ? 8 : areTeammates ? 7 : isCounterAttack ? 7 : 6,
-          text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}${teammateTag}`,
+          text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}${teammateTag}${earlyRaceTag}`,
           gif: pickGif(gifCat),
         });
         // Radio quote dépasseur
@@ -9252,7 +9289,13 @@ const exitNeighborStr = neighborAhead && neighborBehind
     // IMPORTANT : les pneus usés ne causent PAS directement une perte de place —
     // ils ralentissent le pilote et les autres le dépassent via le système overtake.
     // Ici on mentionne juste le MOUVEMENT et son contexte probable.
+    // ⚠️  Pas avant T5 hors DNF — les micro-variances des premiers tours ne doivent pas
+    //     générer une vague de messages "grapille/recule" irréaliste.
     if (!scActive && !justRestarted && lap > 2) {
+      // Compteur de messages narratifs ce tour (hors DNF/fresh tires) — max 2 par tour
+      let multiPosNarrCount = 0;
+      const MAX_MULTI_NARR = 2;
+
       for (const driver of ranked) {
         if (driver.pittedThisLap) continue;
         if (driver.dnf) continue;
@@ -9273,8 +9316,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
         if (posChange < 0) {
           // ── Perte de positions ──────────────────────────────
-          // Les pneus usés sont du CONTEXTE (il est lent), pas la CAUSE directe.
-          // La cause : plusieurs adversaires l'ont passé ce même tour.
+          if (multiPosNarrCount >= MAX_MULTI_NARR) continue;
+          multiPosNarrCount++;
+
           const lost     = Math.abs(posChange);
           const severity = lost >= 5 ? '🚨' : '⚠️';
           const tireCtx  = isTireWorn
@@ -9290,6 +9334,8 @@ const exitNeighborStr = neighborAhead && neighborBehind
           // ── Gain de positions ───────────────────────────────
           const gained = posChange;
           if (isFreshTire) {
+            if (multiPosNarrCount >= MAX_MULTI_NARR) continue;
+            multiPosNarrCount++;
             events.push({ priority: 4, text: pick([
               `📈 **T${lap}** — ${n} remonte **P${driver.lastPos}→P${driver.pos}** sur pneus frais ${tireEmoji} ! Les gommes neuves font toute la différence.`,
               `📈 **T${lap}** — ${n} (+${gained} place${gained>1?'s':''}, P${driver.lastPos}→**P${driver.pos}**) — pneus frais ${tireEmoji}, il dévore le classement. La stratégie paye.`,
@@ -9307,8 +9353,10 @@ const exitNeighborStr = neighborAhead && neighborBehind
               `📊 **T${lap}** — L'abandon de ${dnfNames} profite à ${n} qui remonte P${driver.lastPos}→**P${driver.pos}**.`,
             ]) });
           } else {
-            // Resist trafic : gain de 3+ places en 1 tour sans fresh tires = suspect
-            // On narrativise max 2 et on ajoute contexte trafic si trop gros
+            // Gain de 3+ places en 1 tour sans fresh tires
+            if (multiPosNarrCount >= MAX_MULTI_NARR) continue;
+            multiPosNarrCount++;
+            // Gain de 3+ places en 1 tour sans fresh tires
             if (gained >= 3) {
               // Ajouter resistance trafic : ralentir ce pilote legerement les prochains tours
               if (!driver.trafficLapsLeft || driver.trafficLapsLeft === 0) {
@@ -9316,7 +9364,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
               }
               events.push({ priority: 3, text: pick([
                 `📈 **T${lap}** — ${n} progresse de P${driver.lastPos}→**P${driver.pos}** — belles séquences de dépassements mais le trafic se densifie devant.`,
-                `📈 **T${lap}** — ${n} grapille du terrain (P${driver.lastPos}→**P${driver.pos}**) — plusieurs voitures dans le DRS, il va falloir passer une � une.`,
+                `📈 **T${lap}** — ${n} grapille du terrain (P${driver.lastPos}→**P${driver.pos}**) — plusieurs voitures dans le DRS, il va falloir passer une à une.`,
               ]) });
             } else {
               events.push({ priority: 3, text: pick([
