@@ -11088,6 +11088,20 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
             const expiredCount = await startTransferPeriod();
             const ch = await client.channels.fetch(RACE_CHANNEL).catch(() => channel);
             if (ch) await ch.send(`🔄 **MERCATO OUVERT** — ${expiredCount} contrat(s) expiré(s). Utilisez \`/offres\` pour voir vos propositions.`);
+            // 2ème vague automatique — 3 jours après la 1ère
+            setTimeout(async () => {
+              try {
+                const ch2 = await client.channels.fetch(RACE_CHANNEL).catch(() => null);
+                const waveCount = await startSecondTransferWave(ch2);
+                if (ch2) {
+                  if (waveCount) {
+                    await ch2.send(`🔄 **MERCATO — 2ème vague** — ${waveCount} nouvelle(s) offre(s) pour les pilotes encore libres. Utilisez \`/offres\` pour consulter.`);
+                  } else {
+                    await ch2.send('✅ **Mercato clôturé** — Tous les pilotes libres ont trouvé une écurie. La grille est complète !');
+                  }
+                }
+              } catch(e) { console.error('[second wave auto]', e.message); }
+            }, 3 * 24 * 60 * 60 * 1000); // 3 jours après la 1ère vague
           } catch(e) { console.error('[applyRaceResults ceremony]', e.message); }
         }, 5 * 60 * 1000); // 5 min → conf de presse (3 min) a le temps de finir
       }
@@ -11695,7 +11709,7 @@ async function startTransferPeriod() {
         const existOffer = await TransferOffer.findOne({ pilotId: tp._id, teamId: team._id, status: 'pending' });
         if (existOffer) continue;
         const perfMultiplier = perf.isChamp ? 1.30 : perf.isOverperf ? 1.15 : perf.isSolid ? 1.00 : 0.82;
-        const baseSalaire    = Math.round((expContract.salaireParCourse || 10) * perfMultiplier);
+        const baseSalaire    = Math.round((expContract.salaireBase || 100) * perfMultiplier); // salaireBase est le vrai champ du ContractSchema
         const salaireRenew   = Math.max(5, Math.min(team.budget * 0.40, baseSalaire));
         const dureeRenew     = perf.isChamp ? 3 : perf.isOverperf ? 2 : 1;
         // BUG FIX : utilisait 'salaire', 'duree', 'statut', 'isRenewal' qui n'existent pas dans
@@ -11916,15 +11930,14 @@ async function startTransferPeriod() {
     if (ov < 72 && !isTopChamp) continue;
     // Trier par salaireBase décroissant
     offers.sort((a, b) => b.salaireBase - a.salaireBase);
-    const topOffer = offers[0];
-    // Chaque offre concurrente tente de surenchérir
-    // Salaire de référence initial (avant surenchères) pour le cap
-    const baseCap = Math.round(offers[offers.length - 1].salaireBase * 3.0); // max 3× le moins offrant
+    const topOfferSalaire = offers[0].salaireBase; // salaire de référence (avant surenchères)
+    // Cap : 2× la meilleure offre initiale — évite l'inflation incontrôlée
+    const baseCap = Math.round(topOfferSalaire * 2.0);
     for (let i = 1; i < offers.length; i++) {
       const offer = offers[i];
-      // Surenchère : +10% à +20% sur la meilleure offre visible, cap à 3× le salaire plancher
+      // Surenchère : +10% à +20% sur la meilleure offre de référence, cap à 2× cette référence
       const surenchere = Math.min(
-        Math.round(topOffer.salaireBase * rand(1.08, 1.20)),
+        Math.round(topOfferSalaire * rand(1.08, 1.20)),
         baseCap
       );
       if (surenchere > offer.salaireBase) {
@@ -11957,8 +11970,17 @@ async function startTransferPeriod() {
         const t = await Team.findById(o.teamId);
         if (t) teamNames.push(`${t.emoji} **${t.name}**`);
       }
+      // Détecter si toutes les offres sont des renouvellements (même équipe actuelle)
+      const currentTeamId = pilot.teamId ? String(pilot.teamId) : null;
+      const hasRenewal  = pilotOffers.some(o => String(o.teamId) === currentTeamId);
+      const hasFreeOffers = pilotOffers.some(o => String(o.teamId) !== currentTeamId);
+      const dmIntro = hasRenewal && !hasFreeOffers
+        ? `🔄 **Renouvellement de contrat !** **${pilot.name}** a reçu une proposition de prolongation :`
+        : hasRenewal
+        ? `📬 **Mercato ouvert !** **${pilot.name}** a reçu **${pilotOffers.length}** offre(s) (dont un renouvellement) :`
+        : `📬 **Mercato ouvert !** **${pilot.name}** a reçu **${pilotOffers.length}** offre(s) de contrat :`;
       await dmCh.send(
-        `📬 **Mercato ouvert !** **${pilot.name}** a reçu **${pilotOffers.length}** offre(s) de contrat :\n` +
+        dmIntro + '\n' +
         teamNames.join(', ') + '\n\n' +
         `Utilise \`/offres\` dans le serveur pour les consulter et répondre. Tu as **7 jours** avant expiration.`
       );
@@ -12800,7 +12822,8 @@ async function handleInteraction(interaction) {
 
     // Accepter
     const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
-    if (activeContract) {
+    const isRenewal = activeContract && String(activeContract.teamId) === String(offer.teamId);
+    if (activeContract && !isRenewal) {
       return interaction.reply({
         content: `❌ Contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin pour changer d'écurie.`,
         ephemeral: true,
@@ -12809,7 +12832,13 @@ async function handleInteraction(interaction) {
 
     const team   = await Team.findById(offer.teamId);
     const inTeam = await Pilot.countDocuments({ teamId: team._id });
-    if (inTeam >= 2) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
+    // Pour un renouvellement, le pilote compte déjà dans l'équipe → seuil toléré à 2 (pas 1)
+    if (!isRenewal && inTeam >= 2) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
+
+    // Si renouvellement : désactiver l'ancien contrat avant d'en créer un nouveau
+    if (isRenewal && activeContract) {
+      await Contract.findByIdAndUpdate(activeContract._id, { active: false });
+    }
 
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
     await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
@@ -13921,14 +13950,19 @@ async function handleInteraction(interaction) {
       return interaction.editReply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
 
     const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
-    if (activeContract) return interaction.editReply({
+    const isRenewal = activeContract && String(activeContract.teamId) === String(offer.teamId);
+    if (activeContract && !isRenewal) return interaction.editReply({
       content: `❌ **${pilot.name}** (Pilote ${pilot.pilotIndex}) a un contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin pour changer d\'écurie.`,
       ephemeral: true,
     });
 
     const team    = await Team.findById(offer.teamId);
     const inTeam  = await Pilot.countDocuments({ teamId: team._id });
-    if (inTeam >= 2) return interaction.editReply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
+    if (!isRenewal && inTeam >= 2) return interaction.editReply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
+
+    if (isRenewal && activeContract) {
+      await Contract.findByIdAndUpdate(activeContract._id, { active: false });
+    }
 
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
     await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
