@@ -11346,6 +11346,55 @@ ${pretext.body}
 // ============================================================
 //  📰 RÉACTION PILOTE AU REFUS D'OFFRE
 // ============================================================
+// ── Notification DM : offre expirée ou annulée ──────────────
+// Appelé chaque fois qu'une ou plusieurs offres passent en 'expired'
+// involontairement pour le joueur (slot rempli, cron, etc.).
+// offersOrIds : tableau de documents TransferOffer ou d'IDs
+// reason : 'slot_filled' | 'cron' | 'signed_elsewhere'
+async function notifyOffersExpiredDM(offersOrIds, reason) {
+  if (!offersOrIds || !offersOrIds.length) return;
+  try {
+    // Résoudre les IDs en documents si nécessaire
+    const offers = await Promise.all(offersOrIds.map(o =>
+      o._id ? Promise.resolve(o) : TransferOffer.findById(o).lean()
+    ));
+    // Grouper par pilote pour n'envoyer qu'un seul DM résumé
+    const byPilot = new Map();
+    for (const o of offers) {
+      if (!o) continue;
+      const key = String(o.pilotId);
+      if (!byPilot.has(key)) byPilot.set(key, []);
+      byPilot.get(key).push(o);
+    }
+    for (const [pilotId, pilotOffers] of byPilot) {
+      const fp = await Pilot.findById(pilotId).lean();
+      if (!fp?.discordId) continue;
+      const discordUser = await client.users.fetch(fp.discordId).catch(() => null);
+      if (!discordUser) continue;
+      const dmCh = await discordUser.createDM().catch(() => null);
+      if (!dmCh) continue;
+
+      const teamNames = (await Promise.all(pilotOffers.map(async o => {
+        const t = await Team.findById(o.teamId).lean();
+        return t ? `${t.emoji} **${t.name}**` : null;
+      }))).filter(Boolean);
+
+      const intro = reason === 'slot_filled'
+        ? `⌛ **Offre caduque** — L'écurie ${teamNames.join(', ')} a complété son line-up. L'offre faite à **${fp.name}** n'est plus valable.`
+        : reason === 'signed_elsewhere'
+        ? `⌛ **Offre annulée** — Un autre pilote a été recruté par ${teamNames.join(', ')} avant **${fp.name}**. L'offre est caduque.`
+        : `⌛ **Offre expirée** — L'offre de ${teamNames.join(', ')} pour **${fp.name}** a dépassé sa date limite.`;
+
+      const remaining = await TransferOffer.countDocuments({ pilotId: fp._id, status: 'pending' });
+      const hint = remaining > 0
+        ? `\n📬 **${fp.name}** a encore **${remaining} offre(s)** en attente — utilise \`/offres\` pour les consulter.`
+        : `\n📭 **${fp.name}** n'a plus d'offre en attente. Une 2ème vague d'offres peut arriver si le mercato est encore ouvert.`;
+
+      await dmCh.send(intro + hint).catch(() => {});
+    }
+  } catch(e) { console.error('[notifyOffersExpiredDM]', e.message); }
+}
+
 async function publishRefusalReaction(pilot, offer) {
   // Seulement 40% de chance d'article — pas systématique
   if (Math.random() > 0.40) return;
@@ -11797,7 +11846,31 @@ async function startTransferPeriod() {
     }
 
     // Scorer et trier les pilotes libres
+    // ── Filtre de réalisme budgétaire ──────────────────────────
+    // Une équipe ne cible que les pilotes qu'elle peut raisonnablement s'offrir.
+    // Seuil : si le salaire maximal que l'écurie peut proposer est < 40% de ce que
+    // le pilote vaut sur le marché, l'écurie ne fait pas d'offre (trop de risque de refus).
+    // Exception : la dernière équipe de chaque pilote sans offre (coverage pass).
+    const ovMarketValue = (ov) => Math.round((team.budget / 100) * 150 * Math.pow(ov / 75, 1.5));
+    // ── Filtre de réalisme budgétaire + classement championnat ───
+    // Prendre en compte le classement pilotes de la saison écoulée :
+    // un pilote top-10 est traité comme un pilote fort même si son ov est moyen.
+    const pilotStandingsSorted = [...allStandings].sort((a, b) => b.points - a.points);
+    const standingRankMap = new Map(pilotStandingsSorted.map((s, i) => [String(s.pilotId), i + 1]));
+    const totalDrivers = pilotStandingsSorted.length || 1;
+
+    const isAffordable = (p) => {
+      const pOv = overallRating(p);
+      const champRank = standingRankMap.get(String(p._id)) || totalDrivers; // rang dans le classement pilotes
+      // Score de "prestige" : combinaison ov + classement (top 5 = fort bonus)
+      const prestigeScore = pOv + (champRank <= 3 ? 15 : champRank <= 5 ? 10 : champRank <= 10 ? 5 : 0);
+      if (prefersPeakPerformers) return true;              // riche : peut tout se permettre
+      if (!prefersYoungTalent)   return prestigeScore <= 90; // milieu : évite les vraies stars
+      return prestigeScore <= 80;                           // pauvre : uniquement les profils accessibles
+    };
+
     const ranked = freePilots
+      .filter(p => isAffordable(p))
       .map(p => ({ pilot: p, score: scoreCandidate(p) }))
       .sort((a, b) => b.score - a.score);
 
@@ -11846,16 +11919,25 @@ async function startTransferPeriod() {
       );
       const primePodium = Math.round(primeVictoire * rand(0.25, 0.45));
 
-      // Durée du contrat :
-      //  Pilote top (ov ≥ 75) + écurie riche    → contrat court (1 saison — confiance mutuelle)
-      //  Pilote moyen                             → 2 saisons (stabilité)
-      //  Pilote faible + écurie pauvre (pari)    → 3 saisons (investissement long terme)
-      //  Pilote top + écurie pauvre               → 1 saison (le pilote partira vite de toute façon)
+      // Durée du contrat — basée sur le profil équipe, l'ov ET le classement pilote
+      // Logique : un pilote bien classé au championnat est "bankable" → les petites équipes veulent le verrouiller
+      //           une grande équipe prend 1 saison sur les stars pour garder de la flexibilité
+      //           une petite équipe prend 3 saisons sur les profils accessibles pour se stabiliser
+      const pilotChampRank = standingRankMap.get(String(pilot._id)) || totalDrivers;
+      const isTopRanked  = pilotChampRank <= 5;
+      const isMidRanked  = pilotChampRank <= 10;
+      const teamRankLocal = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
+      const isTopTeamLocal   = teamRankLocal <= 3;
+      const isSmallTeamLocal = teamRankLocal > totalTeams - 3;
       let seasons;
-      if (ov >= 78 && prefersPeakPerformers)      seasons = 1;
-      else if (ov >= 78 && prefersYoungTalent)    seasons = 1; // pilote trop fort pour eux, offre de passage
-      else if (ov < 65 && prefersYoungTalent)     seasons = 3; // pari sur un jeune, on verrouille
-      else                                         seasons = 2;
+      if (isTopRanked && prefersPeakPerformers)  seasons = 1;  // star + grande écurie : 1 saison (flexibilité max)
+      else if (isTopRanked && !prefersPeakPerformers) seasons = 2; // star dans petite/moyenne : 2 saisons (elles veulent les garder)
+      else if (ov >= 80 && prefersPeakPerformers) seasons = 1; // très bon pilote + riche : 1 saison
+      else if (ov >= 80) seasons = 2;                          // très bon pilote + autre : 2 saisons
+      else if (ov < 63 && prefersYoungTalent)    seasons = 3; // jeune/faible + petite équipe : pari long terme
+      else if (isSmallTeamLocal && !isTopRanked) seasons = rand(0,1) < 0.5 ? 2 : 3; // petite équipe cherche stabilité
+      else if (isTopTeamLocal)                   seasons = rand(0,1) < 0.6 ? 1 : 2; // grande équipe flexible
+      else                                        seasons = 2; // cas général
 
       // ── Statut proposé : pilote 1 ou 2 ──────────────────────
       // L'écurie propose le statut en fonction du rang du candidat dans son évaluation :
@@ -12375,6 +12457,11 @@ const commands = [
   new SlashCommandBuilder().setName('admin_second_wave')
     .setDescription('[ADMIN] Force la 2ème vague de transferts (pilotes encore libres)'),
 
+  new SlashCommandBuilder().setName('admin_mercato_repair')
+    .setDescription('[ADMIN] Génère des offres pour les pilotes libres sans offre en cours (mercato actif)')
+    .addBooleanOption(o => o.setName('force')
+      .setDescription('Si true : génère aussi pour les pilotes qui ont déjà des offres (recalcul complet)')),
+
   new SlashCommandBuilder().setName('pilotes_libres')
     .setDescription('Liste les pilotes sans équipe pendant le mercato'),
 
@@ -12868,12 +12955,15 @@ async function handleInteraction(interaction) {
         }
       }
     }
-    // Invalider toutes les offres N°1 encore en attente pour cette équipe (le slot N°1 est pris)
-    if (finalStatus === 'numero1') {
-      await TransferOffer.updateMany(
-        { teamId: team._id, status: 'pending', driverStatus: 'numero1', pilotId: { $ne: pilot._id } },
-        { status: 'expired' }
-      );
+    // Invalider les offres de l équipe désormais pleine ou dont le slot N°1 est pris
+    const inTeamAfter = existingTeamPilots.length + 1;
+    const toVoidQuery = inTeamAfter >= 2
+      ? { teamId: team._id, status: 'pending', pilotId: { $ne: pilot._id } }
+      : { teamId: team._id, status: 'pending', driverStatus: 'numero1', pilotId: { $ne: pilot._id } };
+    const toVoidOffers = await TransferOffer.find(toVoidQuery).lean();
+    if (toVoidOffers.length) {
+      await TransferOffer.updateMany(toVoidQuery, { status: 'expired' });
+      notifyOffersExpiredDM(toVoidOffers, 'slot_filled').catch(() => {});
     }
 
     const oldTeamIdForHistory = pilot.teamId || null;
@@ -12925,7 +13015,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-    'action_paddock', 'admin_queue'].includes(commandName);
+    'action_paddock', 'admin_queue', 'admin_mercato_repair'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -13985,11 +14075,15 @@ async function handleInteraction(interaction) {
         }
       }
     }
-    if (finalStatus2 === 'numero1') {
-      await TransferOffer.updateMany(
-        { teamId: team._id, status: 'pending', driverStatus: 'numero1', pilotId: { $ne: pilot._id } },
-        { status: 'expired' }
-      );
+    // Invalider les offres de l équipe désormais pleine ou dont le slot N°1 est pris
+    const inTeamAfter2 = existingTeamPilots2.length + 1;
+    const toVoidQuery2 = inTeamAfter2 >= 2
+      ? { teamId: team._id, status: 'pending', pilotId: { $ne: pilot._id } }
+      : { teamId: team._id, status: 'pending', driverStatus: 'numero1', pilotId: { $ne: pilot._id } };
+    const toVoidOffers2 = await TransferOffer.find(toVoidQuery2).lean();
+    if (toVoidOffers2.length) {
+      await TransferOffer.updateMany(toVoidQuery2, { status: 'expired' });
+      notifyOffersExpiredDM(toVoidOffers2, 'slot_filled').catch(() => {});
     }
     const oldTeamIdForHistory2 = pilot.teamId || null;
     await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id, teamStatus: finalStatus2 });
@@ -16020,6 +16114,134 @@ async function handleInteraction(interaction) {
     await interaction.deferReply();
     const expired = await startTransferPeriod();
     await interaction.editReply(`✅ Période de transfert ouverte ! ${expired} contrat(s) expiré(s).`);
+  }
+
+  // ── /admin_mercato_repair ─────────────────────────────────
+  // Génère des offres pour les pilotes libres sans offre pendant un mercato actif.
+  // Utile si startTransferPeriod a tourné avant que tous les pilotes soient libres,
+  // ou si des offres ont expiré/été annulées sans qu'une cascade ne se déclenche.
+  if (commandName === 'admin_mercato_repair') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const season = await getActiveSeason();
+    if (!season || season.status !== 'transfer')
+      return interaction.editReply({ content: '❌ Aucune période de transfert active.', ephemeral: true });
+
+    const forceAll = interaction.options.getBoolean('force') || false;
+
+    // Pilotes ciblés : libres sans offre pending (ou tous les libres si force=true)
+    const freePilots = await Pilot.find({ teamId: null });
+    if (!freePilots.length)
+      return interaction.editReply({ content: '✅ Aucun pilote libre — mercato terminé !', ephemeral: true });
+
+    const targets = [];
+    for (const fp of freePilots) {
+      const hasPending = await TransferOffer.exists({ pilotId: fp._id, status: 'pending' });
+      if (forceAll || !hasPending) targets.push(fp);
+    }
+    if (!targets.length)
+      return interaction.editReply({ content: `📭 Tous les pilotes libres ont déjà une offre en cours.\n*Utilise \`force:true\` pour recalculer pour tout le monde.*`, ephemeral: true });
+
+    // Équipes avec slots libres, triées budget croissant (petites équipes en dernier recours)
+    const allTeams = await Team.find().lean();
+    const allStandings = await Standing.find({ seasonId: season._id }).lean();
+    const pilotStandingsSorted = [...allStandings].sort((a, b) => b.points - a.points);
+    const standingRankMap = new Map(pilotStandingsSorted.map((s, i) => [String(s.pilotId), i + 1]));
+    const totalDrivers = pilotStandingsSorted.length || 1;
+    const constrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const teamRankMap = new Map(constrStandings.map((s, i) => [String(s.teamId), i + 1]));
+    const totalTeams = allTeams.length;
+
+    const teamsWithSlots = [];
+    for (const t of allTeams) {
+      const cnt = await Pilot.countDocuments({ teamId: t._id });
+      if (cnt < 2) teamsWithSlots.push({ team: t, slots: 2 - cnt });
+    }
+    teamsWithSlots.sort((a, b) => b.team.budget - a.team.budget); // plus riches en premier
+
+    let created = 0;
+    const lines = [];
+
+    for (const fp of targets) {
+      const ov = overallRating(fp);
+      const champRank = standingRankMap.get(String(fp._id)) || totalDrivers;
+
+      // Trouver jusqu'à 2 équipes qui peuvent et veulent ce pilote
+      let offersForPilot = 0;
+      for (const { team, slots } of teamsWithSlots) {
+        if (slots <= 0) continue;
+        const already = await TransferOffer.exists({ teamId: team._id, pilotId: fp._id, status: 'pending' });
+        if (already) continue;
+
+        // Vérifier compatibilité budget/prestige
+        const prestigeScore = ov + (champRank <= 3 ? 15 : champRank <= 5 ? 10 : champRank <= 10 ? 5 : 0);
+        const prefersPeak = team.budget >= 120;
+        const prefersYoung = team.budget < 80;
+        if (!prefersPeak && !prefersYoung && prestigeScore > 90) continue;
+        if (prefersYoung && prestigeScore > 80) continue;
+
+        const tRank = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
+        const bRatio = team.budget / 100;
+        const salaireRep = Math.round(clamp((team.budget / 100) * 150 * Math.pow(ov / 75, 1.5) * rand(0.80, 1.10), 40, 450));
+        const existingInTeam = await Pilot.find({ teamId: team._id }).lean();
+        const statusOffer = existingInTeam.length === 0 ? 'numero1'
+          : overallRating(fp) >= overallRating(existingInTeam[0]) ? 'numero1' : 'numero2';
+        const primeV = Math.round(clamp((200 - tRank * 12) * rand(0.7, 1.1) * bRatio, 0, Math.round(bRatio * 180)));
+        const isTopRanked = champRank <= 5;
+        const isTopTeamL  = tRank <= 3;
+        const isSmallTeamL = tRank > totalTeams - 3;
+        let seas;
+        if (isTopRanked && prefersPeak)    seas = 1;
+        else if (isTopRanked)              seas = 2;
+        else if (ov >= 80 && prefersPeak)  seas = 1;
+        else if (ov < 63 && prefersYoung)  seas = 3;
+        else if (isSmallTeamL)             seas = Math.random() < 0.5 ? 2 : 3;
+        else if (isTopTeamL)               seas = Math.random() < 0.6 ? 1 : 2;
+        else                               seas = 2;
+
+        await TransferOffer.create({
+          teamId: team._id, pilotId: fp._id,
+          coinMultiplier: parseFloat(clamp(bRatio * rand(0.9, 1.5), 0.7, 2.2).toFixed(2)),
+          primeVictoire: Math.max(0, primeV),
+          primePodium: Math.round(primeV * rand(0.25, 0.45)),
+          salaireBase: Math.max(40, salaireRep),
+          seasons: seas,
+          driverStatus: statusOffer,
+          status: 'pending',
+          expiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
+        });
+        console.log(`[MERCATO] 🔧 REPAIR — ${team.emoji||''}${team.name} → ${fp.name} | ${salaireRep}🪙 × ${seas} saison(s)`);
+        created++;
+        offersForPilot++;
+        // Limiter à 2 offres par pilote pour éviter le spam
+        if (offersForPilot >= 2) break;
+      }
+
+      // DM le pilote
+      try {
+        if (fp.discordId && offersForPilot > 0) {
+          const du = await client.users.fetch(fp.discordId).catch(() => null);
+          if (du) {
+            const dmCh = await du.createDM().catch(() => null);
+            if (dmCh) await dmCh.send(`📬 **Nouvelle offre !** **${fp.name}** vient de recevoir **${offersForPilot}** proposition(s) de contrat. Utilise \`/offres\` pour les consulter.`);
+          }
+        }
+      } catch(_) {}
+
+      lines.push(`${offersForPilot > 0 ? '✅' : '⚠️'} **${fp.name}** *(ov ${ov}, #${champRank} champ)* — ${offersForPilot} offre(s) générée(s)`);
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('🔧 Mercato Repair — Résultat')
+      .setColor('#FF6600')
+      .setDescription(
+        `**${created}** offre(s) créée(s) pour **${targets.length}** pilote(s) ciblé(s).\n\n` +
+        lines.join('\n')
+      )
+      .setFooter({ text: forceAll ? 'Mode force: tous les pilotes libres recalculés' : 'Mode normal: pilotes sans offre uniquement' });
+
+    return interaction.editReply({ embeds: [embed], ephemeral: true });
   }
 
   // ── /admin_mercato_log ────────────────────────────────────
@@ -18410,6 +18632,9 @@ async function transferMaintenanceTick() {
   );
   if (expiredResult.modifiedCount > 0) {
     console.log(`[Mercato] ${expiredResult.modifiedCount} offre(s) expirée(s) automatiquement.`);
+    // Récupérer les offres qui viennent d'expirer pour notifier les joueurs
+    const justExpired = await TransferOffer.find({ status: 'expired', expiresAt: { $lt: now, $gt: new Date(now - 5 * 60 * 1000) } }).lean();
+    notifyOffersExpiredDM(justExpired, 'cron').catch(() => {});
   }
 
   // 2. Vérifier si une saison est en mode transfer et si les vagues doivent être (re)lancées
