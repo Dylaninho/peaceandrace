@@ -13962,10 +13962,8 @@ async function handleInteraction(interaction) {
       .setTitle('🏛️ HALL OF FAME — Champions F1 PL')
       .setColor('#FFD700');
 
-    // Charger tous les pilotes une seule fois pour retrouver les équipiers du champion constructeur
+    // Charger tous les pilotes une seule fois (pour retrouver les noms via PilotGPRecord)
     const allPilotsHof = await Pilot.find().lean();
-    // Charger toutes les saisons pour faire le lien seasonYear → seasonId
-    const allSeasonsHof = await Season.find().lean();
 
     for (const e of entries) {
       const specNote = e.topRatedName ? `\n👑 Meilleur pilote en fin de saison : **${e.topRatedName}** *(${e.topRatedOv})*` : '';
@@ -13973,26 +13971,33 @@ async function handleInteraction(interaction) {
       const mostDnfsNote = e.mostDnfsName && e.mostDnfsCount > 0 ? `\n💀 Malchance : **${e.mostDnfsName}** (${e.mostDnfsCount} DNF)` : '';
 
       // Pilotes ayant COURU pour l'écurie championne constructeur cette saison-là
-      // On passe par les Standings de la saison (= pilotes qui ont effectivement scoré des points)
-      // croisés avec teamHistory pour vérifier qu'ils étaient bien dans cette écurie.
+      // Masqué pendant le mercato : les transferts ne sont pas encore conclus,
+      // afficher les noms spoilerait qui reste / qui part.
+      const currentSeason = await Season.findOne({ status: { $in: ['active', 'transfer'] } }).lean();
+      const isMercatoNow  = currentSeason?.status === 'transfer';
+      const isLastSeason  = currentSeason && currentSeason.year === e.seasonYear;
+
       let constrPilotsStr = '';
-      if (e.champConstrName) {
-        const hofSeason = allSeasonsHof.find(s => s.year === e.seasonYear);
-        if (hofSeason) {
-          const seasonStandings = await Standing.find({ seasonId: hofSeason._id }).lean();
-          const standingPilotIds = new Set(seasonStandings.map(s => String(s.pilotId)));
-          const constrPilots = allPilotsHof.filter(p =>
-            standingPilotIds.has(String(p._id)) &&
-            (p.teamHistory || []).some(h =>
-              h.teamName === e.champConstrName &&
-              h.seasonStart <= e.seasonYear &&
-              (h.seasonEnd == null || h.seasonEnd >= e.seasonYear)
-            )
-          );
-          if (constrPilots.length) {
-            constrPilotsStr = '\n👥 ' + constrPilots.map(p => `**${p.name}**`).join(' · ');
+      if (e.champConstrName && !(isMercatoNow && isLastSeason)) {
+        const gpRecords = await PilotGPRecord.find({
+          seasonYear: e.seasonYear,
+          teamName: e.champConstrName,
+        }).lean();
+        const uniquePilotIds = [...new Set(gpRecords.map(r => String(r.pilotId)))];
+        if (uniquePilotIds.length) {
+          // Récupérer les noms depuis les records eux-mêmes pour éviter tout lien avec l'état actuel
+          const nameMap = new Map();
+          for (const r of gpRecords) {
+            if (!nameMap.has(String(r.pilotId))) {
+              const p = allPilotsHof.find(x => String(x._id) === String(r.pilotId));
+              if (p) nameMap.set(String(r.pilotId), p.name);
+            }
           }
+          const names = [...nameMap.values()];
+          if (names.length) constrPilotsStr = '\n👥 ' + names.map(n => `**${n}**`).join(' · ');
         }
+      } else if (isMercatoNow && isLastSeason) {
+        constrPilotsStr = '\n👥 *Révélé après le mercato*';
       }
 
       embed.addFields({
