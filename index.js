@@ -436,6 +436,7 @@ const SeasonSchema = new mongoose.Schema({
   transferStartedAt : { type: Date, default: null },
   secondWaveSentAt  : { type: Date, default: null },
   gridRevealedAt    : { type: Date, default: null },
+  contractsDecremented : { type: Boolean, default: false },
 });
 const Season = mongoose.model('Season', SeasonSchema);
 
@@ -5171,7 +5172,7 @@ function genDevVagueArticle(team, seasonYear) {
     `${team.emoji}${team.name} a travaillé fort en usine ces dernières semaines. Les premiers signes arrivent en piste.\n\n` +
     pick([
       `Pas de révolution — mais une évolution cohérente qui pourrait faire la différence sur les prochains circuits.`,
-      `Les ingénieurs rivaux ont passé du temps dans la pitlane à observer la voiture en sortie de stands. Signe que quelque chose a changé.`,
+      `Les ingénieurs rivaux ont scruté les données de télémétrie depuis la pitlane. Signe que quelque chose a changé.`,
       `"On ne commente pas le travail des autres." La réponse de ${pick(teams => team.name)} masque peut-être une certaine inquiétude.`,
     ]),
   ];
@@ -7908,7 +7909,11 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
     try {
       const lastRec = await PilotGPRecord.findOne({ pilotId: pilot._id })
         .sort({ raceDate: -1 }).lean();
-      recentWin = lastRec && !lastRec.dnf && lastRec.finishPos === 1;
+      // "Récent" = dans les 5 derniers jours — évite "publication dans l'heure de sa victoire"
+      // alors que le pilote a gagné il y a 3 semaines
+      const fiveDaysAgo = Date.now() - 5 * 24 * 60 * 60 * 1000;
+      const isRecent = lastRec?.raceDate && new Date(lastRec.raceDate).getTime() > fiveDaysAgo;
+      recentWin = isRecent && !lastRec.dnf && lastRec.finishPos === 1;
     } catch(_) {}
     markUsed(pilot); return genSocialMediaArticle(pilot, team, standing, season.year, recentWin);
 
@@ -8390,6 +8395,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   }
   let scCooldown       = 0;
   let scRestartCooldown = 0; // tours restants de cap de positions post-SC
+  // Cap positions en début de course : les 3 premiers tours après le départ
+  // le peloton est compact — on limite les remontées express pour rester réaliste.
+  // Lap 1 : max +3 places (départ déjà traité séparément avec +2 via startSwaps)
+  // Laps 2-3 : max +2 places (peloton encore groupé)
+  let startCooldown    = 3; // tours restants de cap de positions post-départ
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
   let prevFastestHolder = null; // pour détecter nouveau meilleur tour
@@ -8677,8 +8687,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         if (!d || !ahead) continue;
         // Un pilote ne peut pas gagner plus de 2 positions au départ (réaliste F1)
         if ((gainMap.get(String(d.pilot._id)) || 0) >= 2) continue;
+        // Seuil plus sélectif (15 vs 12) → moins de swaps, plus d'impact
         const reactDiff = d.pilot.reactions - ahead.pilot.reactions;
-        if (reactDiff > 12 && Math.random() > 0.52) {
+        if (reactDiff > 15 && Math.random() > 0.55) {
           // Swap positions ET totalTime pour que le tri par temps reste cohérent
           const tmpTime = d.totalTime;
           d.totalTime     = ahead.totalTime;
@@ -8692,6 +8703,8 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       }
       // Recalcul propre des positions selon totalTime final
       drivers.sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+      // ⚠️ Synchroniser lastPos = pos ICI pour que les tours suivants ne re-signalent
+      // pas les changements de T1 comme des dépassements normaux
       alive.forEach(d => { d.lastPos = d.pos; });
       const startLeader = drivers.find(d => d.pos === 1) || drivers[0];
       if (startSwaps.length) {
@@ -9083,10 +9096,14 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
             // gestionPneus 50 → 50% de chance de gérer à ce tour
             // Un pilote "iceman" ou "veteran" gère plus, un "showman" pousse plus
             const arch = driver.pilot.personality?.archetype || null;
-            const archBonus = (arch === 'iceman' || arch === 'veteran') ? +10
-                            : (arch === 'showman' || arch === 'rockstar') ? -15
+            // Archetypes réels : guerrier/bad_boy poussent fort même en avance
+            // calculateur/vieux_sage gèrent mieux ; icone/rookie_ambitieux neutres
+            const archBonus = (arch === 'vieux_sage' || arch === 'calculateur') ? +12
+                            : (arch === 'guerrier'   || arch === 'bad_boy')      ? -20
                             : 0;
-            const manageProbability = Math.max(0.15, Math.min(0.85,
+            // Pas de minimum forcé — un pilote agressif (gestionPneus=10, bad_boy) peut
+            // choisir de pousser même avec 8s d'avance. C'est un choix tactique valide.
+            const manageProbability = Math.max(0, Math.min(0.90,
               ((driver.pilot.gestionPneus || 50) + archBonus) / 100
             ));
             const chooseToManage = Math.random() < manageProbability;
@@ -9152,6 +9169,30 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
       });
       drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+    }
+
+    // ── Cap positions début de course : max +3 lap1, +2 laps 2-3 ──────
+    // Empêche les bolides de fond de grille de surgir en tête en 1 tour.
+    // Le peloton est compact au départ → les écarts réels mettent quelques tours à se former.
+    if (startCooldown > 0 && !scActive) {
+      const maxGainStart = lap === 1 ? 3 : 2;
+      const preSnap2 = drivers.filter(d => !d.dnf).map(d => ({ id: String(d.pilot._id), pos: d.pos }));
+      drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => {
+        const prev = preSnap2.find(s => s.id === String(d.pilot._id));
+        const prevPos = prev ? prev.pos : i + 1;
+        const newPos  = i + 1;
+        if (newPos < prevPos - maxGainStart) {
+          const targetPos = prevPos - maxGainStart;
+          const occupant  = drivers.find(dx => !dx.dnf && dx.pos === targetPos);
+          if (occupant && occupant !== d) {
+            const tmpTime = d.totalTime;
+            d.totalTime = occupant.totalTime + 1;
+            occupant.totalTime = tmpTime - 1;
+          }
+        }
+      });
+      drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+      startCooldown--;
     }
 
     // ── Après chaque tour de SC, re-serrer les écarts (drift résiduel) ──
@@ -10739,10 +10780,12 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
       if (!r.dnf) {
         if (r.pos === 1)       repDelta = +4;
         else if (r.pos <= 3)   repDelta = +2;
-        else if (r.pos <= 10)  repDelta = +1;
-        else                   repDelta = -0.5;
+        else if (r.pos <= 6)   repDelta = +1;
+        else if (r.pos <= 10)  repDelta =  0;   // dans les points = neutre
+        else if (r.pos <= 15)  repDelta = -1;   // hors des points = légère perte
+        else                   repDelta = -2;   // fond de grille = perte notable
       } else {
-        repDelta = -2;
+        repDelta = -3; // DNF = perte plus marquée qu'un mauvais résultat
       }
       await updateReputation(pilot, repDelta);
       const streakResult = updateStreak(pilot, {
@@ -10851,6 +10894,31 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
 
   // Évolution voitures après la course
   await evolveCarStats(raceResults, teams);
+
+  // ── Récapitulatif de fin de saison ───────────────────────
+  // Si c'était le dernier GP de la saison et qu'un channel est fourni,
+  // déclencher la cérémonie (même depuis admin_apply_last_race).
+  // Guard : season.status doit être 'active' (pas déjà 'transfer' = cérémonie déjà lancée)
+  if (channel && season?.status === 'active') {
+    try {
+      const remaining = await Race.countDocuments({
+        seasonId: season._id,
+        status: { $nin: ['done', 'race_computed'] },
+      });
+      if (remaining === 0) {
+        // Lancer en arrière-plan pour ne pas bloquer l'appelant
+        setImmediate(async () => {
+          try {
+            await sendSeasonCeremony(season, channel);
+            await Season.findByIdAndUpdate(season._id, { transferStartedAt: new Date() });
+            const expiredCount = await startTransferPeriod();
+            const ch = await client.channels.fetch(RACE_CHANNEL).catch(() => channel);
+            if (ch) await ch.send(`🔄 **MERCATO OUVERT** — ${expiredCount} contrat(s) expiré(s). Utilisez \`/offres\` pour voir vos propositions.`);
+          } catch(e) { console.error('[applyRaceResults ceremony]', e.message); }
+        });
+      }
+    } catch(e) { console.error('[applyRaceResults remaining check]', e.message); }
+  }
 }
 
 async function createNewSeason() {
@@ -11395,11 +11463,19 @@ async function startTransferPeriod() {
   // 1. Passer la saison en mode transfert
   await Season.findByIdAndUpdate(season._id, { status: 'transfer' });
 
-  // 2. Décrémenter tous les contrats actifs
-  await Contract.updateMany({ active: true }, { $inc: { seasonsRemaining: -1 } });
+  // 2. Décrémenter les contrats actifs — UNE SEULE FOIS par mercato.
+  // Guard : si la saison est déjà en status 'transfer' avant cet appel,
+  // les contrats ont déjà été décrémentés (appel initial ou reload du bot).
+  // On utilise le flag contractsDecremented sur la saison pour éviter le double-décrement.
+  const freshSeason = await Season.findById(season._id).lean();
+  const alreadyDecremented = freshSeason?.contractsDecremented === true;
+  if (!alreadyDecremented) {
+    await Contract.updateMany({ active: true }, { $inc: { seasonsRemaining: -1 } });
+    await Season.findByIdAndUpdate(season._id, { contractsDecremented: true });
+  }
 
   // 3. Expirer les contrats à 0 saison restante → pilote libéré
-  const expiredContracts = await Contract.find({ seasonsRemaining: 0, active: true });
+  const expiredContracts = await Contract.find({ seasonsRemaining: { $lte: 0 }, active: true });
   for (const c of expiredContracts) {
     await Contract.findByIdAndUpdate(c._id, { active: false });
     await Pilot.findByIdAndUpdate(c.pilotId, { teamId: null });
@@ -18045,11 +18121,18 @@ async function transferMaintenanceTick() {
   const THREE_DAYS = 3 * ONE_DAY;
 
   // La 1ère vague devait être annoncée 24h après transferStartedAt
-  // Si le bot a redémarré et qu'elle n'a pas eu lieu (aucune offre pending), on la refait
+  // Si le bot a redémarré et qu'elle n'a pas eu lieu (aucune offre pending), on la refait.
+  // Guard supplémentaire : ne relancem PAS si les contrats ont déjà été décrémentés
+  // (ce qui indique que startTransferPeriod a bien tourné au moins une fois).
+  // L'appel à startTransferPeriod est désormais idempotent (ne double-décrémente pas),
+  // mais on évite quand même une relance inutile si tout est déjà fait.
   if (msSinceStart >= ONE_DAY) {
     const pendingCount = await TransferOffer.countDocuments({ status: 'pending' });
     const freePilots   = await Pilot.find({ teamId: null });
-    if (freePilots.length > 0 && pendingCount === 0 && !season.secondWaveSentAt) {
+    const freshS       = await Season.findById(season._id).lean();
+    const alreadyDone  = freshS?.contractsDecremented === true;
+    // Relancer seulement si : pilotes libres + pas d'offres + jamais démarré proprement
+    if (freePilots.length > 0 && pendingCount === 0 && !season.secondWaveSentAt && !alreadyDone) {
       console.log('[Mercato] Relance automatique de la 1ère vague (bot redémarré ?)');
       try {
         const expiredCount = await startTransferPeriod();
