@@ -413,6 +413,7 @@ const TransferOfferSchema = new mongoose.Schema({
   driverStatus     : { type: String, enum: ['numero1', 'numero2', null], default: null },
   status           : { type: String, enum: ['pending','accepted','rejected','expired'], default: 'pending' },
   expiresAt        : Date,
+  createdAt        : { type: Date, default: Date.now },
 });
 const TransferOffer = mongoose.model('TransferOffer', TransferOfferSchema);
 
@@ -630,9 +631,9 @@ const NATIONALITIES = [
 // ============================================================
 
 const TIRE = {
-  SOFT  : { grip: 0.993, deg: 0.0026, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 18-22 — avantage ~0.5-0.8s/tour sur pneus frais vs hard
-  MEDIUM: { grip: 0.984, deg: 0.0016, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 32-38
-  HARD  : { grip: 0.976, deg: 0.0010, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 50-58 — pénalité de base réaliste (~0.5s/tour vs soft neuf)
+  SOFT  : { grip: 0.993, deg: 0.0026, cliff: 2.8, emoji: '🔴', code: 'S', label: 'Soft'   }, // cliff ~lap 18-22 — avantage ~0.5-0.8s/tour sur pneus frais vs hard
+  MEDIUM: { grip: 0.984, deg: 0.0016, cliff: 2.2, emoji: '🟡', code: 'M', label: 'Medium' }, // cliff ~lap 32-38 — cliff plus brutal que le Hard une fois atteint
+  HARD  : { grip: 0.976, deg: 0.0010, cliff: 1.5, emoji: '⚪', code: 'H', label: 'Hard'   }, // cliff ~lap 50-58 — pénalité de base réaliste (~0.5s/tour vs soft neuf), cliff très progressif
   INTER : { grip: 0.99, deg: 0.0013, emoji: '🟢', code: 'I', label: 'Inter'  },
   WET   : { grip: 0.99, deg: 0.0008, emoji: '🔵', code: 'W', label: 'Wet'    },
 };
@@ -1316,9 +1317,11 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const tireLifeBase = tireCompound === 'SOFT' ? 18 : tireCompound === 'HARD' ? 48 : 32;
   const tireLifeRef  = tireLifeBase * (1 + carTireBonus * 0.5 + pilotTireBonus * 0.5);
   const wearRatio    = Math.min(tireWear / Math.max(tireLifeRef, 1), 2.5);
-  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération forte au-delà.
-  // Le "cliff" F1 réel est brutal — au-delà du seuil, les pneus s'effondrent rapidement.
-  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * 2.2;
+  // Cliff progressif : linéaire jusqu'à 70% de vie, puis accélération selon le compound.
+  // SOFT cliff brutal (2.8x), MEDIUM cliff marqué (2.2x), HARD cliff progressif (1.5x)
+  // → un Medium USAGÉ doit être plus lent qu'un Hard USAGÉ : le cliff est plus agressif.
+  const compoundCliff = tireData.cliff ?? 2.2;
+  const cliffFactor  = wearRatio < 0.7 ? 1.0 : 1.0 + (wearRatio - 0.7) * compoundCliff;
   // Cap à 0.030 : max ~2.7s de perte par tour sur pneus à bout (réaliste F1 cliff).
   // Un pilote sur SOFT à 130% du seuil perd 1.8-2.5s/tour — écart visible et décisif.
   const wearPenalty  = Math.min(0.030, tireWear * effectiveDeg * cliffFactor);
@@ -2584,7 +2587,7 @@ function counterAttackDescription(attacker, defender, gpStyle) {
 
 // ─── CONFÉRENCE DE PRESSE — Génération combinatoire ──────
 // Injecte les vraies données de course + saison pour un résultat unique à chaque fois
-async function generatePressConference(raceDoc, finalResults, season, allPilots, allTeams, allStandings, constrStandings) {
+async function generatePressConference(raceDoc, finalResults, season, allPilots, allTeams, allStandings, constrStandings, channel = null) {
   const totalRaces    = 24; // CIRCUITS.length
   const gpNumber      = raceDoc.index + 1;
   const seasonPhase   = gpNumber <= 6 ? 'début' : gpNumber <= 16 ? 'mi' : 'fin';
@@ -7772,6 +7775,25 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
     if (!pB) return null;
     const tA = teamMap.get(String(pA.teamId)), tB = teamMap.get(String(pB.teamId));
     if (!tA || !tB) return null;
+
+    // ── Vérifier la tension réelle entre pA et pB ──────────────────────
+    // Un article pique/drama ne doit pas sortir sans fondement narratif.
+    // Conditions valides : rivalité déclarée OU affinité négative (<-20) OU
+    //   personnalités agressives face à face (bad_boy, guerrier avec rivalry_heat > 0)
+    let tensionOk = false;
+    try {
+      const [sA2, sB2] = [String(pA._id), String(pB._id)].sort();
+      const rel2 = await PilotRelation.findOne({ pilotA: sA2, pilotB: sB2 }).lean();
+      const isRival = String(pA.rivalId) === String(pB._id) || String(pB.rivalId) === String(pA._id);
+      const affinityNeg = rel2 && rel2.affinity < -20;
+      const aggressiveArch = ['bad_boy', 'guerrier'];
+      const bothAggressive = aggressiveArch.includes(pA.personality?.archetype) && aggressiveArch.includes(pB.personality?.archetype);
+      tensionOk = isRival || affinityNeg || bothAggressive;
+    } catch(_) { tensionOk = true; } // fallback si erreur DB
+
+    // Si pas de tension réelle → passer sur un article moins conflictuel
+    if (!tensionOk) return buildArticleData('driver_interview', allPilots, allTeams, teamMap, season, spPhase, usedPilotIds);
+
     markUsed(pA, pB);
     return genDramaArticle(pA, pB, tA, tB, season.year);
 
@@ -7785,7 +7807,8 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
         if (tA && tB) { markUsed(pA, pB); return genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts || 1, '(récent)', season.year, pA.rivalHeat || 0); }
       }
     }
-    return buildArticleData('drama', allPilots, allTeams, teamMap, season, spPhase, usedPilotIds);
+    return buildArticleData('driver_interview', allPilots, allTeams, teamMap, season, spPhase, usedPilotIds);
+  // ↑ Pas de vrai rival trouvé → on passe à une interview, plus cohérent qu'un drama sans contexte
 
   } else if (type === 'transfer_rumor') {
     const pilot = P(), currentTeam = teamMap.get(String(pilot.teamId));
@@ -9936,7 +9959,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
                   `🔴 **T${lap} — ILS SE SONT DÉTRUITS L'UN L'AUTRE !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** hors course. *La rivalité la plus explosive du paddock vient de s'enflammer.*`,
                 ] : [
                   `💥 **T${lap} — DOUBLE CRASH !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent ! **Deux abandons.** La bataille tourne au cauchemar.`,
-                  `🚨 **T${lap}** — Contact violent entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** — les deux voitures dans le bac à graviers. **DNF.**`,
+                  `🚨 ***T${lap} — LES DEUX HORS COURSE !*** ${victim.team.emoji}**${victim.pilot.name}** (P${victim.pos}) et ${other.team.emoji}**${other.pilot.name}** (P${other.pos}) se rentrent dedans dans un contact violent — les deux voitures finissent dans le bac à graviers. ***Double DNF. La course ne pardonne pas.***`,
+                  `💥 **T${lap} — CARNAGE !** Le duel P${victim.pos}/P${other.pos} entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** s'achève de la pire façon — impact brutal, les deux voitures immobilisées. **Deux courses gâchées en une fraction de seconde.**`,
+                  `🔥 ***T${lap}*** — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se détruisent mutuellement : contact violent, les deux dans les graviers. ***La piste retrouve son calme — mais deux pilotes, eux, ont tout perdu ce week-end.***`,
                 ];
                 events.push({ priority: battleAreRivals ? 11 : 10, text: pick(doubleCrashTexts) });
               } else if (rollInc < 0.75) {
@@ -10446,7 +10471,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       const allStandings = await Standing.find({ seasonId: season._id });
       const cStandings   = await ConstructorStanding.find({ seasonId: season._id });
       const confData = await generatePressConference(
-        race, results, season, allPilots, allTeams2, allStandings, cStandings
+        race, results, season, allPilots, allTeams2, allStandings, cStandings, channel
       );
       if (confData?.length) {
         // confData est un tableau de { block: string, pilotId?: ObjectId, photoUrl?: string }
@@ -11527,7 +11552,7 @@ async function startTransferPeriod() {
         // BUG FIX : utilisait 'salaire', 'duree', 'statut', 'isRenewal' qui n'existent pas dans
         // TransferOfferSchema → champs ignorés par Mongoose, offre créée avec valeurs par défaut
         // (salaireBase:100, seasons:1). Correction : vrais noms du schema.
-        await TransferOffer.create({
+        const renewOffer = await TransferOffer.create({
           teamId       : team._id,
           pilotId      : tp._id,
           status       : 'pending',
@@ -11536,6 +11561,7 @@ async function startTransferPeriod() {
           driverStatus : expContract.driverStatus || null,
           expiresAt    : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
         });
+        console.log(`[MERCATO] 📤 RENOUVELLEMENT — ${team.emoji||''}${team.name} → ${tp.name} | ${salaireRenew}🪙/course × ${dureeRenew} saison(s) | statut: ${expContract.driverStatus||'N/A'} | offreId: ${renewOffer._id}`);
       }
     } catch(e) { console.error('[renouvellement IA]', e.message); }
 
@@ -11711,6 +11737,7 @@ async function startTransferPeriod() {
         status: 'pending',
         expiresAt,
       });
+      console.log(`[MERCATO] 📤 OFFRE — ${team.emoji||''}${team.name} → ${pilot.name} | ${Math.max(50, finalSalaireBase)}🪙/course × ${seasons} saison(s) | statut: ${offeredStatus||'N/A'} | ×${coinMultiplier}`);
     }
   }
 
@@ -11882,6 +11909,7 @@ async function startSecondTransferWave(channel) {
         status: 'pending',
         expiresAt,
       });
+      console.log(`[MERCATO] 📤 OFFRE 2ÈME VAGUE — ${team.emoji||''}${team.name} → ${pilot.name} | ${Math.max(40,Math.round(salaireBase*statusMul2))}🪙/course × 1 saison | statut: ${offeredStatus2||'N/A'}`);
       waveOffers++;
     }
   }
@@ -11972,6 +12000,7 @@ const commands = [
 
   new SlashCommandBuilder().setName('profil')
     .setDescription('Voir le profil d\'un pilote')
+    .addStringOption(o => o.setName('nom').setDescription('Nom du pilote (recherche directe — prioritaire)'))
     .addUserOption(o => o.setName('joueur').setDescription('Joueur cible'))
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (si le joueur a 2 pilotes)').setMinValue(1).setMaxValue(2)),
 
@@ -12154,6 +12183,18 @@ const commands = [
   new SlashCommandBuilder().setName('admin_transfer')
     .setDescription('[ADMIN] Lance la période de transfert'),
 
+  new SlashCommandBuilder().setName('admin_mercato_log')
+    .setDescription('[ADMIN] Suivi des offres mercato : envoyées, acceptées, refusées')
+    .addStringOption(o => o.setName('filtre')
+      .setDescription('Filtrer par statut (défaut: toutes)')
+      .addChoices(
+        { name: 'Toutes', value: 'all' },
+        { name: 'En attente', value: 'pending' },
+        { name: 'Acceptées', value: 'accepted' },
+        { name: 'Refusées', value: 'rejected' },
+        { name: 'Expirées', value: 'expired' },
+      )),
+
   new SlashCommandBuilder().setName('admin_second_wave')
     .setDescription('[ADMIN] Force la 2ème vague de transferts (pilotes encore libres)'),
 
@@ -12174,6 +12215,7 @@ const commands = [
 
   new SlashCommandBuilder().setName('historique')
     .setDescription('Historique de carrière multi-saisons d\'un pilote')
+    .addStringOption(o => o.setName('nom').setDescription('Nom du pilote (recherche directe — prioritaire)'))
     .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)'))
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
 
@@ -12224,6 +12266,7 @@ const commands = [
 
   new SlashCommandBuilder().setName('performances')
     .setDescription('📊 Historique détaillé des GPs, équipes et records d\'un pilote')
+    .addStringOption(o => o.setName('nom').setDescription('Nom du pilote (recherche directe — prioritaire)'))
     .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)'))
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2))
     .addStringOption(o => o.setName('vue').setDescription('Que veux-tu voir ?')
@@ -12595,6 +12638,8 @@ async function handleInteraction(interaction) {
       await TransferOffer.findByIdAndUpdate(offerId, { status: 'rejected' });
       // Réaction paddock : chance d'article de news sur le refus
       publishRefusalReaction(pilot, offer).catch(() => {});
+      const rejTeam = await Team.findById(offer.teamId).lean();
+      console.log(`[MERCATO] 🚫 REFUS (bouton) — ${pilot.name} REFUSE l'offre de ${rejTeam?.emoji||''}${rejTeam?.name||offer.teamId} | ${offer.salaireBase}🪙/course × ${offer.seasons} saison(s) | offreId: ${offerId}`);
       return interaction.update({ content: '🚫 Offre refusée.', embeds: [], components: [] });
     }
 
@@ -12667,6 +12712,7 @@ async function handleInteraction(interaction) {
 
     // ── Annonce publique signature (rumeurs mêlées de vrai/faux) ───
     publishSigningRumors(pilot, team, offer).catch(console.error);
+    console.log(`[MERCATO] ✅ SIGNATURE (bouton) — ${pilot.name} ACCEPTE ${team.emoji||''}${team.name} | ${offer.salaireBase}🪙/course × ${offer.seasons} saison(s) | statut: ${finalStatus||'N/A'} | offreId: ${offerId}`);
 
     return interaction.update({
       content: '',
@@ -12854,32 +12900,40 @@ async function handleInteraction(interaction) {
 
   // ── /profil ───────────────────────────────────────────────
   if (commandName === 'profil') {
-    const target     = interaction.options.getUser('joueur') || interaction.user;
-    const pilotIndex = interaction.options.getInteger('pilote') || 1;
+    const nomArg      = interaction.options.getString('nom');
+    const target      = interaction.options.getUser('joueur') || interaction.user;
+    const pilotIndex  = interaction.options.getInteger('pilote') || 1;
 
-    // Si l'utilisateur a 2 pilotes et n'a pas précisé lequel, montrer les deux
-    const allUserPilots = await getAllPilotsForUser(target.id);
-    if (!allUserPilots.length) return interaction.editReply({ content: `❌ Aucun pilote pour <@${target.id}>.`, ephemeral: true });
+    // Recherche par nom : prioritaire sur joueur/index
+    let pilot;
+    if (nomArg) {
+      pilot = await Pilot.findOne({ name: { $regex: nomArg.trim(), $options: 'i' } }).lean();
+      if (!pilot) return interaction.editReply({ content: `❌ Aucun pilote trouvé pour "${nomArg}".`, ephemeral: true });
+    } else {
+      // Si l'utilisateur a 2 pilotes et n'a pas précisé lequel, montrer les deux
+      const allUserPilots = await getAllPilotsForUser(target.id);
+      if (!allUserPilots.length) return interaction.editReply({ content: `❌ Aucun pilote pour <@${target.id}>.`, ephemeral: true });
 
-    // Si l'utilisateur a 2 pilotes et demande son profil sans préciser → afficher le choix
-    if (allUserPilots.length > 1 && !interaction.options.getInteger('pilote') && target.id === interaction.user.id) {
-      const listStr = allUserPilots.map(p => {
-        const ov = overallRating(p); const tier = ratingTier(ov);
-        const flag = p.nationality?.split(' ')[0] || '';
-        return `**Pilote ${p.pilotIndex}** — ${flag} #${p.racingNumber || '?'} **${p.name}** ${tier.badge} ${ov}`;
-      }).join('\n');
-      return interaction.editReply({
-        embeds: [new EmbedBuilder()
-          .setTitle(`🏎️ Tes pilotes`)
-          .setColor('#FF1801')
-          .setDescription(listStr + '\n\n*Utilise `/profil pilote:1` ou `/profil pilote:2` pour voir le détail.*')
-        ],
-        ephemeral: true,
-      });
+      // Si l'utilisateur a 2 pilotes et demande son profil sans préciser → afficher le choix
+      if (allUserPilots.length > 1 && !interaction.options.getInteger('pilote') && target.id === interaction.user.id) {
+        const listStr = allUserPilots.map(p => {
+          const ov = overallRating(p); const tier = ratingTier(ov);
+          const flag = p.nationality?.split(' ')[0] || '';
+          return `**Pilote ${p.pilotIndex}** — ${flag} #${p.racingNumber || '?'} **${p.name}** ${tier.badge} ${ov}`;
+        }).join('\n');
+        return interaction.editReply({
+          embeds: [new EmbedBuilder()
+            .setTitle(`🏎️ Tes pilotes`)
+            .setColor('#FF1801')
+            .setDescription(listStr + '\n\n*Utilise `/profil pilote:1` ou `/profil pilote:2` pour voir le détail.*')
+          ],
+          ephemeral: true,
+        });
+      }
+
+      pilot = await getPilotForUser(target.id, pilotIndex);
+      if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
     }
-
-    const pilot = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
 
     const team     = pilot.teamId ? await Team.findById(pilot.teamId) : null;
     const contract = await Contract.findOne({ pilotId: pilot._id, active: true });
@@ -13766,6 +13820,7 @@ async function handleInteraction(interaction) {
     });
 
     publishSigningRumors(pilot, team, offer).catch(console.error);
+    console.log(`[MERCATO] ✅ SIGNATURE (cmd) — ${pilot.name} ACCEPTE ${team.emoji||''}${team.name} | ${offer.salaireBase}🪙/course × ${offer.seasons} saison(s) | statut: ${finalStatus2||'N/A'} | offreId: ${offerId}`);
 
     return interaction.editReply({
       embeds: [new EmbedBuilder().setTitle('✅ Contrat signé !').setColor(team.color)
@@ -13790,15 +13845,24 @@ async function handleInteraction(interaction) {
       return interaction.editReply({ content: '❌ Cette offre ne t\'appartient pas.', ephemeral: true });
     await TransferOffer.findByIdAndUpdate(offerId, { status: 'rejected' });
     publishRefusalReaction(pilotForRefuse, offer).catch(() => {});
+    const refTeam = await Team.findById(offer.teamId).lean();
+    console.log(`[MERCATO] 🚫 REFUS (cmd) — ${pilotForRefuse.name} REFUSE l'offre de ${refTeam?.emoji||''}${refTeam?.name||offer.teamId} | ${offer.salaireBase}🪙/course × ${offer.seasons} saison(s) | offreId: ${offerId}`);
     return interaction.editReply({ content: `🚫 Offre refusée pour **${pilotForRefuse.name}**.`, ephemeral: true });
   }
 
   // ── /historique ───────────────────────────────────────────
   if (commandName === 'historique') {
+    const nomArg     = interaction.options.getString('nom');
     const target     = interaction.options.getUser('joueur') || interaction.user;
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
-    const pilot  = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    let pilot;
+    if (nomArg) {
+      pilot = await Pilot.findOne({ name: { $regex: nomArg.trim(), $options: 'i' } }).lean();
+      if (!pilot) return interaction.editReply({ content: `❌ Aucun pilote trouvé pour "${nomArg}".`, ephemeral: true });
+    } else {
+      pilot = await getPilotForUser(target.id, pilotIndex);
+      if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    }
 
     // Récupérer tous les standings toutes saisons confondues
     const allStandings = await Standing.find({ pilotId: pilot._id }).sort({ seasonId: 1 });
@@ -14404,12 +14468,19 @@ async function handleInteraction(interaction) {
 
   // ── /performances ─────────────────────────────────────────
   if (commandName === 'performances') {
+    const nomArg     = interaction.options.getString('nom');
     const target     = interaction.options.getUser('joueur') || interaction.user;
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const vue        = interaction.options.getString('vue') || 'recent';
 
-    const pilot = await getPilotForUser(target.id, pilotIndex);
-    if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    let pilot;
+    if (nomArg) {
+      pilot = await Pilot.findOne({ name: { $regex: nomArg.trim(), $options: 'i' } }).lean();
+      if (!pilot) return interaction.editReply({ content: `❌ Aucun pilote trouvé pour "${nomArg}".`, ephemeral: true });
+    } else {
+      pilot = await getPilotForUser(target.id, pilotIndex);
+      if (!pilot) return interaction.editReply({ content: `❌ Aucun Pilote ${pilotIndex} pour <@${target.id}>.`, ephemeral: true });
+    }
 
     const team    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
     const allRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
@@ -15760,6 +15831,46 @@ async function handleInteraction(interaction) {
     await interaction.deferReply();
     const expired = await startTransferPeriod();
     await interaction.editReply(`✅ Période de transfert ouverte ! ${expired} contrat(s) expiré(s).`);
+  }
+
+  // ── /admin_mercato_log ────────────────────────────────────
+  if (commandName === 'admin_mercato_log') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const filtre = interaction.options.getString('filtre') || 'all';
+    const query  = filtre === 'all' ? {} : { status: filtre };
+
+    const offers = await TransferOffer.find(query)
+      .sort({ createdAt: -1 }).limit(30).lean();
+    const allTeams  = await Team.find().lean();
+    const allPilots = await Pilot.find({ _id: { $in: offers.map(o => o.pilotId) } }).lean();
+    const teamMap   = new Map(allTeams.map(t  => [String(t._id), t]));
+    const pilotMap  = new Map(allPilots.map(p => [String(p._id), p]));
+
+    const statusEmoji = { pending: '⏳', accepted: '✅', rejected: '🚫', expired: '⌛' };
+
+    const lines = offers.map(o => {
+      const t = teamMap.get(String(o.teamId));
+      const p = pilotMap.get(String(o.pilotId));
+      const se = statusEmoji[o.status] || '❓';
+      const date = o.createdAt ? new Date(o.createdAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'2-digit' }) : '??';
+      return `${se} **${p?.name || '?'}** ← ${t?.emoji||''}${t?.name||'?'} · ${o.salaireBase}🪙 ×${o.seasons}S · *${date}*`;
+    });
+
+    // Stats globales
+    const all = await TransferOffer.find({}).lean();
+    const counts = { pending:0, accepted:0, rejected:0, expired:0 };
+    for (const o of all) counts[o.status] = (counts[o.status]||0) + 1;
+    const statsLine = `⏳ ${counts.pending} en attente · ✅ ${counts.accepted} acceptées · 🚫 ${counts.rejected} refusées · ⌛ ${counts.expired} expirées`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📋 Log Mercato${filtre !== 'all' ? ` — ${filtre}` : ''} (${offers.length} entrée(s))`)
+      .setColor('#FF6600')
+      .setDescription((lines.join('\n') || '*Aucune offre trouvée.*').slice(0, 4000))
+      .setFooter({ text: statsLine });
+
+    return interaction.editReply({ embeds: [embed], ephemeral: true });
   }
 
   // ── /admin_second_wave ────────────────────────────────────
