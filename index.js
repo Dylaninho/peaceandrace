@@ -12614,7 +12614,7 @@ async function handleInteraction(interaction) {
   // Les commandes admin_force_* et celles avec reply immédiat gèrent leur propre réponse
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
     'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_second_wave', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race', 'reveal_grille', 'admin_grille_next', 'valeur_marche',
-    'fia_reaction', 'h2h'];
+    'fia_reaction', 'h2h', 'admin_scheduler_pause', 'admin_scheduler_resume'];
   const isEphemeral = ['create_pilot','profil','ameliorer','amelioration','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
@@ -15217,20 +15217,22 @@ async function handleInteraction(interaction) {
   }
 
   if (commandName === 'admin_scheduler_pause') {
-    if (!interaction.member.permissions.has('Administrator'))
-      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
+    if (!interaction.member?.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     global.schedulerPaused = true;
-    return interaction.editReply({
+    return interaction.reply({
       content: '⏸️ **Scheduler mis en pause.** Les EL, qualifications et courses ne se déclencheront plus automatiquement.\n> Utilisez `/admin_force_practice`, `/admin_force_quali`, `/admin_force_race` pour lancer manuellement.\n> Réactivez avec `/admin_scheduler_resume`.',
+      ephemeral: false,
     });
   }
 
   if (commandName === 'admin_scheduler_resume') {
-    if (!interaction.member.permissions.has('Administrator'))
-      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
+    if (!interaction.member?.permissions.has('Administrator'))
+      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     global.schedulerPaused = false;
-    return interaction.editReply({
+    return interaction.reply({
       content: '▶️ **Scheduler réactivé.** Les GPs se lanceront automatiquement aux horaires habituels.\n> 🌅 11h EL · 13h Q · 15h Course\n> 🌆 17h EL · 18h Q · 20h Course',
+      ephemeral: false,
     });
   }
 
