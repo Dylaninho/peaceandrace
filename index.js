@@ -13964,24 +13964,34 @@ async function handleInteraction(interaction) {
 
     // Charger tous les pilotes une seule fois pour retrouver les équipiers du champion constructeur
     const allPilotsHof = await Pilot.find().lean();
+    // Charger toutes les saisons pour faire le lien seasonYear → seasonId
+    const allSeasonsHof = await Season.find().lean();
 
     for (const e of entries) {
       const specNote = e.topRatedName ? `\n👑 Meilleur pilote en fin de saison : **${e.topRatedName}** *(${e.topRatedOv})*` : '';
       const mostWinsNote = e.mostWinsName && e.mostWinsCount > 0 ? `\n🏆 Roi des victoires : **${e.mostWinsName}** (${e.mostWinsCount}V)` : '';
       const mostDnfsNote = e.mostDnfsName && e.mostDnfsCount > 0 ? `\n💀 Malchance : **${e.mostDnfsName}** (${e.mostDnfsCount} DNF)` : '';
 
-      // Pilotes ayant roulé pour l'écurie championne constructeur cette saison
+      // Pilotes ayant COURU pour l'écurie championne constructeur cette saison-là
+      // On passe par les Standings de la saison (= pilotes qui ont effectivement scoré des points)
+      // croisés avec teamHistory pour vérifier qu'ils étaient bien dans cette écurie.
       let constrPilotsStr = '';
       if (e.champConstrName) {
-        const constrPilots = allPilotsHof.filter(p =>
-          (p.teamHistory || []).some(h =>
-            h.teamName === e.champConstrName &&
-            h.seasonStart <= e.seasonYear &&
-            (h.seasonEnd === null || h.seasonEnd === undefined || h.seasonEnd >= e.seasonYear)
-          )
-        );
-        if (constrPilots.length) {
-          constrPilotsStr = '\n👥 ' + constrPilots.map(p => `**${p.name}**`).join(' · ');
+        const hofSeason = allSeasonsHof.find(s => s.year === e.seasonYear);
+        if (hofSeason) {
+          const seasonStandings = await Standing.find({ seasonId: hofSeason._id }).lean();
+          const standingPilotIds = new Set(seasonStandings.map(s => String(s.pilotId)));
+          const constrPilots = allPilotsHof.filter(p =>
+            standingPilotIds.has(String(p._id)) &&
+            (p.teamHistory || []).some(h =>
+              h.teamName === e.champConstrName &&
+              h.seasonStart <= e.seasonYear &&
+              (h.seasonEnd == null || h.seasonEnd >= e.seasonYear)
+            )
+          );
+          if (constrPilots.length) {
+            constrPilotsStr = '\n👥 ' + constrPilots.map(p => `**${p.name}**`).join(' · ');
+          }
         }
       }
 
