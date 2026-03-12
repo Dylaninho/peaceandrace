@@ -5171,7 +5171,7 @@ function genDevVagueArticle(team, seasonYear) {
     `${team.emoji}${team.name} a travaillé fort en usine ces dernières semaines. Les premiers signes arrivent en piste.\n\n` +
     pick([
       `Pas de révolution — mais une évolution cohérente qui pourrait faire la différence sur les prochains circuits.`,
-      `Les ingénieurs rivaux ont été vus observer attentivement la voiture au parc fermé. Signe que quelque chose a changé.`,
+      `Les ingénieurs rivaux ont passé du temps dans la pitlane à observer la voiture en sortie de stands. Signe que quelque chose a changé.`,
       `"On ne commente pas le travail des autres." La réponse de ${pick(teams => team.name)} masque peut-être une certaine inquiétude.`,
     ]),
   ];
@@ -7209,7 +7209,7 @@ function genSponsoringArticle(pilot, team, seasonYear) {
 }
 
 // ─── 2. RÉSEAUX SOCIAUX — Buzz, clash, post viral ────────────
-function genSocialMediaArticle(pilot, team, standing, seasonYear) {
+function genSocialMediaArticle(pilot, team, standing, seasonYear, recentWin = false) {
   const source    = pick(['grid_social', 'speed_gossip', 'turbo_people', 'the_pit_wall_tmz']);
   const followers = pick(FOLLOWERS_POOL);
   const wins      = standing?.wins || 0;
@@ -7217,8 +7217,8 @@ function genSocialMediaArticle(pilot, team, standing, seasonYear) {
 
   // Différents angles social media
   const angles = [
-    // Post viral après victoire
-    wins >= 1 ? () => {
+    // Post viral après victoire — seulement si victoire AU DERNIER GP
+    recentWin && wins >= 1 ? () => {
       const likes = `${randInt(15, 890)}K`;
       const headline = pick([
         `${pilot.name} explose les compteurs sur Instagram après sa victoire`,
@@ -7744,8 +7744,29 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
   const PA         = () => pick(allPilots);             // n'importe quel pilote (fallback)
   const markUsed   = (...ps) => ps.forEach(p => p && usedPilotIds.add(String(p._id)));
 
+  // ── Sélection pilote pondérée par réputation ──────────────────
+  // Types prestigieux → pilotes haute réputation (≥60)
+  // Types négatifs    → pilotes basse réputation (≤55) ou DNFs récents
+  // Types neutres     → pool normal
+  const PRESTIGE_TYPES = new Set(['hype','sponsoring','brand_deal','tv_show','charity','lifestyle','friendship']);
+  const NEGATIVE_TYPES = new Set(['scandal_offtrack','form_crisis','scandal','drama']);
+
+  function repPilot(minRep = 0, maxRep = 100) {
+    const eligible = pool.filter(p => {
+      const r = p.reputation ?? 50;
+      return r >= minRep && r <= maxRep;
+    });
+    return eligible.length ? pick(eligible) : pick(pool); // fallback au pool normal
+  }
+  // Retourne le bon picker selon le type d'article
+  function PbyType() {
+    if (PRESTIGE_TYPES.has(type)) return repPilot(60, 100);
+    if (NEGATIVE_TYPES.has(type)) return repPilot(0, 55);
+    return P();
+  }
+
   if (type === 'drama') {
-    const pA = P(), others = allPilots.filter(p => String(p.teamId) !== String(pA.teamId) && !usedPilotIds.has(String(p._id)));
+    const pA = PbyType(), others = allPilots.filter(p => String(p.teamId) !== String(pA.teamId) && !usedPilotIds.has(String(p._id)));
     const pB = others.length ? pick(others) : pick(allPilots.filter(p => String(p._id) !== String(pA._id)));
     if (!pB) return null;
     const tA = teamMap.get(String(pA.teamId)), tB = teamMap.get(String(pB.teamId));
@@ -7861,7 +7882,7 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
     return genTitleFightArticle(p1, p2, t1, t2, gap, total - done, season.year);
 
   } else if (type === 'driver_interview') {
-    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const pilot = PbyType(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     const standings = await getStandings();
     const standing  = standings.find(s => String(s.pilotId) === String(pilot._id));
     const contract  = await Contract.findOne({ pilotId: pilot._id, active: true }).lean();
@@ -7875,21 +7896,28 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
     return genDriverInterviewArticle(pilot, team, standing, contract, teammate, teammateSt, season.year, spPhase, _intRank, _intCst.length||10, _intLast);
 
   } else if (type === 'sponsoring') {
-    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const pilot = PbyType(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     markUsed(pilot); return genSponsoringArticle(pilot, team, season.year);
 
   } else if (type === 'social_media') {
     const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     const standings = await getStandings();
     const standing  = standings.find(s => String(s.pilotId) === String(pilot._id));
-    markUsed(pilot); return genSocialMediaArticle(pilot, team, standing, season.year);
+    // Vérifier si le pilote a VRAIMENT gagné son dernier GP (pas juste victoire saison)
+    let recentWin = false;
+    try {
+      const lastRec = await PilotGPRecord.findOne({ pilotId: pilot._id })
+        .sort({ raceDate: -1 }).lean();
+      recentWin = lastRec && !lastRec.dnf && lastRec.finishPos === 1;
+    } catch(_) {}
+    markUsed(pilot); return genSocialMediaArticle(pilot, team, standing, season.year, recentWin);
 
   } else if (type === 'tv_show') {
-    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const pilot = PbyType(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     markUsed(pilot); return genTVShowArticle(pilot, team, season.year);
 
   } else if (type === 'relationship') {
-    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const pilot = PbyType(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     markUsed(pilot); return genRelationshipArticle(pilot, team, season.year);
 
   } else if (type === 'friendship') {
@@ -7917,19 +7945,19 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
     markUsed(pA, pB); return genFriendshipArticle(pA, pB, tA, tB, season.year);
 
   } else if (type === 'lifestyle') {
-    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const pilot = PbyType(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     markUsed(pilot); return genLifestyleArticle(pilot, team, season.year);
 
   } else if (type === 'scandal_offtrack') {
-    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const pilot = PbyType(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     markUsed(pilot); return genScandalOffTrackArticle(pilot, team, season.year);
 
   } else if (type === 'charity') {
-    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const pilot = PbyType(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     markUsed(pilot); return genCharityArticle(pilot, team, season.year);
 
   } else if (type === 'brand_deal') {
-    const pilot = P(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
+    const pilot = PbyType(); const team = teamMap.get(String(pilot.teamId)); if (!team) return null;
     markUsed(pilot); return genBrandDealArticle(pilot, team, season.year);
   }
   return null;
@@ -9034,8 +9062,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
 
         // ── Économie de pneus selon l'avance sur la voiture derrière ──────────
-        // Si le pilote a un gap confortable derrière lui ET n'est pas attaqué,
-        // il "gère" naturellement : pneus s'usent moins MAIS rythme ralenti aussi.
+        // La gestion n'est PAS automatique : le pilote peut choisir de continuer
+        // à pousser même avec un gap confortable. C'est un choix tactique.
+        // Facteurs : gestionPneus (appétence à économiser), personnalité,
+        // et un tirage aléatoire (un pilote agressif pousse même en avance).
+        // Quand il gère : pneus s'usent moins MAIS rythme ralenti aussi.
         // Ne s'active pas sous SC ni pendant les 2 tours post-pit (warmup).
         let tireWearInc = 1.0;
         let managePaceMs = 0; // pénalité de rythme liée à la gestion
@@ -9048,15 +9079,30 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
               )
             : Infinity;
           if (gapBehindMs > 3000) {
-            const pilotEcoBonus = (driver.pilot.gestionPneus || 50) / 100; // 0.40-0.99
-            const gapFactor = Math.min(1, (gapBehindMs - 3000) / 5000); // 0→1 entre 3s et 8s
-            // Économie max : -40% d'usure pour un gestionnaire 99 avec 8s+ d'avance
-            const ecoReduction = gapFactor * pilotEcoBonus * 0.40;
-            tireWearInc  = Math.max(0.60, 1.0 - ecoReduction);
-            // Contrepartie : perte de rythme proportionnelle à l'économie
-            // Max ~700ms/tour (0.40 éco × 1750ms) — réaliste (gestion visible mais pas énorme)
-            managePaceMs = Math.round(ecoReduction * 1750);
-            driver.managingTires = gapFactor > 0.5;
+            // Probabilité de choisir de gérer : entre 25% (agressif) et 75% (économe)
+            // gestionPneus 50 → 50% de chance de gérer à ce tour
+            // Un pilote "iceman" ou "veteran" gère plus, un "showman" pousse plus
+            const arch = driver.pilot.personality?.archetype || null;
+            const archBonus = (arch === 'iceman' || arch === 'veteran') ? +10
+                            : (arch === 'showman' || arch === 'rockstar') ? -15
+                            : 0;
+            const manageProbability = Math.max(0.15, Math.min(0.85,
+              ((driver.pilot.gestionPneus || 50) + archBonus) / 100
+            ));
+            const chooseToManage = Math.random() < manageProbability;
+
+            if (chooseToManage) {
+              const pilotEcoBonus = (driver.pilot.gestionPneus || 50) / 100;
+              const gapFactor = Math.min(1, (gapBehindMs - 3000) / 5000); // 0→1 entre 3s et 8s
+              const ecoReduction = gapFactor * pilotEcoBonus * 0.40;
+              tireWearInc  = Math.max(0.60, 1.0 - ecoReduction);
+              // Contrepartie : perte de rythme (max ~700ms/tour)
+              managePaceMs = Math.round(ecoReduction * 1750);
+              driver.managingTires = gapFactor > 0.5;
+            } else {
+              // Continue à pousser — usure normale, rythme normal
+              driver.managingTires = false;
+            }
           } else {
             driver.managingTires = false;
           }
@@ -12906,7 +12952,7 @@ async function handleInteraction(interaction) {
         const periodStr = startStr === endStr ? startStr : `${startStr}–${endStr}`;
         return `${h.teamEmoji || '🏎️'} **${h.teamName || '?'}** *(${periodStr})*`;
       });
-      embed.addFields({ name: '📁 Anciens clubs', value: histLines.join('\n') });
+      embed.addFields({ name: '📁 Anciennes écuries', value: histLines.join('\n') });
     }
 
     return interaction.editReply({ embeds: [embed] });
@@ -15172,21 +15218,19 @@ async function handleInteraction(interaction) {
 
   if (commandName === 'admin_scheduler_pause') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
     global.schedulerPaused = true;
-    return interaction.reply({
+    return interaction.editReply({
       content: '⏸️ **Scheduler mis en pause.** Les EL, qualifications et courses ne se déclencheront plus automatiquement.\n> Utilisez `/admin_force_practice`, `/admin_force_quali`, `/admin_force_race` pour lancer manuellement.\n> Réactivez avec `/admin_scheduler_resume`.',
-      ephemeral: false,
     });
   }
 
   if (commandName === 'admin_scheduler_resume') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
     global.schedulerPaused = false;
-    return interaction.reply({
+    return interaction.editReply({
       content: '▶️ **Scheduler réactivé.** Les GPs se lanceront automatiquement aux horaires habituels.\n> 🌅 11h EL · 13h Q · 15h Course\n> 🌆 17h EL · 18h Q · 20h Course',
-      ephemeral: false,
     });
   }
 
@@ -17882,8 +17926,8 @@ async function runRace(override, gpIndex = null) {
     await channel.send({ embeds: [pilotEmbed] });
   }
 
-  // Fin de saison ?
-  const remaining = await Race.countDocuments({ seasonId: season._id, status: { $ne: 'done' } });
+  // Fin de saison ? (race_computed = simulation ok, résultats appliqués = done — les deux comptent)
+  const remaining = await Race.countDocuments({ seasonId: season._id, status: { $nin: ['done', 'race_computed'] } });
   if (remaining === 0 && channel) {
     await sendSeasonCeremony(season, channel);
     // Stocker le timestamp de début de transfert pour survie aux redémarrages
