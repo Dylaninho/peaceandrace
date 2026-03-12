@@ -11808,22 +11808,29 @@ async function startTransferPeriod() {
         const existOffer = await TransferOffer.findOne({ pilotId: tp._id, teamId: team._id, status: 'pending' });
         if (existOffer) continue;
         const perfMultiplier = perf.isChamp ? 1.30 : perf.isOverperf ? 1.15 : perf.isSolid ? 1.00 : 0.82;
-        const baseSalaire    = Math.round((expContract.salaireBase || 100) * perfMultiplier); // salaireBase est le vrai champ du ContractSchema
+        const baseSalaire    = Math.round((expContract.salaireBase || 100) * perfMultiplier);
         const salaireRenew   = Math.max(5, Math.min(team.budget * 0.40, baseSalaire));
         const dureeRenew     = perf.isChamp ? 3 : perf.isOverperf ? 2 : 1;
-        // BUG FIX : utilisait 'salaire', 'duree', 'statut', 'isRenewal' qui n'existent pas dans
-        // TransferOfferSchema → champs ignorés par Mongoose, offre créée avec valeurs par défaut
-        // (salaireBase:100, seasons:1). Correction : vrais noms du schema.
+        // Calcul coinMultiplier et primes — identique à la 1ère vague pour cohérence log ↔ /offres
+        const budgetRatioRenew     = team.budget / 100;
+        const teamRankRenew        = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
+        const coinMultiplierRenew  = parseFloat(clamp(budgetRatioRenew * rand(0.9, 1.5), 0.7, 2.2).toFixed(2));
+        const primeVictoireMaxRenew = Math.round((team.budget / 100) * 180);
+        const primeVictoireRenew   = Math.round(clamp((200 - teamRankRenew * 12) * rand(0.7, 1.2) * budgetRatioRenew, 0, primeVictoireMaxRenew));
+        const primePodiumRenew     = Math.round(primeVictoireRenew * rand(0.25, 0.45));
         const renewOffer = await TransferOffer.create({
-          teamId       : team._id,
-          pilotId      : tp._id,
-          status       : 'pending',
-          salaireBase  : salaireRenew,
-          seasons      : dureeRenew,
-          driverStatus : expContract.driverStatus || null,
-          expiresAt    : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          teamId         : team._id,
+          pilotId        : tp._id,
+          status         : 'pending',
+          salaireBase    : salaireRenew,
+          seasons        : dureeRenew,
+          coinMultiplier : coinMultiplierRenew,
+          primeVictoire  : Math.max(0, primeVictoireRenew),
+          primePodium    : Math.max(0, primePodiumRenew),
+          driverStatus   : expContract.driverStatus || null,
+          expiresAt      : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
         });
-        console.log(`[MERCATO] 📤 RENOUVELLEMENT — ${team.emoji||''}${team.name} → ${tp.name} | ${salaireRenew}🪙/course × ${dureeRenew} saison(s) | statut: ${expContract.driverStatus||'N/A'} | offreId: ${renewOffer._id}`);
+        console.log(`[MERCATO] 📤 RENOUVELLEMENT — ${team.emoji||''}${team.name} → ${tp.name} | ${salaireRenew}🪙/course × ${dureeRenew} saison(s) | ×${coinMultiplierRenew} | 🏆${primeVictoireRenew}🪙 | statut: ${expContract.driverStatus||'N/A'} | offreId: ${renewOffer._id}`);
       }
     } catch(e) { console.error('[renouvellement IA]', e.message); }
 
@@ -12447,6 +12454,22 @@ async function startSecondTransferWave(channel) {
 // ╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝     ╚═════╝╚═╝     ╚═╝╚═════╝ ╚══════╝
 // ============================================================
 
+// ── Commande /pilotes — enregistrée uniquement pendant le mercato ──
+const PILOTES_CMD = new SlashCommandBuilder()
+  .setName('pilotes')
+  .setDescription('Liste tous les pilotes classés par note générale (style FIFA)');
+
+// Fonction d'enregistrement dynamique — appelée au ready ET à chaque changement de phase mercato
+async function registerCommands(isMercato) {
+  // /pilotes est visible en off-season (grille normale), masqué pendant le mercato
+  const body = isMercato
+    ? commands.map(c => c.toJSON())
+    : [...commands, PILOTES_CMD].map(c => c.toJSON());
+  const rest2 = new REST({ version: '10' }).setToken(TOKEN);
+  await rest2.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body });
+  console.log(`✅ Slash commands enregistrées (${isMercato ? 'MERCATO — /pilotes masqué' : 'off-season — /pilotes visible'})`);
+}
+
 const commands = [
   new SlashCommandBuilder().setName('create_pilot')
     .setDescription('Crée ton pilote F1 ! (2 pilotes max par joueur)')
@@ -12659,6 +12682,11 @@ const commands = [
   new SlashCommandBuilder().setName('admin_transfer')
     .setDescription('[ADMIN] Lance la période de transfert'),
 
+  new SlashCommandBuilder().setName('admin_toggle_pilotes')
+    .setDescription('[ADMIN] Force l\'affichage ou le masquage de /pilotes indépendamment du mercato')
+    .addStringOption(o => o.setName('mode').setDescription('visible ou caché').setRequired(true)
+      .addChoices({ name: '👁️ Visible (off-season)', value: 'visible' }, { name: '🔒 Caché (mercato)', value: 'cache' })),
+
   new SlashCommandBuilder().setName('admin_mercato_log')
     .setDescription('[ADMIN] Suivi des offres mercato : envoyées, acceptées, refusées')
     .addStringOption(o => o.setName('filtre')
@@ -12699,9 +12727,6 @@ const commands = [
     .addStringOption(o => o.setName('nom').setDescription('Nom du pilote (recherche directe — prioritaire)'))
     .addUserOption(o => o.setName('joueur').setDescription('Joueur cible (toi par défaut)'))
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
-
-  new SlashCommandBuilder().setName('pilotes')
-    .setDescription('Liste tous les pilotes classés par note générale (style FIFA)'),
 
   new SlashCommandBuilder().setName('admin_set_photo')
     .setDescription('[ADMIN] Définit la photo de profil d\'un pilote')
@@ -12849,12 +12874,10 @@ client.once('ready', async () => {
     console.warn('⚠️  BotConfig chargement échoué :', e.message);
   }
 
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
-    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), {
-      body: commands.map(c => c.toJSON()),
-    });
-    console.log('✅ Slash commands enregistrées');
+    const activeSeason = await Season.findOne().sort({ createdAt: -1 });
+    const isMercatoNow = activeSeason && activeSeason.status === 'transfer';
+    await registerCommands(isMercatoNow);
   } catch(cmdErr) {
     console.error('❌ ERREUR enregistrement slash commands :', cmdErr.message);
     console.error('❌ CLIENT_ID:', CLIENT_ID || 'NON DÉFINI');
@@ -13203,7 +13226,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-    'action_paddock', 'admin_queue', 'admin_mercato_repair'].includes(commandName);
+    'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -14463,15 +14486,16 @@ async function handleInteraction(interaction) {
 
 
   // -- /pilotes --
-  // ⚠️  Visible uniquement pendant le mercato (season.status === 'transfer').
-  //     En off-season, la grille de la saison prochaine reste secrète.
+  // Visible en off-season (grille de la saison en cours).
+  // Masqué (désenregistré) pendant le mercato — la commande n'est donc normalement pas accessible,
+  // mais on garde un guard au cas où.
   if (commandName === 'pilotes') {
     const season = await Season.findOne().sort({ createdAt: -1 });
     const isMercato = season && season.status === 'transfer';
 
-    if (!isMercato) {
+    if (isMercato) {
       return interaction.editReply({
-        content: '🔒 **Grille confidentielle** — La liste des pilotes sera révélée à l\'ouverture du mercato. Revenez quand les transferts commencent !',
+        content: '🔒 **Commande indisponible pendant le mercato.**',
         ephemeral: true,
       });
     }
@@ -14494,10 +14518,10 @@ async function handleInteraction(interaction) {
     return interaction.editReply({
       embeds: [
         new EmbedBuilder()
-          .setTitle('🏎️ Grille Saison Prochaine — Mercato en cours')
+          .setTitle('🏎️ Classement Pilotes — Note Générale')
           .setColor('#FF1801')
           .setDescription(desc.slice(0, 4000) || 'Aucun')
-          .setFooter({ text: `${sorted.length} pilote(s) · Mercato ouvert` }),
+          .setFooter({ text: `${sorted.length} pilote(s)` }),
       ],
     });
   }
@@ -15514,6 +15538,8 @@ async function handleInteraction(interaction) {
     await interaction.deferReply();
     try {
       const season = await createNewSeason();
+      // Masquer /pilotes maintenant que le mercato est fermé
+      registerCommands(false).catch(e => console.error('[registerCommands] new season:', e.message));
       await interaction.editReply(`✅ Saison **${season.year}** créée ! ${CIRCUITS.length} GP au calendrier.`);
       // Conf de presse pré-saison : envoyée 30 secondes après la création pour ne pas noyer le message
       const ch = interaction.channel;
@@ -16310,9 +16336,30 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_transfer') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
     const expired = await startTransferPeriod();
-    await interaction.editReply(`✅ Période de transfert ouverte ! ${expired} contrat(s) expiré(s).`);
+    // Rendre /pilotes visible maintenant que le mercato est ouvert
+    registerCommands(true).catch(e => console.error('[registerCommands] mercato open:', e.message));
+    await interaction.editReply({ content: `✅ Période de transfert ouverte ! ${expired} contrat(s) expiré(s).`, ephemeral: true });
+  }
+
+  // ── /admin_toggle_pilotes ────────────────────────────────
+  if (commandName === 'admin_toggle_pilotes') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+    const mode = interaction.options.getString('mode');
+    const isMercato = mode === 'cache';
+    try {
+      await registerCommands(isMercato);
+      return interaction.editReply({
+        content: isMercato
+          ? '🔒 **/pilotes masqué** — la commande a été désenregistrée de Discord.'
+          : '👁️ **/pilotes visible** — la commande est réenregistrée sur Discord.',
+        ephemeral: true,
+      });
+    } catch(e) {
+      return interaction.editReply({ content: `❌ Erreur : ${e.message}`, ephemeral: true });
+    }
   }
 
   // ── /admin_mercato_repair ─────────────────────────────────
@@ -16355,9 +16402,13 @@ async function handleInteraction(interaction) {
     const teamsWithSlots = [];
     for (const t of allTeams) {
       const cnt = await Pilot.countDocuments({ teamId: t._id });
-      if (cnt < 2) teamsWithSlots.push({ team: t, slots: 2 - cnt });
+      if (cnt < 2) teamsWithSlots.push({ team: t, slots: 2 - cnt, currentCount: cnt });
     }
-    teamsWithSlots.sort((a, b) => b.team.budget - a.team.budget); // plus riches en premier
+    // Priorité aux écuries à 0 pilote (recrutement critique), puis par budget décroissant
+    teamsWithSlots.sort((a, b) => {
+      if (a.currentCount !== b.currentCount) return a.currentCount - b.currentCount;
+      return b.team.budget - a.team.budget;
+    });
 
     let created = 0;
     const lines = [];
@@ -16368,17 +16419,21 @@ async function handleInteraction(interaction) {
 
       // Trouver jusqu'à 2 équipes qui peuvent et veulent ce pilote
       let offersForPilot = 0;
-      for (const { team, slots } of teamsWithSlots) {
-        if (slots <= 0) continue;
+      for (const entry of teamsWithSlots) {
+        const { team } = entry;
+        if (entry.slots <= 0) continue;
         const already = await TransferOffer.exists({ teamId: team._id, pilotId: fp._id, status: 'pending' });
         if (already) continue;
 
-        // Vérifier compatibilité budget/prestige
+        // Filtre prestige : désactivé si l'écurie n'a encore AUCUN pilote (elle DOIT recruter)
+        const teamHasNoPilot = entry.currentCount === 0;
         const prestigeScore = ov + (champRank <= 3 ? 15 : champRank <= 5 ? 10 : champRank <= 10 ? 5 : 0);
         const prefersPeak = team.budget >= 120;
         const prefersYoung = team.budget < 80;
-        if (!prefersPeak && !prefersYoung && prestigeScore > 90) continue;
-        if (prefersYoung && prestigeScore > 80) continue;
+        if (!teamHasNoPilot) {
+          if (!prefersPeak && !prefersYoung && prestigeScore > 90) continue;
+          if (prefersYoung && prestigeScore > 80) continue;
+        }
 
         const tRank = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
         const bRatio = team.budget / 100;
@@ -16413,6 +16468,8 @@ async function handleInteraction(interaction) {
         console.log(`[MERCATO] 🔧 REPAIR — ${team.emoji||''}${team.name} → ${fp.name} | ${salaireRep}🪙 × ${seas} saison(s)`);
         created++;
         offersForPilot++;
+        entry.slots--;        // décrémenter pour éviter le sur-recrutement
+        entry.currentCount++; // l'écurie n'est plus "vide" après cette offre
         // Limiter à 2 offres par pilote pour éviter le spam
         if (offersForPilot >= 2) break;
       }
@@ -16487,13 +16544,13 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_second_wave') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: true });
     const ch = interaction.channel;
     const waveCount = await startSecondTransferWave(ch);
     if (waveCount === 0) {
-      await interaction.editReply('✅ Aucune 2ème vague nécessaire — tous les pilotes libres ont déjà des offres ou sont sous contrat.');
+      await interaction.editReply({ content: '✅ Aucune 2ème vague nécessaire — tous les pilotes libres ont déjà des offres ou sont sous contrat.', ephemeral: true });
     } else {
-      await interaction.editReply(`✅ **2ème vague lancée !** ${waveCount} offre(s) d'urgence générée(s) pour les pilotes encore libres.`);
+      await interaction.editReply({ content: `✅ **2ème vague lancée !** ${waveCount} offre(s) d'urgence générée(s) pour les pilotes encore libres.`, ephemeral: true });
     }
   }
 
