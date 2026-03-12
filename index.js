@@ -411,7 +411,15 @@ const TransferOfferSchema = new mongoose.Schema({
   // Statut proposé dans le contrat : 'numero1' = pilote leader, 'numero2' = second pilote
   // Le salaire proposé tient déjà compte de ce statut (numero1 ≈ +20%)
   driverStatus     : { type: String, enum: ['numero1', 'numero2', null], default: null },
-  status           : { type: String, enum: ['pending','accepted','rejected','expired'], default: 'pending' },
+  // ── Workflow délibération ──
+  // pending        : offre envoyée, pilote n'a pas encore répondu
+  // under_review   : pilote a accepté, l'équipe délibère (fenêtre 24h)
+  // accepted       : équipe a confirmé → contrat signé
+  // review_rejected: équipe a préféré un autre candidat (pilote libéré, ses autres offres restent valides)
+  // rejected       : pilote a refusé l'offre
+  // expired        : délai dépassé ou offre annulée
+  status           : { type: String, enum: ['pending','under_review','accepted','review_rejected','rejected','expired'], default: 'pending' },
+  reviewDeadline   : Date,  // deadline pour la délibération de l'équipe (24h après premier under_review)
   expiresAt        : Date,
   createdAt        : { type: Date, default: Date.now },
 });
@@ -11395,6 +11403,48 @@ async function notifyOffersExpiredDM(offersOrIds, reason) {
   } catch(e) { console.error('[notifyOffersExpiredDM]', e.message); }
 }
 
+// ── Score d'attractivité d'un pilote pour une équipe ────────
+// Version standalone (hors closure startTransferPeriod) — utilisée pour la délibération.
+// Même logique que scoreCandidate mais accessible globalement.
+function computeTeamScore(pilot, team, allStandings) {
+  const ov = overallRating(pilot);
+  const prefersPeak  = team.budget >= 120;
+  const prefersYoung = team.budget < 80;
+
+  const polyvalence = (
+    pilotScore(pilot, 'rapide')    +
+    pilotScore(pilot, 'technique') +
+    pilotScore(pilot, 'urbain')    +
+    pilotScore(pilot, 'endurance') +
+    pilotScore(pilot, 'mixte')
+  ) / 5;
+
+  const standing = allStandings.find(s => String(s.pilotId) === String(pilot._id));
+  let seasonScore = 0;
+  if (standing) {
+    const wins = standing.wins || 0, podiums = standing.podiums || 0;
+    const dnfs = standing.dnfs || 0,  pts     = standing.points  || 0;
+    if (prefersPeak)       seasonScore = wins * 15 + podiums * 4 + pts * 0.3 - dnfs * 5;
+    else if (prefersYoung) seasonScore = pts * 0.8 + podiums * 2 + wins * 6  - dnfs * 2;
+    else                   seasonScore = pts * 0.5 + wins * 10   + podiums * 3 - dnfs * 3;
+  }
+
+  const carWeakStat = ['vitesseMax','drs','refroidissement','dirtyAir','conservationPneus','vitesseMoyenne']
+    .reduce((w, k) => (team[k] ?? 50) < (team[w] ?? 50) ? k : w, 'vitesseMax');
+  const complementBonus =
+    carWeakStat === 'dirtyAir'          ? pilot.depassement  * 0.1 :
+    carWeakStat === 'conservationPneus' ? pilot.gestionPneus * 0.1 :
+    carWeakStat === 'refroidissement'   ? pilot.adaptabilite * 0.1 :
+    pilot.controle * 0.05;
+
+  const philosophyScore =
+    prefersPeak  ? ov * 1.4 + polyvalence * 0.4 :
+    prefersYoung ? (100 - ov) * 0.3 + polyvalence * 0.8 + complementBonus :
+                   ov * 1.0 + polyvalence * 0.6 + seasonScore * 0.02;
+
+  return Math.round(philosophyScore + complementBonus + seasonScore * 0.015);
+}
+
 async function publishRefusalReaction(pilot, offer) {
   // Seulement 40% de chance d'article — pas systématique
   if (Math.random() > 0.40) return;
@@ -12080,6 +12130,173 @@ async function startTransferPeriod() {
 //  refont une offre — souvent plus "désespérée" (contrat court,
 //  salaire revu à la baisse OU hausse si urgence).
 // ============================================================
+
+// DM envoyé aux pilotes non retenus après délibération d'équipe
+async function notifyDeliberationRejected(offers, team, reason) {
+  for (const offer of offers) {
+    try {
+      await TransferOffer.findByIdAndUpdate(offer._id, { status: 'review_rejected' });
+      const fp = await Pilot.findById(offer.pilotId).lean();
+      if (!fp?.discordId) continue;
+      const du = await client.users.fetch(fp.discordId).catch(() => null);
+      if (!du) continue;
+      const dmCh = await du.createDM().catch(() => null);
+      if (!dmCh) continue;
+
+      const teamFull = reason === 'team_full';
+      const remaining = await TransferOffer.countDocuments({ pilotId: fp._id, status: 'pending' });
+      const hint = remaining > 0
+        ? `\n📬 **${fp.name}** a encore **${remaining}** autre(s) offre(s) en attente — utilise \`/offres\`.`
+        : `\n📭 Plus d'offre en attente pour **${fp.name}**. Une 2ème vague peut encore arriver.`;
+
+      await dmCh.send(
+        (teamFull
+          ? `⌛ **${team.emoji} ${team.name}** a finalement complété son line-up avant de te répondre.`
+          : `⌛ **${team.emoji} ${team.name}** a délibéré et a préféré un autre pilote pour **${fp.name}**.`) +
+        hint
+      );
+      console.log(`[MERCATO] 🔕 DÉLIBÉRATION REJETÉE — ${team.emoji||''}${team.name} refuse ${fp.name} (raison: ${reason})`);
+    } catch(_) {}
+  }
+}
+
+// ── Résolution des délibérations d'équipes ──────────────────
+// Appelé par le cron toutes les heures.
+// Pour chaque équipe avec des offres `under_review` dont la reviewDeadline est passée :
+//   1. Scorer tous les candidats en lice
+//   2. Choisir le/les meilleur(s) selon les slots disponibles
+//   3. Signer le(s) élu(s) → contrat créé, autres offres du pilote expirées
+//   4. Notifier les recalés → status 'review_rejected' + DM (leurs autres offres restent valides)
+async function resolveTeamDeliberations() {
+  const now = new Date();
+  const dueReviews = await TransferOffer.find({
+    status: 'under_review',
+    reviewDeadline: { $lt: now },
+  }).lean();
+  if (!dueReviews.length) return;
+
+  const byTeam = new Map();
+  for (const o of dueReviews) {
+    const key = String(o.teamId);
+    if (!byTeam.has(key)) byTeam.set(key, []);
+    byTeam.get(key).push(o);
+  }
+
+  const season = await getActiveSeason();
+  const allStandings = season ? await Standing.find({ seasonId: season._id }).lean() : [];
+
+  for (const [teamId, candidates] of byTeam) {
+    try {
+      const team = await Team.findById(teamId).lean();
+      if (!team) continue;
+
+      const inTeam = await Pilot.countDocuments({ teamId: team._id });
+      const slotsOpen = Math.max(0, 2 - inTeam);
+
+      if (slotsOpen === 0) {
+        await notifyDeliberationRejected(candidates, team, 'team_full');
+        continue;
+      }
+
+      // Scorer chaque candidat (pilotes valides uniquement)
+      const scored = (await Promise.all(candidates.map(async o => {
+        const p = await Pilot.findById(o.pilotId).lean();
+        if (!p || p.teamId) return null; // déjà signé ailleurs
+        return { offer: o, pilot: p, score: computeTeamScore(p, team, allStandings) };
+      }))).filter(Boolean).sort((a, b) => b.score - a.score);
+
+      const chosen   = scored.slice(0, slotsOpen);
+      const rejected = scored.slice(slotsOpen);
+
+      // ── Signer les élus ──────────────────────────────────────
+      for (const { offer, pilot } of chosen) {
+        const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
+        const isRenewal = activeContract && String(activeContract.teamId) === String(teamId);
+        if (activeContract && !isRenewal) {
+          // Contrat actif avec une autre équipe apparu entre-temps → rejeter
+          await TransferOffer.findByIdAndUpdate(offer._id, { status: 'review_rejected' });
+          continue;
+        }
+        if (isRenewal && activeContract) {
+          await Contract.findByIdAndUpdate(activeContract._id, { active: false });
+        }
+
+        const existingTeamPilots = await Pilot.find({ teamId: team._id }).lean();
+        let finalStatus = 'numero1';
+        if (existingTeamPilots.length === 1) {
+          if (overallRating(pilot) >= overallRating(existingTeamPilots[0])) {
+            await Pilot.findByIdAndUpdate(existingTeamPilots[0]._id, { teamStatus: 'numero2' });
+          } else {
+            finalStatus = 'numero2';
+            if (!existingTeamPilots[0].teamStatus)
+              await Pilot.findByIdAndUpdate(existingTeamPilots[0]._id, { teamStatus: 'numero1' });
+          }
+        }
+
+        await TransferOffer.findByIdAndUpdate(offer._id, { status: 'accepted' });
+        // Expirer TOUTES les autres offres du pilote (pending ET under_review avec d'autres équipes)
+        await TransferOffer.updateMany(
+          { pilotId: pilot._id, status: { $in: ['pending', 'under_review'] }, _id: { $ne: offer._id } },
+          { status: 'expired' }
+        );
+
+        const oldTeamId = pilot.teamId || null;
+        await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id, teamStatus: finalStatus });
+        if (season) await recordTeamHistory(pilot._id, oldTeamId, team, season.year ?? null);
+
+        await Contract.create({
+          pilotId: pilot._id, teamId: team._id,
+          seasonsDuration: offer.seasons, seasonsRemaining: offer.seasons,
+          coinMultiplier:  offer.coinMultiplier,
+          primeVictoire:   offer.primeVictoire,
+          primePodium:     offer.primePodium,
+          salaireBase:     offer.salaireBase,
+          active: true,
+        });
+
+        publishSigningRumors(pilot, team, offer).catch(console.error);
+        console.log(`[MERCATO] ✅ DÉLIBÉRATION SIGNÉE — ${team.emoji||''}${team.name} choisit ${pilot.name} (score ${offer._scoreForLog ?? '?'}) | ${offer.salaireBase}🪙 × ${offer.seasons} saison(s)`);
+
+        // DM élu
+        try {
+          if (pilot.discordId) {
+            const du = await client.users.fetch(pilot.discordId).catch(() => null);
+            const dmCh = du ? await du.createDM().catch(() => null) : null;
+            if (dmCh) await dmCh.send(
+              `🎉 **${team.emoji} ${team.name} t'a choisi !**\n\n` +
+              `**${pilot.name}** signe officiellement avec **${team.name}** !\n` +
+              `Salaire : **${offer.salaireBase} 🪙**/course × **${offer.seasons}** saison(s) · Prime V : **${offer.primeVictoire} 🪙**`
+            );
+          }
+        } catch(_) {}
+
+        // Cascade si l'équipe est maintenant pleine
+        const nowInTeam = await Pilot.countDocuments({ teamId: team._id });
+        if (nowInTeam >= 2) {
+          const otherForTeam = await TransferOffer.find(
+            { teamId: team._id, status: { $in: ['pending', 'under_review'] }, pilotId: { $ne: pilot._id } }
+          ).lean();
+          if (otherForTeam.length) {
+            await TransferOffer.updateMany(
+              { teamId: team._id, status: { $in: ['pending', 'under_review'] }, pilotId: { $ne: pilot._id } },
+              { status: 'expired' }
+            );
+            notifyOffersExpiredDM(otherForTeam, 'slot_filled').catch(() => {});
+          }
+        }
+      }
+
+      // ── Notifier les recalés ──────────────────────────────────
+      if (rejected.length) {
+        await notifyDeliberationRejected(rejected.map(r => r.offer), team, 'chosen_other');
+      }
+
+      // Les invalides (pilote déjà signé ailleurs) sont aussi rejetés sans DM
+      const invalids = scored.filter(s => !s); // already filtered, but handled above
+    } catch(e) { console.error(`[resolveTeamDeliberations] team ${teamId}:`, e.message); }
+  }
+}
+
 async function startSecondTransferWave(channel) {
   const season = await getActiveSeason();
   if (!season || season.status !== 'transfer') return;
@@ -12922,79 +13139,50 @@ async function handleInteraction(interaction) {
     // Pour un renouvellement, le pilote compte déjà dans l'équipe → seuil toléré à 2 (pas 1)
     if (!isRenewal && inTeam >= 2) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
 
-    // Si renouvellement : désactiver l'ancien contrat avant d'en créer un nouveau
-    if (isRenewal && activeContract) {
+    // ── Renouvellement : signature directe (pas de concurrence interne) ──
+    if (isRenewal) {
       await Contract.findByIdAndUpdate(activeContract._id, { active: false });
-    }
+      await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
+      await TransferOffer.updateMany({ pilotId: pilot._id, status: { $in: ['pending', 'under_review'] }, _id: { $ne: offerId } }, { status: 'expired' });
 
-    await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
-    await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
-
-    // ── Statut définitif calculé à la signature (pas dans l'offre) ────────
-    // Règle : on regarde qui est déjà dans l'écurie et on (re)calcule les statuts.
-    // Ça évite qu'une équipe se retrouve avec 2×N°1 ou 2×N°2.
-    const existingTeamPilots = await Pilot.find({ teamId: team._id }).lean();
-    let finalStatus = null;
-    if (existingTeamPilots.length === 0) {
-      // Premier pilote à signer → statut N°1 (leader par défaut, le 2ème aura N°2)
-      finalStatus = 'numero1';
-    } else if (existingTeamPilots.length === 1) {
-      // Comparer les overall ratings pour attribuer N°1 au plus fort
-      const existingOv = overallRating(existingTeamPilots[0]);
-      const newOv      = overallRating(pilot);
-      if (newOv >= existingOv) {
-        // Le nouveau pilote est plus fort → il prend N°1, le titulaire passe N°2
-        finalStatus = 'numero1';
-        await Pilot.findByIdAndUpdate(existingTeamPilots[0]._id, { teamStatus: 'numero2' });
-      } else {
-        // Le titulaire reste N°1, le nouvel arrivant est N°2
-        finalStatus = 'numero2';
-        // S'assurer que le titulaire a bien le statut N°1 (au cas où il était null)
-        if (!existingTeamPilots[0].teamStatus) {
-          await Pilot.findByIdAndUpdate(existingTeamPilots[0]._id, { teamStatus: 'numero1' });
-        }
+      const existingTeamPilots = await Pilot.find({ teamId: team._id }).lean();
+      let finalStatus = 'numero1';
+      if (existingTeamPilots.length === 1) {
+        const eOv = overallRating(existingTeamPilots[0]);
+        if (overallRating(pilot) >= eOv) { await Pilot.findByIdAndUpdate(existingTeamPilots[0]._id, { teamStatus: 'numero2' }); }
+        else { finalStatus = 'numero2'; if (!existingTeamPilots[0].teamStatus) await Pilot.findByIdAndUpdate(existingTeamPilots[0]._id, { teamStatus: 'numero1' }); }
       }
-    }
-    // Invalider les offres de l équipe désormais pleine ou dont le slot N°1 est pris
-    const inTeamAfter = existingTeamPilots.length + 1;
-    const toVoidQuery = inTeamAfter >= 2
-      ? { teamId: team._id, status: 'pending', pilotId: { $ne: pilot._id } }
-      : { teamId: team._id, status: 'pending', driverStatus: 'numero1', pilotId: { $ne: pilot._id } };
-    const toVoidOffers = await TransferOffer.find(toVoidQuery).lean();
-    if (toVoidOffers.length) {
-      await TransferOffer.updateMany(toVoidQuery, { status: 'expired' });
-      notifyOffersExpiredDM(toVoidOffers, 'slot_filled').catch(() => {});
+      await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id, teamStatus: finalStatus });
+      const sForHistory = await getActiveSeason();
+      await recordTeamHistory(pilot._id, pilot.teamId || null, team, sForHistory?.year ?? null);
+      await Contract.create({ pilotId: pilot._id, teamId: team._id, seasonsDuration: offer.seasons, seasonsRemaining: offer.seasons, coinMultiplier: offer.coinMultiplier, primeVictoire: offer.primeVictoire, primePodium: offer.primePodium, salaireBase: offer.salaireBase, active: true });
+      publishSigningRumors(pilot, team, offer).catch(console.error);
+      console.log(`[MERCATO] ✅ RENOUVELLEMENT SIGNÉ (bouton) — ${pilot.name} × ${team.emoji||''}${team.name}`);
+      return interaction.update({ content: '', embeds: [new EmbedBuilder().setTitle('✅ Renouvellement signé !').setColor(team.color).setDescription(`**${pilot.name}** prolonge avec **${team.emoji} ${team.name}** !`)], components: [] });
     }
 
-    const oldTeamIdForHistory = pilot.teamId || null;
-    const pilotStatusUpdate = { teamId: team._id, teamStatus: finalStatus };
-    await Pilot.findByIdAndUpdate(pilot._id, pilotStatusUpdate);
+    // ── Candidature normale : passer en under_review ─────────
+    // Fixer la reviewDeadline à 24h — ou prolonger si déjà en cours pour cette équipe
+    const existingReview = await TransferOffer.findOne({ teamId: team._id, status: 'under_review' }).sort({ reviewDeadline: 1 });
+    const reviewDeadline = existingReview?.reviewDeadline
+      ? new Date(Math.max(existingReview.reviewDeadline.getTime(), Date.now() + 24 * 60 * 60 * 1000))
+      : new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    // Enregistrer l'historique d'écurie
-    const seasonForHistory = await getActiveSeason();
-    await recordTeamHistory(pilot._id, oldTeamIdForHistory, team, seasonForHistory?.year ?? null);
+    await TransferOffer.findByIdAndUpdate(offerId, { status: 'under_review', reviewDeadline });
+    // NE PAS expirer les autres offres du pilote — il peut avoir d'autres options si rejeté
 
-    await Contract.create({
-      pilotId: pilot._id, teamId: team._id,
-      seasonsDuration:  offer.seasons, seasonsRemaining: offer.seasons,
-      coinMultiplier:   offer.coinMultiplier,
-      primeVictoire:    offer.primeVictoire,
-      primePodium:      offer.primePodium,
-      salaireBase:      offer.salaireBase,
-      active: true,
-    });
-
-    // ── Annonce publique signature (rumeurs mêlées de vrai/faux) ───
-    publishSigningRumors(pilot, team, offer).catch(console.error);
-    console.log(`[MERCATO] ✅ SIGNATURE (bouton) — ${pilot.name} ACCEPTE ${team.emoji||''}${team.name} | ${offer.salaireBase}🪙/course × ${offer.seasons} saison(s) | statut: ${finalStatus||'N/A'} | offreId: ${offerId}`);
+    const allReviewing = await TransferOffer.countDocuments({ teamId: team._id, status: 'under_review' });
+    console.log(`[MERCATO] 🤔 DÉLIBÉRATION — ${team.emoji||''}${team.name} reçoit candidature de ${pilot.name} (${allReviewing} en lice) | deadline: ${reviewDeadline.toLocaleString('fr-FR')}`);
 
     return interaction.update({
       content: '',
-      embeds: [new EmbedBuilder().setTitle('✅ Contrat signé !').setColor(team.color)
+      embeds: [new EmbedBuilder()
+        .setTitle('⏳ Candidature envoyée !')
+        .setColor('#FFA500')
         .setDescription(
-          `**${pilot.name}** rejoint **${team.emoji} ${team.name}** !\n\n` +
-          `×${offer.coinMultiplier} | ${offer.seasons} saison(s) | Salaire : ${offer.salaireBase} 🪙/course\n` +
-          `Prime victoire : ${offer.primeVictoire} 🪙 | Prime podium : ${offer.primePodium} 🪙`
+          `**${pilot.name}** a manifesté son intérêt pour **${team.emoji} ${team.name}**.\n\n` +
+          `L'équipe délibère — si un meilleur candidat se présente avant **${reviewDeadline.toLocaleString('fr-FR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}**, elle peut le préférer.\n\n` +
+          `*Tu recevras un DM dès que l'équipe tranche. Tes autres offres restent disponibles.*`
         )
       ],
       components: [],
@@ -13945,33 +14133,30 @@ async function handleInteraction(interaction) {
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const pilot  = await getPilotForUser(interaction.user.id, pilotIndex);
     if (!pilot) return interaction.editReply({ content: '❌ Aucun pilote trouvé. Utilise `/create_pilot`.', ephemeral: true });
-    const offers = await TransferOffer.find({ pilotId: pilot._id, status: 'pending' });
-    if (!offers.length) return interaction.editReply({
-      content: `📭 Aucune offre en attente pour **${pilot.name}** (Pilote ${pilotIndex}).
-*Si le mercato est ouvert, les offres arrivent sous 24h après la fin de saison.*`,
+    // Récupérer offres pending (à traiter) ET under_review (candidature envoyée, délibération en cours)
+    const offers        = await TransferOffer.find({ pilotId: pilot._id, status: 'pending' });
+    const reviewOffers  = await TransferOffer.find({ pilotId: pilot._id, status: 'under_review' });
+
+    if (!offers.length && !reviewOffers.length) return interaction.editReply({
+      content: `📭 Aucune offre en attente pour **${pilot.name}** (Pilote ${pilotIndex}).\n*Si le mercato est ouvert, les offres arrivent sous 24h après la fin de saison.*`,
       ephemeral: true,
     });
 
     // Envoyer les offres en Message Privé pour éviter le flood du channel
     try {
       const dmChannel = await interaction.user.createDM();
+      const headerParts = [];
+      if (offers.length) headerParts.push(`**${offers.length}** offre(s) à traiter`);
+      if (reviewOffers.length) headerParts.push(`**${reviewOffers.length}** candidature(s) en délibération`);
+      await dmChannel.send({ content: `📬 **${pilot.name} (Pilote ${pilotIndex})** — ${headerParts.join(' · ')}\n> Boutons actifs 10 min. Utilise \`/accepter_offre <ID>\` en secours.` });
 
-      await dmChannel.send({
-        content: `📬 **${offers.length} offre(s) en attente pour ${pilot.name} (Pilote ${pilotIndex}).**
-> Les boutons restent actifs 10 min. Utilise \`/accepter_offre <ID>\` en secours si les boutons ont expiré.`,
-      });
-
+      // Offres pending : avec boutons accept/reject
       for (const o of offers) {
         const team = await Team.findById(o.teamId);
-        const expiresIn = o.expiresAt
-          ? Math.max(0, Math.floor((new Date(o.expiresAt) - Date.now()) / (1000 * 60 * 60)))
-          : null;
-        const expiryStr = expiresIn !== null ? `⏳ Expire dans ~${expiresIn}h` : '';
+        const expiresIn = o.expiresAt ? Math.max(0, Math.floor((new Date(o.expiresAt) - Date.now()) / (1000 * 60 * 60))) : null;
         const statusStr = o.driverStatus === 'numero1'
-          ? '\n🔴 **Statut proposé : Pilote N°1** *(leader d\'écurie — salaire inclut la prime de statut)*'
-          : o.driverStatus === 'numero2'
-            ? '\n🔵 **Statut proposé : Pilote N°2** *(second pilote)*'
-            : '';
+          ? '\n🔴 **Statut proposé : Pilote N°1**'
+          : o.driverStatus === 'numero2' ? '\n🔵 **Statut proposé : Pilote N°2**' : '';
         const embed = new EmbedBuilder()
           .setTitle(`${team.emoji} ${team.name} — Offre de contrat`)
           .setColor(team.color)
@@ -13980,47 +14165,64 @@ async function handleInteraction(interaction) {
             `💰 Salaire : **${o.salaireBase} 🪙**/course\n` +
             `🏆 Prime V : **${o.primeVictoire} 🪙** | 🥉 Prime P : **${o.primePodium} 🪙**` +
             statusStr +
-            (expiryStr ? `\n${expiryStr}` : '')
+            (expiresIn !== null ? `\n⏳ Expire dans ~${expiresIn}h` : '') +
+            `\n\n*Si tu acceptes, l'équipe a 24h pour délibérer — elle peut préférer un autre candidat.*`
           )
           .setFooter({ text: `ID de secours : ${o._id}` });
-
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`offer_accept_${o._id}`)
-            .setLabel(`✅ Rejoindre ${team.name}`)
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`offer_reject_${o._id}`)
-            .setLabel('❌ Refuser')
-            .setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId(`offer_accept_${o._id}`).setLabel(`✅ Rejoindre ${team.name}`).setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`offer_reject_${o._id}`).setLabel('❌ Refuser').setStyle(ButtonStyle.Danger),
         );
         await dmChannel.send({ embeds: [embed], components: [row] });
       }
 
+      // Offres under_review : lecture seule, délibération en cours
+      for (const o of reviewOffers) {
+        const team = await Team.findById(o.teamId);
+        const deadlineStr = o.reviewDeadline
+          ? o.reviewDeadline.toLocaleString('fr-FR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })
+          : '?';
+        const embed = new EmbedBuilder()
+          .setTitle(`⏳ ${team.emoji} ${team.name} — Délibération en cours`)
+          .setColor('#888888')
+          .setDescription(
+            `**${pilot.name}** est en lice pour rejoindre ${team.emoji} **${team.name}**.\n\n` +
+            `L'équipe délibère jusqu'au **${deadlineStr}**. Tu recevras un DM dès que la décision est prise.\n\n` +
+            `*D'autres candidats peuvent encore se manifester avant la deadline.*`
+          )
+          .setFooter({ text: `ID : ${o._id}` });
+        await dmChannel.send({ embeds: [embed] });
+      }
+
       return interaction.editReply({
-        content: `📨 Tes offres t'ont été envoyées en **Message Privé** ! Vérifie tes DMs. (${offers.length} offre(s) pour **${pilot.name}**)`,
+        content: `📨 Tes offres ont été envoyées en **Message Privé** ! (${offers.length} à traiter · ${reviewOffers.length} en délibération)`,
         ephemeral: true,
       });
     } catch (dmError) {
       // DMs bloqués → fallback éphémère dans le channel
       console.warn(`[Offres] DM impossible pour ${interaction.user.id}: ${dmError.message}`);
-      const embeds = [];
-      const components = [];
+      const embeds = [], components = [];
       for (const o of offers) {
         const team = await Team.findById(o.teamId);
-        embeds.push(new EmbedBuilder()
-          .setTitle(`${team.emoji} ${team.name}`)
-          .setColor(team.color)
-          .setDescription(`×**${o.coinMultiplier}** | **${o.seasons}** saison(s) | 💰 **${o.salaireBase} 🪙**/course | 🏆 **${o.primeVictoire} 🪙** | 🥉 **${o.primePodium} 🪙**`)
+        embeds.push(new EmbedBuilder().setTitle(`${team.emoji} ${team.name}`).setColor(team.color)
+          .setDescription(`×**${o.coinMultiplier}** | **${o.seasons}** saison(s) | 💰 **${o.salaireBase} 🪙**/course | 🏆 **${o.primeVictoire} 🪙** | 🥉 **${o.primePodium} 🪙**\n*L'équipe délibère 24h après ton acceptation.*`)
           .setFooter({ text: `ID : ${o._id}` }));
         components.push(new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`offer_accept_${o._id}`).setLabel(`✅ ${team.name}`).setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId(`offer_reject_${o._id}`).setLabel('❌ Refuser').setStyle(ButtonStyle.Danger),
         ));
       }
-      await interaction.editReply({ content: `📬 **${offers.length} offre(s)** — Active tes DMs pour les recevoir en privé. Fallback ici :`, embeds: [embeds[0]], components: [components[0]], ephemeral: true });
-      for (let i = 1; i < embeds.length; i++) {
-        await interaction.followUp({ embeds: [embeds[i]], components: [components[i]], ephemeral: true });
+      for (const o of reviewOffers) {
+        const team = await Team.findById(o.teamId);
+        embeds.push(new EmbedBuilder().setTitle(`⏳ ${team.emoji} ${team.name} — En délibération`).setColor('#888888')
+          .setDescription(`Candidature de **${pilot.name}** en cours d'examen. Réponse sous 24h.`).setFooter({ text: `ID : ${o._id}` }));
+        components.push(new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`noop_${o._id}`).setLabel('⏳ En délibération').setStyle(ButtonStyle.Secondary).setDisabled(true),
+        ));
+      }
+      if (embeds.length) {
+        await interaction.editReply({ content: `📬 **${embeds.length} offre(s)** — Active tes DMs pour les recevoir en privé. Fallback :`, embeds: [embeds[0]], components: [components[0]], ephemeral: true });
+        for (let i = 1; i < embeds.length; i++) await interaction.followUp({ embeds: [embeds[i]], components: [components[i]], ephemeral: true });
       }
       return;
     }
@@ -14050,69 +14252,46 @@ async function handleInteraction(interaction) {
     const inTeam  = await Pilot.countDocuments({ teamId: team._id });
     if (!isRenewal && inTeam >= 2) return interaction.editReply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
 
-    if (isRenewal && activeContract) {
+    // ── Renouvellement : signature directe ───────────────────
+    if (isRenewal) {
       await Contract.findByIdAndUpdate(activeContract._id, { active: false });
-    }
-
-    await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
-    await TransferOffer.updateMany({ pilotId: pilot._id, status: 'pending', _id: { $ne: offerId } }, { status: 'expired' });
-
-    // Statut définitif calculé à la signature (même logique que le bouton)
-    const existingTeamPilots2 = await Pilot.find({ teamId: team._id }).lean();
-    let finalStatus2 = null;
-    if (existingTeamPilots2.length === 0) {
-      finalStatus2 = 'numero1';
-    } else if (existingTeamPilots2.length === 1) {
-      const existingOv2 = overallRating(existingTeamPilots2[0]);
-      const newOv2      = overallRating(pilot);
-      if (newOv2 >= existingOv2) {
-        finalStatus2 = 'numero1';
-        await Pilot.findByIdAndUpdate(existingTeamPilots2[0]._id, { teamStatus: 'numero2' });
-      } else {
-        finalStatus2 = 'numero2';
-        if (!existingTeamPilots2[0].teamStatus) {
-          await Pilot.findByIdAndUpdate(existingTeamPilots2[0]._id, { teamStatus: 'numero1' });
-        }
+      await TransferOffer.findByIdAndUpdate(offerId, { status: 'accepted' });
+      await TransferOffer.updateMany({ pilotId: pilot._id, status: { $in: ['pending', 'under_review'] }, _id: { $ne: offerId } }, { status: 'expired' });
+      const existTP2 = await Pilot.find({ teamId: team._id }).lean();
+      let finalStatusR2 = 'numero1';
+      if (existTP2.length === 1) {
+        if (overallRating(pilot) < overallRating(existTP2[0])) { finalStatusR2 = 'numero2'; if (!existTP2[0].teamStatus) await Pilot.findByIdAndUpdate(existTP2[0]._id, { teamStatus: 'numero1' }); }
+        else { await Pilot.findByIdAndUpdate(existTP2[0]._id, { teamStatus: 'numero2' }); }
       }
+      await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id, teamStatus: finalStatusR2 });
+      const sForHistR2 = await getActiveSeason();
+      await recordTeamHistory(pilot._id, pilot.teamId || null, team, sForHistR2?.year ?? null);
+      await Contract.create({ pilotId: pilot._id, teamId: team._id, seasonsDuration: offer.seasons, seasonsRemaining: offer.seasons, coinMultiplier: offer.coinMultiplier, primeVictoire: offer.primeVictoire, primePodium: offer.primePodium, salaireBase: offer.salaireBase, active: true });
+      publishSigningRumors(pilot, team, offer).catch(console.error);
+      console.log(`[MERCATO] ✅ RENOUVELLEMENT SIGNÉ (cmd) — ${pilot.name} × ${team.emoji||''}${team.name}`);
+      return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Renouvellement signé !').setColor(team.color).setDescription(`**${pilot.name}** prolonge avec **${team.emoji} ${team.name}** !`)], ephemeral: true });
     }
-    // Invalider les offres de l équipe désormais pleine ou dont le slot N°1 est pris
-    const inTeamAfter2 = existingTeamPilots2.length + 1;
-    const toVoidQuery2 = inTeamAfter2 >= 2
-      ? { teamId: team._id, status: 'pending', pilotId: { $ne: pilot._id } }
-      : { teamId: team._id, status: 'pending', driverStatus: 'numero1', pilotId: { $ne: pilot._id } };
-    const toVoidOffers2 = await TransferOffer.find(toVoidQuery2).lean();
-    if (toVoidOffers2.length) {
-      await TransferOffer.updateMany(toVoidQuery2, { status: 'expired' });
-      notifyOffersExpiredDM(toVoidOffers2, 'slot_filled').catch(() => {});
-    }
-    const oldTeamIdForHistory2 = pilot.teamId || null;
-    await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id, teamStatus: finalStatus2 });
 
-    // Enregistrer l'historique d'écurie
-    const seasonForHistory2 = await getActiveSeason();
-    await recordTeamHistory(pilot._id, oldTeamIdForHistory2, team, seasonForHistory2?.year ?? null);
+    // ── Candidature normale : passer en under_review ─────────
+    const existingReview2 = await TransferOffer.findOne({ teamId: team._id, status: 'under_review' }).sort({ reviewDeadline: 1 });
+    const reviewDeadline2 = existingReview2?.reviewDeadline
+      ? new Date(Math.max(existingReview2.reviewDeadline.getTime(), Date.now() + 24 * 60 * 60 * 1000))
+      : new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    await Contract.create({
-      pilotId: pilot._id, teamId: team._id,
-      seasonsDuration:   offer.seasons, seasonsRemaining: offer.seasons,
-      coinMultiplier:    offer.coinMultiplier,
-      primeVictoire:     offer.primeVictoire,
-      primePodium:       offer.primePodium,
-      salaireBase:       offer.salaireBase,
-      active: true,
-    });
+    await TransferOffer.findByIdAndUpdate(offerId, { status: 'under_review', reviewDeadline: reviewDeadline2 });
 
-    publishSigningRumors(pilot, team, offer).catch(console.error);
-    console.log(`[MERCATO] ✅ SIGNATURE (cmd) — ${pilot.name} ACCEPTE ${team.emoji||''}${team.name} | ${offer.salaireBase}🪙/course × ${offer.seasons} saison(s) | statut: ${finalStatus2||'N/A'} | offreId: ${offerId}`);
+    const allReviewing2 = await TransferOffer.countDocuments({ teamId: team._id, status: 'under_review' });
+    console.log(`[MERCATO] 🤔 DÉLIBÉRATION (cmd) — ${team.emoji||''}${team.name} reçoit candidature de ${pilot.name} (${allReviewing2} en lice)`);
 
     return interaction.editReply({
-      embeds: [new EmbedBuilder().setTitle('✅ Contrat signé !').setColor(team.color)
+      embeds: [new EmbedBuilder()
+        .setTitle('⏳ Candidature envoyée !')
+        .setColor('#FFA500')
         .setDescription(
-          `**${pilot.name}** (Pilote ${pilot.pilotIndex}) rejoint **${team.emoji} ${team.name}** !\n\n` +
-          `×${offer.coinMultiplier} | ${offer.seasons} saison(s) | Salaire : ${offer.salaireBase} 🪙/course\n` +
-          `Prime victoire : ${offer.primeVictoire} 🪙 | Prime podium : ${offer.primePodium} 🪙`
+          `**${pilot.name}** a manifesté son intérêt pour **${team.emoji} ${team.name}**. L'équipe délibère sous **24h**. Si un meilleur candidat se présente, l'équipe peut le préférer.\n\n*Tes autres offres restent disponibles en attendant.*`
         )
       ],
+      ephemeral: true,
     });
   }
 
@@ -14284,7 +14463,19 @@ async function handleInteraction(interaction) {
 
 
   // -- /pilotes --
+  // ⚠️  Visible uniquement pendant le mercato (season.status === 'transfer').
+  //     En off-season, la grille de la saison prochaine reste secrète.
   if (commandName === 'pilotes') {
+    const season = await Season.findOne().sort({ createdAt: -1 });
+    const isMercato = season && season.status === 'transfer';
+
+    if (!isMercato) {
+      return interaction.editReply({
+        content: '🔒 **Grille confidentielle** — La liste des pilotes sera révélée à l\'ouverture du mercato. Revenez quand les transferts commencent !',
+        ephemeral: true,
+      });
+    }
+
     const allPilots = await Pilot.find().sort({ createdAt: 1 });
     if (!allPilots.length) return interaction.editReply({ content: 'Aucun pilote.', ephemeral: true });
     const allTeams = await Team.find();
@@ -14300,7 +14491,15 @@ async function handleInteraction(interaction) {
       const flag = pilot.nationality?.split(' ')[0] || '';
       desc += rank+' '+tier.badge+' **'+ov+'** '+tier.label.padEnd(9)+' — '+flag+' **'+pilot.name+'** '+(team ? team.emoji+' '+team.name : '🔴 *Libre*')+'\n';
     }
-    return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🏎️ Classement Pilotes — Note Générale').setColor('#FF1801').setDescription(desc.slice(0,4000)||'Aucun').setFooter({ text: sorted.length+' pilote(s)' })] });
+    return interaction.editReply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('🏎️ Grille Saison Prochaine — Mercato en cours')
+          .setColor('#FF1801')
+          .setDescription(desc.slice(0, 4000) || 'Aucun')
+          .setFooter({ text: `${sorted.length} pilote(s) · Mercato ouvert` }),
+      ],
+    });
   }
 
 
@@ -18636,6 +18835,9 @@ async function transferMaintenanceTick() {
     const justExpired = await TransferOffer.find({ status: 'expired', expiresAt: { $lt: now, $gt: new Date(now - 5 * 60 * 1000) } }).lean();
     notifyOffersExpiredDM(justExpired, 'cron').catch(() => {});
   }
+
+  // 1b. Résoudre les délibérations dont la deadline est passée
+  await resolveTeamDeliberations().catch(e => console.error('[Mercato] resolveTeamDeliberations:', e.message));
 
   // 2. Vérifier si une saison est en mode transfer et si les vagues doivent être (re)lancées
   const season = await Season.findOne({ status: 'transfer' });
