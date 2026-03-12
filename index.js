@@ -8145,6 +8145,21 @@ async function runScheduledNews(discordClient, slotName = 'soir') {
   const season = await getActiveSeason();
   if (!season) return;
 
+  // ── Stop news classiques si plus aucun GP à venir et hors mercato ──
+  // Pendant le mercato : on continue (les news parlent de la saison passée).
+  // En off-season sans GP restant : rien à raconter sportivement → silence.
+  const isMercatoNow = season.status === 'transfer';
+  if (!isMercatoNow) {
+    const upcomingCount = await Race.countDocuments({
+      seasonId: season._id,
+      status: { $nin: ['done', 'race_computed'] },
+    });
+    if (upcomingCount === 0) {
+      console.log(`📰 [News ${slotName}] Aucun GP à venir et hors mercato — news suspendues.`);
+      return;
+    }
+  }
+
   const allPilots = await Pilot.find({ teamId: { $ne: null } });
   const allTeams  = await Team.find();
   if (!allPilots.length || !allTeams.length) return;
@@ -8185,17 +8200,10 @@ async function runScheduledNews(discordClient, slotName = 'soir') {
   // Pendant la période de transfert, le paddock ne parle que de ça.
   // Toutes les autres thématiques reculent au profit du mercato.
   if (season.status === 'transfer') {
-    // transfer_rumor prend la moitié des poids du slot : poids fixé à 60
-    rawWeights.transfer_rumor = 60;
-    rawWeights.drama          = Math.max(2, (rawWeights.drama          || 0) - 5);
-    rawWeights.lifestyle      = Math.max(2, (rawWeights.lifestyle      || 0) - 6);
-    rawWeights.brand_deal     = Math.max(2, (rawWeights.brand_deal     || 0) - 4);
-    rawWeights.charity        = Math.max(1, (rawWeights.charity        || 0) - 4);
-    rawWeights.tv_show        = Math.max(1, (rawWeights.tv_show        || 0) - 4);
-    rawWeights.friendship     = Math.max(1, (rawWeights.friendship     || 0) - 4);
-    rawWeights.scandal_offtrack = Math.max(4, (rawWeights.scandal_offtrack || 0));
-    // Article supplémentaire garanti pendant le mercato
-    // count sera re-calculé après mais on le monte d'1 minimum
+    // Mercato : UNIQUEMENT les rumeurs de transfert pour éviter tout spoil
+    // (emojis écurie affichés dans les autres types révèleraient les contrats signés)
+    for (const k of Object.keys(rawWeights)) rawWeights[k] = 0;
+    rawWeights.transfer_rumor = 100;
   }
 
   // ── Anti-répétition : articles des 24h ───────────────────────
