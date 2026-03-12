@@ -16967,23 +16967,23 @@ async function handleInteraction(interaction) {
       const chemStr  = chemDevBonus > 0 ? ` +${chemDevBonus} bonus chimie` : '';
 
       lines.push(
-        \`\n\${team.emoji} **\${team.name}** — Budget : **\${team.budget}** | devPts actuels : **\${team.devPoints}**\` +
-        \`\n  👥 \${pilotsStr}\` +
-        \`\n  📋 \${contractsStr}\` +
-        \`\n  💸 Masse salariale totale : **\${totalSalaire}🪙/course** | \${penaltyStr}\${bonusStr}\${chemStr}\` +
-        \`\n  🔧 Stat prioritaire : **\${statLabels[weakStat]}** (actuellement **\${weakVal}**)\` +
-        \`\n  📈 Dev/course estimé :\` +
-        \`\n     🥇 Bon GP (P1+P2)    → **+\${devBon}** pts  → **\${upBon} upgrade(s)**\` +
-        \`\n     🔸 GP moyen (P5+P8)  → **+\${devMoyen}** pts → **\${upMoyen} upgrade(s)**\` +
-        \`\n     💀 Mauvais GP (hors pts) → **+\${devMauvais}** pts → **\${upMauvais} upgrade(s)**\`
+        `\n${team.emoji} **${team.name}** — Budget : **${team.budget}** | devPts actuels : **${team.devPoints}**` +
+        `\n  👥 ${pilotsStr}` +
+        `\n  📋 ${contractsStr}` +
+        `\n  💸 Masse salariale totale : **${totalSalaire}🪙/course** | ${penaltyStr}${bonusStr}${chemStr}` +
+        `\n  🔧 Stat prioritaire : **${statLabels[weakStat]}** (actuellement **${weakVal}**)` +
+        `\n  📈 Dev/course estimé :` +
+        `\n     🥇 Bon GP (P1+P2)    → **+${devBon}** pts  → **${upBon} upgrade(s)**` +
+        `\n     🔸 GP moyen (P5+P8)  → **+${devMoyen}** pts → **${upMoyen} upgrade(s)**` +
+        `\n     💀 Mauvais GP (hors pts) → **+${devMauvais}** pts → **${upMauvais} upgrade(s)**`
       );
     }
 
     // Envoyer en DM à l'admin uniquement
     try {
       const dm = await interaction.user.createDM();
-      const header = \`📊 **Analyse Masse Salariale — Impact sur le Dev**\nSaison \${season?.year ?? '?'} · \${allTeams.length} écuries · Seuil upgrade : **\${THRESHOLD} devPts**\n\`;
-      const full = header + lines.join('\n') + \`\n\n*Seuil upgrade = \${THRESHOLD} devPts. Pénalité sal. = 1pt / 100🪙 (cap -8). Bonus masse faible (<150🪙 total) = +3.*\`;
+      const header = `📊 **Analyse Masse Salariale — Impact sur le Dev**\nSaison ${season?.year ?? '?'} · ${allTeams.length} écuries · Seuil upgrade : **${THRESHOLD} devPts**\n`;
+      const full = header + lines.join('\n') + `\n\n*Seuil upgrade = ${THRESHOLD} devPts. Pénalité sal. = 1pt / 100🪙 (cap -8). Bonus masse faible (<150🪙 total) = +3.*`;
 
       // Découper si > 2000 chars (limite Discord DM)
       if (full.length <= 2000) {
@@ -17000,7 +17000,7 @@ async function handleInteraction(interaction) {
       }
       return interaction.editReply({ content: '📨 Analyse envoyée en DM !', ephemeral: true });
     } catch(e) {
-      return interaction.editReply({ content: \`❌ Impossible d'envoyer le DM : \${e.message}\`, ephemeral: true });
+      return interaction.editReply({ content: `❌ Impossible d'envoyer le DM : ${e.message}`, ephemeral: true });
     }
   }
 
