@@ -11068,16 +11068,28 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
         status: { $nin: ['done', 'race_computed'] },
       });
       if (remaining === 0) {
-        // Lancer en arrière-plan pour ne pas bloquer l'appelant
-        setImmediate(async () => {
+        // Séquence fin de saison — délais échelonnés pour éviter le flood :
+        //   0 min   → podium / FIA / DOTD (fin de simulateRace)
+        //  ~3 min   → conf de presse + news post-course (setTimeout 150-180s)
+        //  ~8 min   → cérémonie (laisse la conf se terminer)
+        //  ~13 min  → mercato ouvert (pause après la cérémonie)
+        setTimeout(async () => {
           try {
             await sendSeasonCeremony(season, channel);
+            // Pause entre fin de cérémonie et ouverture du mercato
+            await sleep(5 * 60 * 1000); // 5 min
+            // Guard : si un admin a déjà lancé /admin_transfer pendant ce délai, on skip
+            const freshSeason = await Season.findById(season._id).lean();
+            if (freshSeason?.status === 'transfer') {
+              console.log('[ceremony] Mercato déjà ouvert par admin, skip auto-launch.');
+              return;
+            }
             await Season.findByIdAndUpdate(season._id, { transferStartedAt: new Date() });
             const expiredCount = await startTransferPeriod();
             const ch = await client.channels.fetch(RACE_CHANNEL).catch(() => channel);
             if (ch) await ch.send(`🔄 **MERCATO OUVERT** — ${expiredCount} contrat(s) expiré(s). Utilisez \`/offres\` pour voir vos propositions.`);
           } catch(e) { console.error('[applyRaceResults ceremony]', e.message); }
-        });
+        }, 5 * 60 * 1000); // 5 min → conf de presse (3 min) a le temps de finir
       }
     } catch(e) { console.error('[applyRaceResults remaining check]', e.message); }
   }
@@ -11678,7 +11690,7 @@ async function startTransferPeriod() {
           : /* flop */        (perf.isTopTeam ? 0.10 : perf.isSmall ? 0.30 : 0.18);
         const ovrBonus     = perf.tpOvr >= 82 ? 0.12 : perf.tpOvr >= 72 ? 0.06 : 0;
         const teamCtxMalus = perf.progressingTeam && !perf.isChamp && !perf.isOverperf ? -0.12 : 0;
-        const renewChance  = Math.max(0.05, Math.min(0.98, baseRenewChance + ovrBonus + teamCtxMalus));
+        const renewChance  = Math.min(0.98, baseRenewChance + ovrBonus + teamCtxMalus); // pas de plancher : un flop peut vraiment se retrouver sans offre
         if (Math.random() > renewChance) continue;
         const existOffer = await TransferOffer.findOne({ pilotId: tp._id, teamId: team._id, status: 'pending' });
         if (existOffer) continue;
@@ -11890,12 +11902,18 @@ async function startTransferPeriod() {
     if (!offerGrouped.has(key)) offerGrouped.set(key, []);
     offerGrouped.get(key).push(o);
   }
+  // Construire le set des top 3 pilotes au championnat (par points)
+  const topChampStandings = [...allStandings].sort((a, b) => b.points - a.points).slice(0, 3);
+  const topChampPilotIds  = new Set(topChampStandings.map(s => String(s.pilotId)));
+
   for (const [pilotId, offers] of offerGrouped) {
     if (offers.length < 2) continue; // pas de concurrence
     const pilot = await Pilot.findById(pilotId);
     if (!pilot) continue;
     const ov = overallRating(pilot);
-    if (ov < 72) continue; // enchères seulement pour les pilotes notés 72+
+    // Surenchères si ov >= 72 OU si pilote dans le top 3 du championnat pilotes
+    const isTopChamp = topChampPilotIds.has(String(pilot._id));
+    if (ov < 72 && !isTopChamp) continue;
     // Trier par salaireBase décroissant
     offers.sort((a, b) => b.salaireBase - a.salaireBase);
     const topOffer = offers[0];
@@ -17862,7 +17880,7 @@ async function sendSeasonCeremony(season, channel) {
     '```'
   );
 
-  await new Promise(r => setTimeout(r, 3000));
+  await sleep(8000); // 8s — laisse respirer la bannière
 
   // Embed champion pilote
   if (champ) {
@@ -17883,7 +17901,7 @@ async function sendSeasonCeremony(season, channel) {
     await channel.send({ embeds: [embed] });
   }
 
-  await new Promise(r => setTimeout(r, 2000));
+  await sleep(10000); // 10s — suspense avant le titre constructeur
 
   // Embed champion constructeur
   if (champConstr) {
@@ -17902,7 +17920,7 @@ async function sendSeasonCeremony(season, channel) {
     await channel.send({ embeds: [embed] });
   }
 
-  await new Promise(r => setTimeout(r, 2000));
+  await sleep(10000); // 10s — pause avant le bilan complet
 
   // Embed top 5 pilotes + stats marquantes
   const top5 = standings.slice(0, 5);
@@ -17933,7 +17951,7 @@ async function sendSeasonCeremony(season, channel) {
       `**${totalRaces} Grands Prix disputés**\n\n` +
       `**🏎️ Top 5 pilotes :**\n${top5Str || 'Aucun'}\n\n` +
       (statsLines.length ? `**✨ Distinctions :**\n${statsLines.join('\n')}\n\n` : '') +
-      `\n⏳ *La période de transfert ouvrira dans 24h...*`
+      `\n⏳ *La période de transfert ouvrira dans quelques minutes...*`
     );
 
   await channel.send({ embeds: [recapEmbed] });
