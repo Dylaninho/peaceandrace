@@ -12331,6 +12331,118 @@ async function resolveTeamDeliberations() {
       const invalids = scored.filter(s => !s); // already filtered, but handled above
     } catch(e) { console.error(`[resolveTeamDeliberations] team ${teamId}:`, e.message); }
   }
+
+  // ── Cascade post-délibération ─────────────────────────────
+  // Après avoir signé tous les élus, vérifier si des écuries sont encore
+  // sans pilote ET des pilotes libres sans offre pending → relancer des offres d'urgence.
+  try {
+    if (!season || season.status !== 'transfer') return;
+
+    const teamsStillEmpty = [];
+    const allTeamsNow = await Team.find().lean();
+    for (const t of allTeamsNow) {
+      const cnt = await Pilot.countDocuments({ teamId: t._id });
+      if (cnt < 2) teamsStillEmpty.push({ team: t, slots: 2 - cnt, currentCount: cnt });
+    }
+    if (!teamsStillEmpty.length) return;
+
+    const freeNow = await Pilot.find({ teamId: null }).lean();
+    if (!freeNow.length) return;
+
+    // Pilotes libres sans offre pending ou under_review
+    const pilotsNeedingOffer = [];
+    for (const p of freeNow) {
+      const hasActive = await TransferOffer.exists({ pilotId: p._id, status: { $in: ['pending', 'under_review'] } });
+      if (!hasActive) pilotsNeedingOffer.push(p);
+    }
+    if (!pilotsNeedingOffer.length) return;
+
+    // Priorité : écuries à 0 pilote d'abord, puis par budget décroissant
+    teamsStillEmpty.sort((a, b) => {
+      if (a.currentCount !== b.currentCount) return a.currentCount - b.currentCount;
+      return b.team.budget - a.team.budget;
+    });
+
+    const constrStandingsC = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const teamRankMapC = new Map(constrStandingsC.map((s, i) => [String(s.teamId), i + 1]));
+    const totalTeamsC  = allTeamsNow.length;
+    let cascadeCreated = 0;
+
+    for (const entry of teamsStillEmpty) {
+      const { team } = entry;
+      const budgetRatio = team.budget / 100;
+      const tRank = teamRankMapC.get(String(team._id)) || Math.ceil(totalTeamsC / 2);
+      const prefersPeak  = team.budget >= 120;
+      const prefersYoung = team.budget < 80;
+
+      // Trier les pilotes libres par score pour cette écurie
+      const ranked = pilotsNeedingOffer
+        .filter(p => {
+          // Filtre prestige désactivé si l'écurie est à 0 pilote (doit recruter coûte que coûte)
+          if (entry.currentCount === 0) return true;
+          const ov = overallRating(p);
+          const prestige = ov + (allStandings.find(s => String(s.pilotId) === String(p._id))?.points > 100 ? 10 : 0);
+          if (!prefersPeak && !prefersYoung && prestige > 90) return false;
+          if (prefersYoung && prestige > 80) return false;
+          return true;
+        })
+        .map(p => ({ pilot: p, score: computeTeamScore(p, team, allStandings) }))
+        .sort((a, b) => b.score - a.score);
+
+      let offresForTeam = 0;
+      for (const { pilot } of ranked) {
+        if (offresForTeam >= entry.slots) break;
+        const already = await TransferOffer.exists({ teamId: team._id, pilotId: pilot._id, status: { $in: ['pending', 'under_review'] } });
+        if (already) continue;
+
+        const ov = overallRating(pilot);
+        const salaireBase = Math.max(40, Math.round(clamp((budgetRatio * 130) * Math.pow(ov / 75, 1.5) * rand(0.80, 1.10), 35, 380)));
+        const statusMul   = entry.currentCount === 0 ? 1.15 : 1.0;
+        const coinMul     = parseFloat(clamp(budgetRatio * rand(0.85, 1.35), 0.65, 2.0).toFixed(2));
+        const primeVMax   = Math.round((team.budget / 100) * 150);
+        const primeV      = Math.round(clamp((180 - tRank * 12) * rand(0.65, 1.05) * budgetRatio, 0, primeVMax));
+
+        const existingInTeam = await Pilot.find({ teamId: team._id }).lean();
+        const driverStatus = existingInTeam.length === 0 ? 'numero1'
+          : overallRating(pilot) >= overallRating(existingInTeam[0]) ? 'numero1' : 'numero2';
+
+        await TransferOffer.create({
+          teamId: team._id, pilotId: pilot._id,
+          salaireBase: Math.max(40, Math.round(salaireBase * statusMul)),
+          coinMultiplier: coinMul,
+          primeVictoire: Math.max(0, primeV),
+          primePodium: Math.round(primeV * rand(0.2, 0.4)),
+          seasons: 1, // urgence : 1 saison
+          driverStatus,
+          status: 'pending',
+          expiresAt: new Date(Date.now() + 12 * 60 * 60 * 1000), // 12h seulement
+        });
+
+        // DM au pilote
+        try {
+          if (pilot.discordId) {
+            const du = await client.users.fetch(pilot.discordId).catch(() => null);
+            const dmCh = du ? await du.createDM().catch(() => null) : null;
+            if (dmCh) await dmCh.send(
+              `📬 **Nouvelle offre d'urgence !** ${team.emoji} **${team.name}** te propose un contrat.
+` +
+              `Utilise \`/offres\` pour consulter la proposition. *(Expire dans 12h)*`
+            );
+          }
+        } catch(_) {}
+
+        console.log(`[MERCATO] 🔁 CASCADE — ${team.emoji||''}${team.name} → ${pilot.name} | urgence 12h | ${Math.round(salaireBase * statusMul)}🪙 × 1S`);
+        cascadeCreated++;
+        offresForTeam++;
+        entry.slots--;
+        entry.currentCount++;
+      }
+    }
+
+    if (cascadeCreated > 0) {
+      console.log(`[MERCATO] 🔁 Cascade post-délibération : ${cascadeCreated} offre(s) d'urgence générée(s)`);
+    }
+  } catch(e) { console.error('[resolveTeamDeliberations] cascade error:', e.message); }
 }
 
 async function startSecondTransferWave(channel) {
