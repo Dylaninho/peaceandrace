@@ -12600,15 +12600,27 @@ const PILOTES_CMD = new SlashCommandBuilder()
   .setName('pilotes')
   .setDescription('Liste tous les pilotes classés par note générale (style FIFA)');
 
+const ECURIES_CMD = new SlashCommandBuilder()
+  .setName('ecuries')
+  .setDescription('Liste des 8 écuries');
+
+const AFFINITES_CMD = new SlashCommandBuilder()
+  .setName('affinites')
+  .setDescription('Voir la personnalité et les relations d\'un pilote')
+  .addStringOption(o => o.setName('pilote').setDescription('Nom du pilote').setRequired(true));
+
+// Commandes masquées pendant le mercato pour éviter tout spoil (écuries, affinités, pilotes)
+const MERCATO_HIDDEN = [PILOTES_CMD, ECURIES_CMD, AFFINITES_CMD];
+
 // Fonction d'enregistrement dynamique — appelée au ready ET à chaque changement de phase mercato
 async function registerCommands(isMercato) {
-  // /pilotes est visible en off-season (grille normale), masqué pendant le mercato
+  // /pilotes, /ecuries, /affinites masqués pendant le mercato (spoil des transferts)
   const body = isMercato
     ? commands.map(c => c.toJSON())
-    : [...commands, PILOTES_CMD].map(c => c.toJSON());
+    : [...commands, ...MERCATO_HIDDEN].map(c => c.toJSON());
   const rest2 = new REST({ version: '10' }).setToken(TOKEN);
   await rest2.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body });
-  console.log(`✅ Slash commands enregistrées (${isMercato ? 'MERCATO — /pilotes masqué' : 'off-season — /pilotes visible'})`);
+  console.log(`✅ Slash commands enregistrées (${isMercato ? 'MERCATO — /pilotes /ecuries /affinites masqués' : 'off-season — toutes les commandes visibles'})`);
 }
 
 const commands = [
@@ -12663,8 +12675,7 @@ const commands = [
     .setDescription('Voir le profil complet de ton pilote avec les coûts d\'upgrade de chaque stat')
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
 
-  new SlashCommandBuilder().setName('ecuries')
-    .setDescription('Liste des 8 écuries'),
+
 
   new SlashCommandBuilder().setName('ecurie')
     .setDescription('Détail d\'une écurie (stats voiture)')
@@ -12727,9 +12738,7 @@ const commands = [
     .addIntegerOption(o => o.setName('gp_index').setDescription('Index du GP — défaut: dernier GP done').setMinValue(0)),
   new SlashCommandBuilder().setName('admin_set_personalities')
     .setDescription('[ADMIN] Assigne une personnalité à tous les pilotes qui n\'en ont pas'),
-  new SlashCommandBuilder().setName('affinites')
-    .setDescription('Voir la personnalité et les relations d\'un pilote')
-    .addStringOption(o => o.setName('pilote').setDescription('Nom du pilote').setRequired(true)),
+
 
   new SlashCommandBuilder().setName('action_paddock')
     .setDescription('🎭 Ton pilote prend une initiative dans le paddock — rumeur, éloge, trahison...')
@@ -12859,6 +12868,9 @@ const commands = [
 
   new SlashCommandBuilder().setName('reveal_grille')
     .setDescription('[ADMIN] Révèle la grille complète de la prochaine saison'),
+
+  new SlashCommandBuilder().setName('admin_masse_salariale')
+    .setDescription('[ADMIN] Analyse l\'impact de la masse salariale sur le dev de chaque écurie (DM privé)'),
 
   new SlashCommandBuilder().setName('admin_evolve_cars')
     .setDescription('[ADMIN] Affiche l\'évolution des voitures cette saison'),
@@ -13367,7 +13379,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-    'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next'].includes(commandName);
+    'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -13950,16 +13962,35 @@ async function handleInteraction(interaction) {
       .setTitle('🏛️ HALL OF FAME — Champions F1 PL')
       .setColor('#FFD700');
 
+    // Charger tous les pilotes une seule fois pour retrouver les équipiers du champion constructeur
+    const allPilotsHof = await Pilot.find().lean();
+
     for (const e of entries) {
       const specNote = e.topRatedName ? `\n👑 Meilleur pilote en fin de saison : **${e.topRatedName}** *(${e.topRatedOv})*` : '';
       const mostWinsNote = e.mostWinsName && e.mostWinsCount > 0 ? `\n🏆 Roi des victoires : **${e.mostWinsName}** (${e.mostWinsCount}V)` : '';
       const mostDnfsNote = e.mostDnfsName && e.mostDnfsCount > 0 ? `\n💀 Malchance : **${e.mostDnfsName}** (${e.mostDnfsCount} DNF)` : '';
+
+      // Pilotes ayant roulé pour l'écurie championne constructeur cette saison
+      let constrPilotsStr = '';
+      if (e.champConstrName) {
+        const constrPilots = allPilotsHof.filter(p =>
+          (p.teamHistory || []).some(h =>
+            h.teamName === e.champConstrName &&
+            h.seasonStart <= e.seasonYear &&
+            (h.seasonEnd === null || h.seasonEnd === undefined || h.seasonEnd >= e.seasonYear)
+          )
+        );
+        if (constrPilots.length) {
+          constrPilotsStr = '\n👥 ' + constrPilots.map(p => `**${p.name}**`).join(' · ');
+        }
+      }
+
       embed.addFields({
         name: `Saison ${e.seasonYear}`,
         value: [
           `${e.champTeamEmoji || '🏎️'} **${e.champPilotName}** — ${e.champTeamName}`,
           `🥇 **${e.champPoints} pts** · ${e.champWins}V · ${e.champPodiums}P · ${e.champDnfs} DNF`,
-          `🏗️ Constructeur : **${e.champConstrEmoji || ''} ${e.champConstrName}** (${e.champConstrPoints} pts)`,
+          `🏗️ Constructeur : **${e.champConstrEmoji || ''} ${e.champConstrName}** (${e.champConstrPoints} pts)${constrPilotsStr}`,
           mostWinsNote, mostDnfsNote, specNote,
         ].filter(Boolean).join('\n'),
         inline: false,
@@ -14012,6 +14043,9 @@ async function handleInteraction(interaction) {
 
   // ── /ecuries ──────────────────────────────────────────────
   if (commandName === 'ecuries') {
+    const _seasonEc = await Season.findOne().sort({ createdAt: -1 });
+    if (_seasonEc && _seasonEc.status === 'transfer')
+      return interaction.editReply({ content: '🔒 **Commande indisponible pendant le mercato.**', ephemeral: true });
     const teams  = await Team.find().sort({ vitesseMax: -1 });
     const pilots = await Pilot.find({ teamId: { $ne: null } });
     const embed  = new EmbedBuilder().setTitle('🏎️ Écuries F1').setColor('#FF1801');
@@ -15731,7 +15765,12 @@ async function handleInteraction(interaction) {
       return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     return handleAdminSetPersonalities(interaction);
   }
-  if (commandName === 'affinites') return handleAffinites(interaction);
+  if (commandName === 'affinites') {
+    const _seasonAf = await Season.findOne().sort({ createdAt: -1 });
+    if (_seasonAf && _seasonAf.status === 'transfer')
+      return interaction.editReply({ content: '🔒 **Commande indisponible pendant le mercato.**', ephemeral: true });
+    return handleAffinites(interaction);
+  }
 
   // ================================================================
   // /action_paddock — initiative joueur dans le paddock
@@ -16849,6 +16888,120 @@ async function handleInteraction(interaction) {
     await revealFinalGrid(season, interaction.channel);
     await Season.findByIdAndUpdate(season._id, { gridRevealedAt: new Date() });
     return interaction.editReply({ content: '✅ Grille révélée !', ephemeral: true });
+  }
+
+  // ── /admin_masse_salariale ───────────────────────────────
+  if (commandName === 'admin_masse_salariale') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const allTeams    = await Team.find().lean();
+    const season      = await getActiveSeason();
+    const THRESHOLD   = 40; // devPoints nécessaires pour 1 upgrade stat (même valeur que evolveCarStats)
+
+    // Simuler un GP moyen pour chaque équipe (sans résultat réel — hypothèse P1 à P16)
+    // On calcule l'impact de la masse salariale sur les devPoints gagnés
+    const F1_PTS_SCALE = [25,18,15,12,10,8,6,4,2,1,0,0,0,0,0,0];
+
+    const lines = [];
+    let totalSalGlobal = 0;
+
+    for (let rank = 0; rank < allTeams.length; rank++) {
+      const team = allTeams[rank];
+      const contracts = await Contract.find({ teamId: team._id, active: true }).lean();
+      const pilots    = await Pilot.find({ teamId: team._id }).lean();
+
+      const totalSalaire = contracts.reduce((sum, c) => sum + (c.salaireBase || 0), 0);
+      totalSalGlobal += totalSalaire;
+      const salaryPenalty  = Math.min(8, Math.floor(totalSalaire / 100));
+      const lowWageBonusDev = totalSalaire < 150 ? 3 : 0;
+
+      // Affinité entre coéquipiers
+      let chemDevBonus = 0;
+      if (pilots.length >= 2) {
+        const [sA, sB] = [String(pilots[0]._id), String(pilots[1]._id)].sort();
+        const rel = await PilotRelation.findOne({ pilotA: sA, pilotB: sB }).lean();
+        if (rel) {
+          if (rel.affinity >= 70) chemDevBonus = 5;
+          else if (rel.affinity >= 40) chemDevBonus = 3;
+        }
+      }
+
+      // Simulation sur 3 scénarios : bon GP (P1+P2), GP moyen (P5+P8), mauvais GP (sans points)
+      function devForScenario(p1pos, p2pos) {
+        const pts = (F1_PTS_SCALE[p1pos - 1] || 0) + (F1_PTS_SCALE[p2pos - 1] || 0);
+        const base = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3 - salaryPenalty + lowWageBonusDev);
+        return Math.max(1, base + chemDevBonus);
+      }
+
+      const devBon    = devForScenario(1, 2);   // podium double
+      const devMoyen  = devForScenario(5, 8);   // milieu de grille
+      const devMauvais = devForScenario(11, 14); // hors des points
+
+      // Upgrades par scenario (combien de stats +1 par course dans ce scénario)
+      const upBon     = (team.devPoints + devBon)     >= THRESHOLD ? Math.floor((team.devPoints + devBon) / THRESHOLD)     : 0;
+      const upMoyen   = (team.devPoints + devMoyen)   >= THRESHOLD ? Math.floor((team.devPoints + devMoyen) / THRESHOLD)   : 0;
+      const upMauvais = (team.devPoints + devMauvais) >= THRESHOLD ? Math.floor((team.devPoints + devMauvais) / THRESHOLD) : 0;
+
+      // Stat la plus faible (priorité de dev)
+      const statKeys = ['vitesseMax','drs','refroidissement','dirtyAir','conservationPneus','vitesseMoyenne'];
+      const statLabels = { vitesseMax:'VMax', drs:'DRS', refroidissement:'Refroid', dirtyAir:'DirtyAir', conservationPneus:'ConsPneus', vitesseMoyenne:'VMoy' };
+      const weakStat  = statKeys.reduce((w, k) => (team[k] ?? 99) < (team[w] ?? 99) ? k : w, statKeys[0]);
+      const weakVal   = team[weakStat] ?? '?';
+
+      // Pilotes de l'équipe
+      const pilotsStr = pilots.length
+        ? pilots.map(p => `${p.name} (${overallRating(p)})`).join(' · ')
+        : '*Aucun pilote*';
+      const contractsStr = contracts.length
+        ? contracts.map(c => {
+            const p = pilots.find(x => String(x._id) === String(c.pilotId));
+            return `${p ? p.name : '?'} : **${c.salaireBase}🪙**/course ×${c.coinMultiplier} | ${c.seasonsRemaining} saison(s)`;
+          }).join('\n    ')
+        : '*Pas de contrats actifs*';
+
+      const penaltyStr = salaryPenalty > 0
+        ? `-${salaryPenalty} devPts (masse sal.)` + (lowWageBonusDev > 0 ? '' : '')
+        : 'Aucune pénalité salariale';
+      const bonusStr = lowWageBonusDev > 0 ? ` +${lowWageBonusDev} bonus masse faible` : '';
+      const chemStr  = chemDevBonus > 0 ? ` +${chemDevBonus} bonus chimie` : '';
+
+      lines.push(
+        \`\n\${team.emoji} **\${team.name}** — Budget : **\${team.budget}** | devPts actuels : **\${team.devPoints}**\` +
+        \`\n  👥 \${pilotsStr}\` +
+        \`\n  📋 \${contractsStr}\` +
+        \`\n  💸 Masse salariale totale : **\${totalSalaire}🪙/course** | \${penaltyStr}\${bonusStr}\${chemStr}\` +
+        \`\n  🔧 Stat prioritaire : **\${statLabels[weakStat]}** (actuellement **\${weakVal}**)\` +
+        \`\n  📈 Dev/course estimé :\` +
+        \`\n     🥇 Bon GP (P1+P2)    → **+\${devBon}** pts  → **\${upBon} upgrade(s)**\` +
+        \`\n     🔸 GP moyen (P5+P8)  → **+\${devMoyen}** pts → **\${upMoyen} upgrade(s)**\` +
+        \`\n     💀 Mauvais GP (hors pts) → **+\${devMauvais}** pts → **\${upMauvais} upgrade(s)**\`
+      );
+    }
+
+    // Envoyer en DM à l'admin uniquement
+    try {
+      const dm = await interaction.user.createDM();
+      const header = \`📊 **Analyse Masse Salariale — Impact sur le Dev**\nSaison \${season?.year ?? '?'} · \${allTeams.length} écuries · Seuil upgrade : **\${THRESHOLD} devPts**\n\`;
+      const full = header + lines.join('\n') + \`\n\n*Seuil upgrade = \${THRESHOLD} devPts. Pénalité sal. = 1pt / 100🪙 (cap -8). Bonus masse faible (<150🪙 total) = +3.*\`;
+
+      // Découper si > 2000 chars (limite Discord DM)
+      if (full.length <= 2000) {
+        await dm.send(full);
+      } else {
+        const chunks = [];
+        let cur = header;
+        for (const line of lines) {
+          if ((cur + line).length > 1900) { chunks.push(cur); cur = ''; }
+          cur += line + '\n';
+        }
+        if (cur) chunks.push(cur);
+        for (const chunk of chunks) await dm.send(chunk);
+      }
+      return interaction.editReply({ content: '📨 Analyse envoyée en DM !', ephemeral: true });
+    } catch(e) {
+      return interaction.editReply({ content: \`❌ Impossible d'envoyer le DM : \${e.message}\`, ephemeral: true });
+    }
   }
 
   // ── /admin_evolve_cars ────────────────────────────────────
