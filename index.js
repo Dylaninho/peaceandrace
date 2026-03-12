@@ -4666,7 +4666,7 @@ function nickOrName(p, { alwaysShowNick = false } = {}) {
   return p.name;
 }
 
-function genRivalryArticle(pA, pB, teamA, teamB, contacts, circuit, seasonYear, rivalHeat = 0) {
+function genRivalryArticle(pA, pB, teamA, teamB, contacts, circuit, seasonYear, rivalHeat = 0, isSeasonFinal = false) {
   const sources = ['pitlane_insider', 'paddock_whispers', 'pl_racing_news'];
   const source  = pick(sources);
 
@@ -4899,6 +4899,36 @@ function genDramaArticle(pilotA, pilotB, teamA, teamB, seasonYear, context = {})
   ];
 
   const chosen = pick(dramaTypes)();
+
+  // ── Mode fin de saison : titre de clôture, pas de "à suivre" ──
+  if (isSeasonFinal) {
+    const heatLabel = rivalHeat >= 70 ? 'explosive' : rivalHeat >= 40 ? 'brûlante' : 'tendue';
+    const finalHeadlines = [
+      `${pA.name} / ${pB.name} : ${contacts} contacts, une saison de feu — épilogue`,
+      `Fin de saison — la rivalité ${pA.name}/${pB.name} restera dans les mémoires`,
+      `Dernier chapitre : ${pA.name} et ${pB.name} tirent le bilan`,
+      `${contacts} incident(s), une rivalité ${heatLabel} — la saison ${seasonYear} referme ce dossier`,
+    ];
+    const finalBodies = [
+      `La saison ${seasonYear} est terminée. Et la rivalité entre ${teamA.emoji}**${pA.name}** et ${teamB.emoji}**${pB.name}** restera l'une de ses lignes directrices.
+
+${contacts} contact(s) en course. Une tension qui n'a jamais vraiment baissé. Des conférences de presse tendues, des radio inoubliables.
+
+*La piste a tranché. Jusqu'à la prochaine saison.*`,
+      `${contacts} incidents. Des mots durs. Des regards qui en disent long dans la pitlane. La rivalité ${pA.name}/${pB.name} a marqué la saison ${seasonYear} de son empreinte.
+
+Les deux pilotes n'ont pas besoin de la même écurie pour se retrouver. *Le paddock, lui, se souviendra de cette saison.*`,
+    ];
+    return {
+      type: 'rivalry', source,
+      headline: finalHeadlines[Math.floor(Math.random() * finalHeadlines.length)],
+      body: finalBodies[Math.floor(Math.random() * finalBodies.length)],
+      pilotIds: [pA._id, pB._id],
+      teamIds: [teamA._id, teamB._id],
+      seasonYear,
+    };
+  }
+
   return {
     type: 'drama', source,
     headline: chosen.headline,
@@ -4909,7 +4939,7 @@ function genDramaArticle(pilotA, pilotB, teamA, teamB, seasonYear, context = {})
   };
 }
 
-function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
+function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos, isSeasonFinal = false) {
   const source      = pick(['pitlane_insider', 'f1_weekly', 'pl_racing_news']);
   const lastRank    = pilot.lastSeasonRank  || null;
   const lastPts     = pilot.lastSeasonPts   || 0;
@@ -4989,6 +5019,33 @@ function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
     ]) + careerBestStr,
   ];
 
+  // Mode fin de saison : bilan, pas de "les grandes écuries vont s'intéresser à lui"
+  if (isSeasonFinal) {
+    const finHeadlines = [
+      `${pilot.name} : le bilan d'une saison qui s'achève P${champPos}`,
+      `Saison ${seasonYear} terminée — ${pilot.name} tire le bilan d'une belle année`,
+      `P${champPos} au final : ${pilot.name} ferme les livres de la saison ${seasonYear}`,
+    ];
+    const finBodies = [
+      `La saison ${seasonYear} s'achève. P${champPos} au championnat, ${wins > 0 ? `${wins} victoire(s)` : `${podiums} podium(s)`}. Pour ${team.emoji}**${pilot.name}**, c'est le bilan d'une saison à classer dans les positives.
+
+${interSeasonCtx}${careerBestStr}
+
+*La prochaine saison commencera là où celle-ci s'arrête.*`,
+      `${wins > 0 ? `${wins} victoire(s)` : `${podiums} podium(s)`}, P${champPos} — la saison ${seasonYear} de ${team.emoji}**${pilot.name}** mérite d'être retenue. Pas parfaite, mais marquante.
+
+${interSeasonCtx}${careerBestStr}`,
+    ];
+    return {
+      type: 'hype', source,
+      headline: finHeadlines[Math.floor(Math.random() * finHeadlines.length)],
+      body: finBodies[Math.floor(Math.random() * finBodies.length)],
+      pilotIds: [pilot._id],
+      teamIds: [team._id],
+      seasonYear,
+    };
+  }
+
   return {
     type: 'hype', source,
     headline: pick(headlines),
@@ -4999,7 +5056,7 @@ function genHypeArticle(pilot, team, wins, podiums, seasonYear, champPos) {
   };
 }
 
-function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear, dnfThisRace = false) {
+function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear, dnfThisRace = false, isSeasonFinal = false) {
   const source      = pick(['pitlane_insider', 'pl_racing_news', 'paddock_whispers']);
   const lastRank    = pilot.lastSeasonRank || null;
   const wasTop      = lastRank && lastRank <= 5;
@@ -5039,6 +5096,35 @@ function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear, dnfThi
       `Des rumeurs de changement d'ingénieur de course ont commencé à circuler. Rien de confirmé.`,
     ]),
   ];
+
+  // Mode fin de saison : bilan sans "la réponse sera en piste la prochaine fois"
+  if (isSeasonFinal) {
+    const finH = [
+      `${pilot.name} clôt une saison difficile — le bilan est lourd`,
+      `Saison ${seasonYear} terminée pour ${pilot.name} — ${dnfs} abandon${dnfs>1?'s':''} à digérer`,
+      `${team.emoji}${team.name} / ${pilot.name} : une saison à oublier, un hiver pour rebâtir`,
+    ];
+    const finB = [
+      `${dnfs} abandon${dnfs>1?'s':''} cette saison. La saison ${seasonYear} de ${team.emoji}**${pilot.name}** s'achève sur une note difficile.
+
+${pilot.name} ne s'en est pas caché : la régularité n'était pas au rendez-vous. Les raisons sont connues — les réponses devront être apportées en dehors de la piste.
+
+*Un hiver pour analyser. Le reste viendra après.*`,
+      `La saison ${seasonYear} ne restera pas dans les mémoires de ${team.emoji}**${pilot.name}**. ${dnfs} abandon${dnfs>1?'s':''}, des résultats en dessous des attentes.
+
+On retient ce qu'on peut : quelques bonnes qualifs, un weekend ou deux qui ont montré le potentiel. La constance, elle, n'a jamais suivi.
+
+*Page tournée.*`,
+    ];
+    return {
+      type: 'form_crisis', source,
+      headline: finH[Math.floor(Math.random() * finH.length)],
+      body: finB[Math.floor(Math.random() * finB.length)],
+      pilotIds: [pilot._id],
+      teamIds: [team._id],
+      seasonYear,
+    };
+  }
 
   return {
     type: 'form_crisis', source,
@@ -6419,6 +6505,7 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   const isMid    = progress >= 0.25 && progress < 0.6;
   const isLate   = progress >= 0.6  && progress < 0.85;
   const isFinale = progress >= 0.85;
+  const isSeasonFinal = gpLeft === 0; // DERNIER GP DE LA SAISON
 
   const pilotMap    = new Map(allPilots.map(p => [String(p._id), p]));
   const teamMap     = new Map(allTeams.map(t => [String(t._id), t]));
@@ -6427,8 +6514,8 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   const articlesToPost = [];
 
   // 1. RIVALITÉ — impossible début, rare milieu, fréquent fin
-  // Éviter de republier la même rivalité à chaque GP : vérifier les articles récents
-  const rivalChance = isEarly ? 0 : isMid ? 0.4 : isLate ? 0.75 : 0.9;
+  // Sur le dernier GP : chance à 1.0, cooldown ignoré — il faut conclure les histoires.
+  const rivalChance = isSeasonFinal ? 1.0 : isEarly ? 0 : isMid ? 0.4 : isLate ? 0.75 : 0.9;
   if (Math.random() < rivalChance) {
     const rivalPairs = new Map();
     for (const p of allPilots) {
@@ -6460,11 +6547,11 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
       }
     }
     for (const [key, { pA, pB }] of rivalPairs.entries()) {
-      if (postedRivalKeys.has(key)) continue; // déjà annoncé récemment
+      if (!isSeasonFinal && postedRivalKeys.has(key)) continue; // déjà annoncé récemment (ignoré au dernier GP)
       const tA = teamMap.get(String(pA.teamId));
       const tB = teamMap.get(String(pB.teamId));
       if (tA && tB) {
-        articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year, pA.rivalHeat || 0));
+        articlesToPost.push(genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, race.circuit, season.year, pA.rivalHeat || 0, isSeasonFinal));
         // Tentative de surnom — le "donneur" est pA (le pilote le plus actif dans la rivalité)
         // Condition : rivalité escaladée (contacts ≥ 3 ou heat ≥ 50) + rare
         if ((pA.rivalContacts >= 3 || (pA.rivalHeat || 0) >= 50) && !pB.nickname) {
@@ -6474,9 +6561,9 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     }
   }
 
-  // 2. TITLE FIGHT — seulement mi-saison+
+  // 2. TITLE FIGHT — seulement mi-saison+ et PAS le dernier GP
   const titleChance = isEarly ? 0 : isMid ? 0.3 : isLate ? 0.7 : 1.0;
-  if (standings.length >= 2 && gpLeft > 1 && Math.random() < titleChance) {
+  if (!isSeasonFinal && standings.length >= 2 && gpLeft > 1 && Math.random() < titleChance) {
     const s1 = standings[0], s2 = standings[1];
     const gap = s1.points - s2.points;
     const maxGap = isFinale ? 50 : isLate ? 35 : 25;
@@ -6489,14 +6576,53 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     }
   }
 
-  // 2-bis. SCÉNARIOS TITRE — seulement si ≤ 5 GPs restants
-  // Génère 1-2 articles "voilà comment X peut encore gagner le titre"
-  if (gpLeft <= 5 && gpLeft > 0 && Math.random() < 0.80) {
+  // 2-bis. SCÉNARIOS TITRE — seulement si <= 5 GPs restants ET pas le dernier GP
+  if (!isSeasonFinal && gpLeft <= 5 && gpLeft > 0 && Math.random() < 0.80) {
     try {
       const titleScenarios = genTitleScenariosArticles(standings, pilotMap, teamMap, gpLeft, season.year);
-      // Prendre max 1 article scénario titre par GP post-race
       if (titleScenarios.length > 0) articlesToPost.push(titleScenarios[0]);
     } catch(e) { console.error('[title_scenarios]', e.message); }
+  }
+
+  // 2-ter. BILAN DE FIN DE SAISON — uniquement dernier GP
+  if (isSeasonFinal) {
+    try {
+      const champSt   = standings[0];
+      const champ     = champSt ? pilotMap.get(String(champSt.pilotId)) : null;
+      const champTeam = champ && champ.teamId ? teamMap.get(String(champ.teamId)) : null;
+      const runnerUp  = standings[1] ? pilotMap.get(String(standings[1].pilotId)) : null;
+      const runnerUpT = runnerUp && runnerUp.teamId ? teamMap.get(String(runnerUp.teamId)) : null;
+      const totalPts  = champSt ? champSt.points : 0;
+      const totalWins = champSt ? champSt.wins   : 0;
+      const gap       = (champSt && standings[1]) ? champSt.points - standings[1].points : 0;
+      const totalRaces2 = await Race.countDocuments({ seasonId: season._id });
+      if (champ && champTeam) {
+        const winStr = totalWins === 1 ? '1 victoire' : (totalWins + ' victoires');
+        const gapStr = gap > 0 ? (' avec ' + gap + " points d'avance au final") : '';
+        const h1 = champ.name + ' \u2014 champion. La saison ' + season.year + ' referme le livre.';
+        const h2 = 'Dernier drapeau \u00e0 damier\u00a0: ' + champTeam.emoji + ' ' + champ.name + ' \u00e9crit l\u2019histoire de la saison ' + season.year;
+        const h3 = totalRaces2 + ' Grands Prix, un seul champion. La saison ' + season.year + ' est termin\u00e9e.';
+        const h4 = champ.name + ' et ' + champTeam.emoji + ' ' + champTeam.name + '\u00a0: ce titre, ils l\u2019ont construit tour apr\u00e8s tour';
+        const headlines = [h1, h2, h3, h4];
+        const b1 = 'La saison ' + season.year + ' s\u2019ach\u00e8ve sur ' + (race.emoji||'\ud83c\udfc1') + ' ' + race.circuit + '. ' + totalRaces2 + ' courses. Des larmes, de la sueur, des abandons, des podiums vol\u00e9s et des remont\u00e9es spectaculaires.\n\n' +
+          'Au bout du compte, ' + champTeam.emoji + '**' + champ.name + '** s\u2019impose comme champion du monde pilotes' + gapStr + '. ' + winStr + ' cette saison \u2014 et un titre qui ne souffre d\u2019aucune discussion.\n\n' +
+          (runnerUp ? (runnerUpT ? runnerUpT.emoji : '') + '**' + runnerUp.name + '** termine en vice-champion. Jusqu\u2019au bout, il a incarn\u00e9 la r\u00e9sistance.\n\n' : '') +
+          '*Le championnat est termin\u00e9. L\u2019histoire, elle, ne s\u2019oublie pas.*';
+        const b2 = totalRaces2 + ' Grands Prix. Une seule question a ryhtm\u00e9 toute la saison : qui allait d\u00e9crocher le titre ?\n\n' +
+          'La r\u00e9ponse tombe aujourd\u2019hui, d\u00e9finitivement\u00a0: ' + champTeam.emoji + '**' + champ.name + '**, champion du monde ' + season.year + gapStr + '.\n\n' +
+          'Ce titre ne se r\u00e9sume pas \u00e0 un GP, ni m\u00eame \u00e0 une s\u00e9rie de courses. Il se construit dans les moments de doute, les batailles tour \u00e0 tour oubli\u00e9es et d\u00e9cisives. Cette saison en a eu sa part.\n\n' +
+          '*Rideau sur la saison ' + season.year + '.*';
+        const bodies = [b1, b2];
+        articlesToPost.push({
+          type: 'season_finale', source: 'f1_weekly',
+          headline: headlines[Math.floor(Math.random() * headlines.length)],
+          body: bodies[Math.floor(Math.random() * bodies.length)],
+          pilotIds: [champ._id, ...(runnerUp ? [runnerUp._id] : [])],
+          teamIds:  [champTeam._id],
+          seasonYear: season.year,
+        });
+      }
+    } catch(e) { console.error('[season finale article]', e.message); }
   }
 
   // 3. HYPE — surtout début/milieu
@@ -6512,7 +6638,7 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
       || (hypePerf.isSolid && hypePerf.isSmall && s.podiums >= 1)
       || (hypePerf.isSolid && hypePerf.isMidField && s.wins >= 1);
     if (pilot && team && qualifiesHype && Math.random() < hypeChance) {
-      articlesToPost.push(genHypeArticle(pilot, team, s.wins, s.podiums, season.year, i + 1));
+      articlesToPost.push(genHypeArticle(pilot, team, s.wins, s.podiums, season.year, i + 1, isSeasonFinal));
       break;
     }
   }
@@ -6530,7 +6656,7 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
   const crisisPerf = evalPilotPerf(pilot, team, s, crisisTeamRank, allTeams.length || 10, null);
   const qualifiesCrisis = dnfThisRace || crisisPerf.isFlop;
   if (qualifiesCrisis && Math.random() < crisisChance) {
-    articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year, dnfThisRace));
+    articlesToPost.push(genFormCrisisArticle(pilot, team, s.dnfs, null, season.year, dnfThisRace, isSeasonFinal));
     break;
   }
 }
@@ -6650,9 +6776,10 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
   }
 
   // ── 7-quart. RÉACTION EN CHAÎNE ──────────────────────────────
+  // Désactivée sur le dernier GP : il n'y a pas de "prochain GP" pour la suite.
   // Vérifier si un article du GP précédent a un pendingReply actif
   try {
-    const pendingRels = await PilotRelation.find({ pendingReply: true }).limit(3);
+    const pendingRels = !isSeasonFinal ? await PilotRelation.find({ pendingReply: true }).limit(3) : [];
     for (const pRel of pendingRels) {
       const ctx = pRel.pendingReplyCtx || {};
       const pResp = pilotMap.get(String(ctx.responderId || pRel.pilotA));
@@ -6667,6 +6794,10 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
       }
       pRel.pendingReply = false; pRel.pendingReplyCtx = null;
       try { await pRel.save(); } catch(e) {}
+    }
+    // Dernier GP : effacer tous les pendingReply résiduels (pas de saison suivante immédiate)
+    if (isSeasonFinal) {
+      try { await PilotRelation.updateMany({ pendingReply: true }, { $set: { pendingReply: false, pendingReplyCtx: null } }); } catch(e) {}
     }
   } catch(e) { console.error('[réaction en chaîne]', e.message); }
 
@@ -6880,9 +7011,13 @@ ${isUnder ? `Avec ${t.emoji}${t.name}, ce n'était pas la voiture la plus rapide
   }
 
   // ── 6. RUMEURS CONTEXTUELLES ──────────────────────────────
+  // Bloquées sur le dernier GP : pas de rumeurs "à suivre" quand la saison est terminée.
   // Déclenchées par les résultats réels : DNFs, surperformance, sous-performance
-  // Indépendantes de l'index de saison — elles réagissent à ce qui vient de se passer
   const contextualRumors = [];
+  if (isSeasonFinal) {
+    // Sur le dernier GP, on saute complètement le bloc rumeurs contextuelles.
+    // Le mercato sera ouvert par la cérémonie — pas besoin d'anticiper ici.
+  } else {
 
   for (const pilot of allPilots) {
     const pilotStanding = standings.find(s => String(s.pilotId) === String(pilot._id));
@@ -6954,8 +7089,10 @@ ${isUnder ? `Avec ${t.emoji}${t.name}, ce n'était pas la voiture la plus rapide
     }
   }
 
+  } // fin else !isSeasonFinal (rumeurs contextuelles)
+
   // Poster max 1 rumeur contextuelle par GP (pour ne pas saturer)
-  if (contextualRumors.length > 0) {
+  if (!isSeasonFinal && contextualRumors.length > 0) {
     const rumor = pick(contextualRumors);
     const rumorArticle = await NewsArticle.create({ ...rumor, raceId: race._id, triggered: 'post_race', publishedAt: new Date() });
     await sleep(4000);
