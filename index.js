@@ -12200,11 +12200,31 @@ async function resolveTeamDeliberations() {
   const season = await getActiveSeason();
   const allStandings = season ? await Standing.find({ seasonId: season._id }).lean() : [];
 
-  for (const [teamId, candidates] of byTeam) {
-    try {
-      const team = await Team.findById(teamId).lean();
-      if (!team) continue;
+  // ── Trier les équipes par score de leur meilleur candidat ────
+  // Évite que deux équipes signent le même pilote en même temps :
+  // l'équipe qui lui offre le meilleur score passe en premier,
+  // les suivantes le retrouvent déjà signé et passent au candidat suivant.
+  const teamsWithBestScore = await Promise.all([...byTeam.entries()].map(async ([teamId, candidates]) => {
+    const team = await Team.findById(teamId).lean();
+    if (!team) return { teamId, candidates, bestScore: -1, team: null };
+    let best = -1;
+    for (const o of candidates) {
+      const p = await Pilot.findById(o.pilotId).lean();
+      if (!p || p.teamId) continue;
+      const s = computeTeamScore(p, team, allStandings);
+      if (s > best) best = s;
+    }
+    return { teamId, candidates, bestScore: best, team };
+  }));
+  // Plus grande offre en premier → équipe la plus compétitive signe avant les autres
+  teamsWithBestScore.sort((a, b) => b.bestScore - a.bestScore);
 
+  // Set des pilotes déjà signés dans CETTE passe de délibération (verrou inter-équipes)
+  const signedThisRound = new Set();
+
+  for (const { teamId, candidates, team } of teamsWithBestScore) {
+    if (!team) continue;
+    try {
       const inTeam = await Pilot.countDocuments({ teamId: team._id });
       const slotsOpen = Math.max(0, 2 - inTeam);
 
@@ -12213,10 +12233,10 @@ async function resolveTeamDeliberations() {
         continue;
       }
 
-      // Scorer chaque candidat (pilotes valides uniquement)
+      // Scorer chaque candidat — exclure déjà signés dans ce round ou ailleurs
       const scored = (await Promise.all(candidates.map(async o => {
         const p = await Pilot.findById(o.pilotId).lean();
-        if (!p || p.teamId) return null; // déjà signé ailleurs
+        if (!p || p.teamId || signedThisRound.has(String(p._id))) return null; // déjà pris
         return { offer: o, pilot: p, score: computeTeamScore(p, team, allStandings) };
       }))).filter(Boolean).sort((a, b) => b.score - a.score);
 
@@ -12258,6 +12278,7 @@ async function resolveTeamDeliberations() {
         const oldTeamId = pilot.teamId || null;
         await Pilot.findByIdAndUpdate(pilot._id, { teamId: team._id, teamStatus: finalStatus });
         if (season) await recordTeamHistory(pilot._id, oldTeamId, team, season.year ?? null);
+        signedThisRound.add(String(pilot._id)); // verrou : plus aucune autre équipe ne peut le signer ce round
 
         await Contract.create({
           pilotId: pilot._id, teamId: team._id,
