@@ -751,52 +751,6 @@ function ratingTier(r) {
   return              { badge: '⬜', label: 'ROOKIE',          color: '#888888' };
 }
 
-// ── Percentiles dynamiques de grille ──────────────────────
-// Calcule les seuils réels d'overall à partir de la grille active.
-// baseline = médiane (remplace 75 dans Math.pow(ov/baseline))
-// elite    = P85 (seuil "bon pilote" — ancienne constante 80)
-// top      = P90 (seuil "star" — ancienne constante 90)
-// p25      = P25 (profil accessible pour petites écuries — ancienne constante 63/65)
-// p75      = P75 (seuil surenchères — ancienne constante 72)
-async function computeGridThresholds() {
-  const pilots = await Pilot.find({ teamId: { $ne: null } });
-  if (!pilots.length) return { median: 70, p25: 60, p75: 75, p85: 80, p90: 85, baseline: 70, elite: 80, top: 85, best: 90, n: 0 };
-  const ovs = pilots.map(p => overallRating(p)).sort((a, b) => a - b);
-  const n   = ovs.length;
-  const pct = (p) => ovs[Math.max(0, Math.min(n - 1, Math.round((p / 100) * (n - 1))))];
-  return {
-    n,
-    best    : ovs[n - 1],
-    p90     : pct(90),
-    p85     : pct(85),
-    p75     : pct(75),
-    median  : pct(50),
-    p25     : pct(25),
-    baseline: pct(50),
-    elite   : pct(85),
-    top     : pct(90),
-  };
-}
-// Variante synchrone à partir d'un tableau de pilotes déjà chargés
-function gridThresholdsFromPilots(pilots) {
-  if (!pilots || !pilots.length) return { median: 70, p25: 60, p75: 75, p85: 80, p90: 85, baseline: 70, elite: 80, top: 85, best: 90, n: 0 };
-  const ovs = pilots.map(p => overallRating(p)).sort((a, b) => a - b);
-  const n   = ovs.length;
-  const pct = (p) => ovs[Math.max(0, Math.min(n - 1, Math.round((p / 100) * (n - 1))))];
-  return {
-    n,
-    best    : ovs[n - 1],
-    p90     : pct(90),
-    p85     : pct(85),
-    p75     : pct(75),
-    median  : pct(50),
-    p25     : pct(25),
-    baseline: pct(50),
-    elite   : pct(85),
-    top     : pct(90),
-  };
-}
-
 // ── Réputation ────────────────────────────────────────────
 // Tier affiché dans profil et articles
 function reputationTier(rep) {
@@ -1824,9 +1778,6 @@ async function simulateQualifying(race, pilots, teams) {
     return { time: improved ? raw : best, raw, aborted: false, improved };
   }
 
-  // Seuils dynamiques basés sur la grille réelle de cette session
-  const qualiGridThr = gridThresholdsFromPilots(pilots);
-
   // ─────────────────────────────────────────────────────────
   // Q1 — tous les pilotes, session indépendante
   // Track evo croissante : 2ème tentative bénéficie d'un circuit plus gommé
@@ -1875,8 +1826,7 @@ async function simulateQualifying(race, pilots, teams) {
   const q1Eliminated = q1State.slice(q2Size);
   const upsetQ1 = q1Eliminated.find(s => {
     const ov = (s.pilot.depassement + s.pilot.freinage + s.pilot.controle) / 3;
-    // "Favori surpris" = au-dessus de la médiane de la grille (était censé passer)
-    return ov >= qualiGridThr.median;
+    return ov >= 65;
   });
   if (upsetQ1) q1Events.push({ type: 'upset_q1', pilot: upsetQ1 });
 
@@ -10803,30 +10753,86 @@ async function evolveCarStats(raceResults, teams) {
     teamPoints[key] = (teamPoints[key] || 0) + pts;
   }
 
+  // ── Pré-calcul global 1 : médiane des masses salariales ─────────────────
+  // Fait une seule fois pour toutes les équipes (évite N requêtes Contract.find)
+  let salaireMediane = 0;
+  try {
+    const allActiveContracts = await Contract.find({ active: true }).lean();
+    const massesByTeam = new Map();
+    for (const c of allActiveContracts) {
+      const k = String(c.teamId);
+      massesByTeam.set(k, (massesByTeam.get(k) || 0) + (c.salaireBase || 0));
+    }
+    // Stocker aussi la masse par équipe pour éviter de re-fetch dans la boucle
+    evolveCarStats._masseByTeam = massesByTeam;
+    const allMasses = [...massesByTeam.values()].sort((a, b) => a - b);
+    if (allMasses.length) {
+      const mid = Math.floor(allMasses.length / 2);
+      salaireMediane = allMasses.length % 2 === 0
+        ? Math.round((allMasses[mid - 1] + allMasses[mid]) / 2)
+        : allMasses[mid];
+    }
+  } catch(e) { evolveCarStats._masseByTeam = new Map(); }
+
+  // ── Pré-calcul global 2 : percentile d'overall de chaque pilote ──────────
+  // Sert à mesurer la "surperf voiture" : si une équipe fait de bons résultats
+  // avec des pilotes faibles → la voiture compense → bonus dev (équité de progression).
+  // Si les meilleurs pilotes de la grille portent leur équipe → pas de bonus dev
+  // (les pilotes font le travail, pas la voiture).
+  //
+  // pts_attendus = pct_moyen_pilotes × (P1+P2 max course)
+  // surperf_pts  = pts_obtenus − pts_attendus
+  // surperfBonus = clamp(surperf / 3, −12, +12)   (+1 devPt par 3 pts d'écart)
+  //
+  // Amplitude saison (24 GPs) : jusqu'à ±8 upgrades d'écart selon la surperf pilotes
+  const PTS_RACE_MAX = (F1_POINTS[0] || 25) + (F1_POINTS[1] || 18);
+  const pilotPctMap = new Map(); // pilotId → percentile (0 = plus faible, 1 = meilleur)
+  try {
+    const allPilotsGrid = await Pilot.find({ teamId: { $ne: null } }).lean();
+    const sortedOvs = allPilotsGrid.map(p => overallRating(p)).sort((a, b) => a - b);
+    const nGrid = sortedOvs.length;
+    for (const p of allPilotsGrid) {
+      const ov  = overallRating(p);
+      // lastIndexOf pour gérer les ex-aequo (le dernier = meilleur percentile)
+      const idx = sortedOvs.lastIndexOf(ov);
+      pilotPctMap.set(String(p._id), nGrid > 1 ? idx / (nGrid - 1) : 0.5);
+    }
+  } catch(e) { /* pas de surperfBonus si erreur */ }
+
   for (const team of teams) {
     const key = String(team._id);
     const pts = teamPoints[key] || 0;
 
-    // ── Calcul des devPoints gagnés ──────────────────────────
-    // Formule : points de course × 1.5 + bonus budget + gain de base garanti
-    // Le gain de base (3 pts) assure que même les équipes sans points progressent
-    // Le budget amplifie légèrement l'avantage des grosses structures
-    // ── Coût salarial des pilotes ─────────────────────────────
-    // Les gros salaires réduisent les ressources de développement voiture.
-    // Logique : chaque PLcoin de salaire/course = moins d'argent pour l'usine.
-    // Impact calibré pour rester subtil : 1 pilote à 300 sal ≈ -3 devPts/course
-    // = 1 upgrade de moins toutes les ~13 courses. Un trade-off perceptible sur la saison.
-    const teamContracts = await Contract.find({ teamId: team._id, active: true }).lean();
-    const totalSalaire  = teamContracts.reduce((sum, c) => sum + (c.salaireBase || 0), 0);
-    // Pénalité progressive : floor(salaire / 40), cap à 20
-    // 200 sal → −5/course → ~3 upgrades perdus sur 24 GPs
-    // 300 sal → −7/course → ~4 upgrades perdus sur 24 GPs
-    const salaryPenalty = Math.min(20, Math.floor(totalSalaire / 40));
+    // ── Effet masse salariale : relatif à la médiane de la grille ────────────
+    // Au-dessus médiane : −1 devPt par 15🪙 d'excès,   cap −18
+    // En-dessous médiane: +1 devPt par 25🪙 de déficit, cap +10
+    // Asymétrique : payer beaucoup pénalise plus fort que payer peu ne récompense.
+    const totalSalaire = (evolveCarStats._masseByTeam || new Map()).get(key) ?? 0;
+    const salEcart  = totalSalaire - salaireMediane;
+    const salEffect = salEcart > 0
+      ? -Math.round(Math.min(18, salEcart / 15))
+      : Math.round(Math.min(10, -salEcart / 25));
 
-    // Bonus développement si masse salariale basse (voiture prioritaire sur pilotes)
-    const lowWageBonusDev = totalSalaire < 100 ? 4 : totalSalaire < 200 ? 2 : 0;
+    // ── Surperf pilotes : bonus dev si la voiture compense des pilotes faibles ─
+    // Principe : équipe avec des pilotes faibles qui surperf → la voiture fait le travail
+    //            → on lui donne plus de dev (logique : elle a besoin de sa voiture).
+    // Équipe avec les meilleurs pilotes qui performe normalement → pas de bonus car
+    //            les pilotes portent, pas la voiture.
+    // Effet recherché : freine l'emballement des tops (forts pilotes + voiture qui monte)
+    //                   et rattrapage naturel pour les bas de grille qui surperforment.
+    let surperfBonus = 0;
+    try {
+      const teamPilotsSnap = await Pilot.find({ teamId: team._id }).lean();
+      if (teamPilotsSnap.length > 0) {
+        const pcts     = teamPilotsSnap.map(p => pilotPctMap.get(String(p._id)) ?? 0.5);
+        const pctAvg   = pcts.reduce((s, v) => s + v, 0) / pcts.length;
+        const ptsExpected = Math.round(pctAvg * PTS_RACE_MAX);
+        const surperf  = pts - ptsExpected;
+        surperfBonus   = Math.round(Math.max(-12, Math.min(12, surperf / 3)));
+      }
+    } catch(e) { /* pas de surperfBonus si erreur */ }
 
-    const devGained = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3 - salaryPenalty + lowWageBonusDev);
+    const devGained = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3 + salEffect + surperfBonus);
 
     // ── Bonus de développement — bonne chimie d'écurie ───────
     // Si les deux coéquipiers s'entendent bien (affinité ≥ 40), les mécaniciens
@@ -12132,7 +12138,7 @@ async function startTransferPeriod() {
 
   // ── ENCHÈRES : surenchère automatique sur les top pilotes convoités ──
   // Après la génération des offres, si plusieurs écuries ont ciblé le même
-  // pilote top (ov ≥ P75 de la grille), elles surenchérissent automatiquement l'une l'autre.
+  // pilote top (ov ≥ 75), elles surenchérissent automatiquement l'une l'autre.
   // Le pilote voit TOUTES les offres et choisit la meilleure.
   const allNewOffers = await TransferOffer.find({ status: 'pending' });
   // Grouper par pilote
@@ -12146,17 +12152,14 @@ async function startTransferPeriod() {
   const topChampStandings = [...allStandings].sort((a, b) => b.points - a.points).slice(0, 3);
   const topChampPilotIds  = new Set(topChampStandings.map(s => String(s.pilotId)));
 
-  // Seuil surenchères dynamique : P75 de la grille (pilotes au-dessus de la médiane haute)
-  const bidGridThr = await computeGridThresholds();
-
   for (const [pilotId, offers] of offerGrouped) {
     if (offers.length < 2) continue; // pas de concurrence
     const pilot = await Pilot.findById(pilotId);
     if (!pilot) continue;
     const ov = overallRating(pilot);
-    // Surenchères si ov >= P75 de la grille OU si pilote dans le top 3 du championnat
+    // Surenchères si ov >= 72 OU si pilote dans le top 3 du championnat pilotes
     const isTopChamp = topChampPilotIds.has(String(pilot._id));
-    if (ov < bidGridThr.p75 && !isTopChamp) continue;
+    if (ov < 72 && !isTopChamp) continue;
     // Trier par salaireBase décroissant
     offers.sort((a, b) => b.salaireBase - a.salaireBase);
     const topOfferSalaire = offers[0].salaireBase; // salaire de référence (avant surenchères)
@@ -17345,6 +17348,36 @@ async function handleInteraction(interaction) {
     const lines = [];
     let totalSalGlobal = 0;
 
+    // Pré-calculer la médiane globale des masses salariales
+    let medianeGlobale = 0;
+    try {
+      const allContractsForMedian = await Contract.find({ active: true }).lean();
+      const masseMap = new Map();
+      for (const c of allContractsForMedian) {
+        const k = String(c.teamId);
+        masseMap.set(k, (masseMap.get(k) || 0) + (c.salaireBase || 0));
+      }
+      const allM = [...masseMap.values()].sort((a, b) => a - b);
+      if (allM.length) {
+        const mid = Math.floor(allM.length / 2);
+        medianeGlobale = allM.length % 2 === 0 ? Math.round((allM[mid - 1] + allM[mid]) / 2) : allM[mid];
+      }
+    } catch(e) {}
+
+    // Pré-calculer les percentiles d'overall (même logique que evolveCarStats)
+    const adminPilotPctMap = new Map();
+    const PTS_RACE_MAX_ADM = (F1_PTS_SCALE[0] || 25) + (F1_PTS_SCALE[1] || 18);
+    try {
+      const allPilotsGrid = await Pilot.find({ teamId: { $ne: null } }).lean();
+      const sortedOvs = allPilotsGrid.map(p => overallRating(p)).sort((a, b) => a - b);
+      const nGrid = sortedOvs.length;
+      for (const p of allPilotsGrid) {
+        const ov = overallRating(p);
+        const idx = sortedOvs.lastIndexOf(ov);
+        adminPilotPctMap.set(String(p._id), nGrid > 1 ? idx / (nGrid - 1) : 0.5);
+      }
+    } catch(e) {}
+
     for (let rank = 0; rank < allTeams.length; rank++) {
       const team = allTeams[rank];
       const contracts = await Contract.find({ teamId: team._id, active: true }).lean();
@@ -17352,8 +17385,22 @@ async function handleInteraction(interaction) {
 
       const totalSalaire = contracts.reduce((sum, c) => sum + (c.salaireBase || 0), 0);
       totalSalGlobal += totalSalaire;
-      const salaryPenalty  = Math.min(8, Math.floor(totalSalaire / 100));
-      const lowWageBonusDev = totalSalaire < 150 ? 3 : 0;
+      const salEcartAdmin = totalSalaire - medianeGlobale;
+      const salEffectAdmin = salEcartAdmin > 0
+        ? -Math.round(Math.min(18, salEcartAdmin / 15))
+        : Math.round(Math.min(10, -salEcartAdmin / 25));
+
+      // Percentile moyen des pilotes → surperfBonus simulé pour P1+P2 et P5+P8
+      let pctAvgAdmin = 0.5;
+      if (pilots.length > 0) {
+        const pcts = pilots.map(p => adminPilotPctMap.get(String(p._id)) ?? 0.5);
+        pctAvgAdmin = pcts.reduce((s, v) => s + v, 0) / pcts.length;
+      }
+      const ptsExpectedBon    = Math.round(pctAvgAdmin * PTS_RACE_MAX_ADM);
+      const ptsExpectedMoyen  = Math.round(pctAvgAdmin * ((F1_PTS_SCALE[4]||10) + (F1_PTS_SCALE[7]||4)));
+      const surperfBonusBon   = Math.round(Math.max(-12, Math.min(12, ((F1_PTS_SCALE[0]||25) + (F1_PTS_SCALE[1]||18) - ptsExpectedBon) / 3)));
+      const surperfBonusMoyen = Math.round(Math.max(-12, Math.min(12, ((F1_PTS_SCALE[4]||10) + (F1_PTS_SCALE[7]||4) - ptsExpectedMoyen) / 3)));
+      const surperfBonusMauv  = Math.round(Math.max(-12, Math.min(12, (0 - Math.round(pctAvgAdmin * (F1_PTS_SCALE[10]||0))) / 3)));
 
       // Affinité entre coéquipiers
       let chemDevBonus = 0;
@@ -17366,20 +17413,14 @@ async function handleInteraction(interaction) {
         }
       }
 
-      // Simulation sur 3 scénarios : bon GP (P1+P2), GP moyen (P5+P8), mauvais GP (sans points)
-      function devForScenario(p1pos, p2pos) {
-        const pts = (F1_PTS_SCALE[p1pos - 1] || 0) + (F1_PTS_SCALE[p2pos - 1] || 0);
-        const base = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3 - salaryPenalty + lowWageBonusDev);
-        return Math.max(1, base + chemDevBonus);
-      }
+      // Simulation sur 3 scénarios avec surperfBonus inclus
+      const devBon    = Math.max(1, Math.round(((F1_PTS_SCALE[0]||25)+(F1_PTS_SCALE[1]||18)) * 1.5 + (team.budget/100)*3 + 3 + salEffectAdmin + surperfBonusBon)   + chemDevBonus);
+      const devMoyen  = Math.max(1, Math.round(((F1_PTS_SCALE[4]||10)+(F1_PTS_SCALE[7]||4))  * 1.5 + (team.budget/100)*3 + 3 + salEffectAdmin + surperfBonusMoyen) + chemDevBonus);
+      const devMauvais= Math.max(1, Math.round(0                                                    + (team.budget/100)*3 + 3 + salEffectAdmin + surperfBonusMauv)  + chemDevBonus);
 
-      const devBon    = devForScenario(1, 2);   // podium double
-      const devMoyen  = devForScenario(5, 8);   // milieu de grille
-      const devMauvais = devForScenario(11, 14); // hors des points
-
-      // Upgrades par scenario (combien de stats +1 par course dans ce scénario)
-      const upBon     = (team.devPoints + devBon)     >= THRESHOLD ? Math.floor((team.devPoints + devBon) / THRESHOLD)     : 0;
-      const upMoyen   = (team.devPoints + devMoyen)   >= THRESHOLD ? Math.floor((team.devPoints + devMoyen) / THRESHOLD)   : 0;
+      // Upgrades par scenario
+      const upBon     = (team.devPoints + devBon)     >= THRESHOLD ? Math.floor((team.devPoints + devBon)     / THRESHOLD) : 0;
+      const upMoyen   = (team.devPoints + devMoyen)   >= THRESHOLD ? Math.floor((team.devPoints + devMoyen)   / THRESHOLD) : 0;
       const upMauvais = (team.devPoints + devMauvais) >= THRESHOLD ? Math.floor((team.devPoints + devMauvais) / THRESHOLD) : 0;
 
       // Stat la plus faible (priorité de dev)
@@ -17390,7 +17431,7 @@ async function handleInteraction(interaction) {
 
       // Pilotes de l'équipe
       const pilotsStr = pilots.length
-        ? pilots.map(p => `${p.name} (${overallRating(p)})`).join(' · ')
+        ? pilots.map(p => `${p.name} (${overallRating(p)}) pct=${Math.round((adminPilotPctMap.get(String(p._id)) ?? 0.5)*100)}%`).join(' · ')
         : '*Aucun pilote*';
       const contractsStr = contracts.length
         ? contracts.map(c => {
@@ -17399,21 +17440,22 @@ async function handleInteraction(interaction) {
           }).join('\n    ')
         : '*Pas de contrats actifs*';
 
-      const penaltyStr = salaryPenalty > 0
-        ? `-${salaryPenalty} devPts (masse sal.)` + (lowWageBonusDev > 0 ? '' : '')
-        : 'Aucune pénalité salariale';
-      const bonusStr = lowWageBonusDev > 0 ? ` +${lowWageBonusDev} bonus masse faible` : '';
+      const penaltyStr = salEffectAdmin !== 0
+        ? (salEffectAdmin > 0 ? `+${salEffectAdmin} devPts (masse basse vs médiane)` : `${salEffectAdmin} devPts (masse haute vs médiane)`)
+        : `±0 (masse = médiane ${medianeGlobale}🪙)`;
+      const surperfStr = `pct_pilotes=${Math.round(pctAvgAdmin*100)}% → surperf (P1+P2)=${surperfBonusBon > 0 ? '+' : ''}${surperfBonusBon} | (P5+P8)=${surperfBonusMoyen > 0 ? '+' : ''}${surperfBonusMoyen}`;
       const chemStr  = chemDevBonus > 0 ? ` +${chemDevBonus} bonus chimie` : '';
 
       lines.push(
         `\n${team.emoji} **${team.name}** — Budget : **${team.budget}** | devPts actuels : **${team.devPoints}**` +
         `\n  👥 ${pilotsStr}` +
         `\n  📋 ${contractsStr}` +
-        `\n  💸 Masse salariale totale : **${totalSalaire}🪙/course** | ${penaltyStr}${bonusStr}${chemStr}` +
+        `\n  💸 Masse salariale totale : **${totalSalaire}🪙/course** | ${penaltyStr}${chemStr}` +
+        `\n  🏎️ Surperf pilotes : ${surperfStr}` +
         `\n  🔧 Stat prioritaire : **${statLabels[weakStat]}** (actuellement **${weakVal}**)` +
-        `\n  📈 Dev/course estimé :` +
-        `\n     🥇 Bon GP (P1+P2)    → **+${devBon}** pts  → **${upBon} upgrade(s)**` +
-        `\n     🔸 GP moyen (P5+P8)  → **+${devMoyen}** pts → **${upMoyen} upgrade(s)**` +
+        `\n  📈 Dev/course estimé (salaire + surperf inclus) :` +
+        `\n     🥇 Bon GP (P1+P2)       → **+${devBon}** pts  → **${upBon} upgrade(s)**` +
+        `\n     🔸 GP moyen (P5+P8)     → **+${devMoyen}** pts → **${upMoyen} upgrade(s)**` +
         `\n     💀 Mauvais GP (hors pts) → **+${devMauvais}** pts → **${upMauvais} upgrade(s)**`
       );
     }
@@ -17421,8 +17463,8 @@ async function handleInteraction(interaction) {
     // Envoyer en DM à l'admin uniquement
     try {
       const dm = await interaction.user.createDM();
-      const header = `📊 **Analyse Masse Salariale — Impact sur le Dev**\nSaison ${season?.year ?? '?'} · ${allTeams.length} écuries · Seuil upgrade : **${THRESHOLD} devPts**\n`;
-      const full = header + lines.join('\n') + `\n\n*Seuil upgrade = ${THRESHOLD} devPts. Pénalité sal. = 1pt / 100🪙 (cap -8). Bonus masse faible (<150🪙 total) = +3.*`;
+      const header = `📊 **Analyse Dev Voiture — Masse Salariale + Surperf Pilotes**\nSaison ${season?.year ?? '?'} · ${allTeams.length} écuries · Seuil upgrade : **${THRESHOLD} devPts** · Médiane masse : **${medianeGlobale}🪙**\n`;
+      const full = header + lines.join('\n') + `\n\n*Effet sal : −1pt/15🪙 au-dessus médiane (cap −18) · +1pt/25🪙 en-dessous (cap +10). Surperf : ±1pt/3pts d'écart vs attendu (cap ±12).*`;
 
       // Découper si > 2000 chars (limite Discord DM)
       if (full.length <= 2000) {
@@ -17454,7 +17496,6 @@ async function handleInteraction(interaction) {
       // Calcul masse salariale pour info admin
       const teamCtracts = await Contract.find({ teamId: t._id, active: true }).lean();
       const totalSal = teamCtracts.reduce((sum, c) => sum + (c.salaireBase || 0), 0);
-      const salPen   = Math.min(8, Math.floor(totalSal / 100));
       const salEmoji = totalSal >= 400 ? '💸' : totalSal >= 200 ? '💰' : '🪙';
       embed.addFields({
         name: `${t.emoji} ${t.name}  (dev: ${t.devPoints} pts)`,
@@ -17462,7 +17503,7 @@ async function handleInteraction(interaction) {
           `Vit. Max ${bar(t.vitesseMax)}${t.vitesseMax}  |  DRS ${bar(t.drs)}${t.drs}\n` +
           `Refroid. ${bar(t.refroidissement)}${t.refroidissement}  |  Dirty ${bar(t.dirtyAir)}${t.dirtyAir}\n` +
           `Pneus ${bar(t.conservationPneus)}${t.conservationPneus}  |  Moy ${bar(t.vitesseMoyenne)}${t.vitesseMoyenne}\n` +
-          `${salEmoji} Masse salariale : **${totalSal} 🪙/course** → pénalité dev **-${salPen} devPts/course**`,
+          `${salEmoji} Masse salariale : **${totalSal} 🪙/course** *(effet relatif à la médiane grille)*`,
         inline: false,
       });
     }
