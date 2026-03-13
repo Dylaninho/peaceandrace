@@ -345,6 +345,7 @@ const TeamSchema = new mongoose.Schema({
   vitesseMoyenne   : { type: Number, default: 75 },  // vitesse globale en courbe
   // Ressources disponibles pour développement en cours de saison
   devPoints        : { type: Number, default: 0 },
+    devFocus         : { type: String, default: null }, // stat prioritaire : 'vitesseMax'|'drs'|'refroidissement'|'dirtyAir'|'conservationPneus'|'vitesseMoyenne'|null
 });
 const Team = mongoose.model('Team', TeamSchema);
 
@@ -567,7 +568,7 @@ const F1_POINTS = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
 // Pool : 70 points à répartir librement (0–30 par stat)
 // → Total possible : 50 par stat en moyenne (même niveau global)
 const BASE_STAT_VALUE  = 40;
-const TOTAL_STAT_POOL  = 70;
+const TOTAL_STAT_POOL  = 119;
 const MAX_STAT_BONUS   = 30;   // bonus max par stat lors de la création
 
 // ── Mapping nationalité → pays de GP à domicile ──────────
@@ -10730,6 +10731,17 @@ function pilotLabel(pilot) {
 // ── Évolution voitures en cours de saison ───────────────────
 // ============================================================
 
+const CAR_STAT_KEYS = ['vitesseMax','drs','refroidissement','dirtyAir','conservationPneus','vitesseMoyenne'];
+
+// Assigne un focus de développement aléatoire à une équipe.
+// keepChance : probabilité de garder le focus actuel (0.6 = 60% de stabilité entre saisons)
+function assignDevFocus(currentFocus, keepChance = 0) {
+  if (currentFocus && Math.random() < keepChance) return currentFocus;
+  // 70% de chance d'avoir un focus, 30% de rester équilibré (null)
+  if (Math.random() < 0.30) return null;
+  return CAR_STAT_KEYS[Math.floor(Math.random() * CAR_STAT_KEYS.length)];
+}
+
 // Appelé après chaque course — distribue des devPoints selon les résultats
 // Chaque équipe investit ensuite dans une stat prioritaire
 async function evolveCarStats(raceResults, teams) {
@@ -10801,11 +10813,19 @@ async function evolveCarStats(raceResults, teams) {
 
       const updates = {};
       for (let i = 0; i < gained; i++) {
-        // Chaque upgrade : 65% sur la stat la plus faible, sinon aléatoire parmi les 3 plus faibles
+        let targetStat;
         const weakPool = statVals.slice(0, 3).map(s => s.key);
-        const targetStat = Math.random() < 0.65 ? statVals[0].key : pick(weakPool);
+        if (team.devFocus && statVals.find(s => s.key === team.devFocus)) {
+          // Focus défini : 55% sur le focus, 25% sur la plus faible, 20% aléatoire parmi les 3 plus faibles
+          const r = Math.random();
+          if      (r < 0.55) targetStat = team.devFocus;
+          else if (r < 0.80) targetStat = statVals[0].key;
+          else               targetStat = pick(weakPool);
+        } else {
+          // Comportement par défaut : 65% sur la plus faible, 35% dans les 3 plus faibles
+          targetStat = Math.random() < 0.65 ? statVals[0].key : pick(weakPool);
+        }
         updates[targetStat] = clamp((updates[targetStat] ?? team[targetStat]) + 1, 0, 99);
-        // Mettre à jour statVals pour que les prochains upgrades de la boucle restent cohérents
         const sv = statVals.find(s => s.key === targetStat);
         if (sv) sv.val = updates[targetStat];
         statVals.sort((a,b) => a.val - b.val);
@@ -10828,7 +10848,7 @@ async function evolveCarStats(raceResults, teams) {
 // ============================================================
 
 async function getActiveSeason() {
-  return Season.findOne({ status: { $in: ['active','transfer'] } });
+    return Season.findOne({ status: 'active' });
 }
 
 async function getCurrentRace(season, slot = null) {
@@ -11150,6 +11170,14 @@ async function createNewSeason() {
     d.setUTCDate(tomorrowUTC.getUTCDate() + Math.floor(i / 2));
     d.setUTCHours(slot === 1 ? 16 : 10, 0, 0, 0); // 10h UTC = 11h CET | 16h UTC = 17h CET
     await Race.create({ seasonId: season._id, index: i, slot, ...CIRCUITS[i], scheduledDate: d, status: 'upcoming' });
+  }
+
+         // Assigner un focus de développement à chaque équipe pour la saison
+  // keepChance = 0.5 : 50% de chance de garder le même focus qu'avant (cohérence inter-saisons)
+  const allTeamsForFocus = await Team.find();
+  for (const t of allTeamsForFocus) {
+    const newFocus = assignDevFocus(t.devFocus, 0.5);
+    await Team.findByIdAndUpdate(t._id, { devFocus: newFocus });
   }
 
   const pilots = await Pilot.find({ teamId: { $ne: null } });
@@ -11756,7 +11784,7 @@ async function startTransferPeriod() {
   if (!season) return 0;
 
   // 1. Passer la saison en mode transfert
-  await Season.findByIdAndUpdate(season._id, { status: 'transfer' });
+   await Season.findByIdAndUpdate(season._id, { status: 'finished' });
 
   // 2. Décrémenter les contrats actifs — UNE SEULE FOIS par mercato.
   // Guard : si la saison est déjà en status 'transfer' avant cet appel,
@@ -12977,6 +13005,22 @@ const commands = [
     .setDescription('🏆 Voir les scénarios possibles pour qu\'un pilote remporte le titre cette saison')
     .addStringOption(o => o.setName('pilote').setDescription('Nom du pilote').setRequired(true)),
 
+        new SlashCommandBuilder().setName('admin_set_dev_focus')
+    .setDescription('[ADMIN] Force le focus de développement d\'une écurie (sinon auto chaque saison)')
+    .addStringOption(o => o.setName('ecurie').setDescription('Nom de l\'écurie').setRequired(true))
+    .addStringOption(o => o.setName('stat')
+      .setDescription('Stat à favoriser — vide = retirer le focus (équilibré)')
+      .setRequired(false)
+      .addChoices(
+        { name: '🏎️ Vitesse Max',        value: 'vitesseMax' },
+        { name: '💨 DRS',                value: 'drs' },
+        { name: '🌡️ Refroidissement',    value: 'refroidissement' },
+        { name: '💨 Dirty Air',          value: 'dirtyAir' },
+        { name: '🔄 Conservation Pneus', value: 'conservationPneus' },
+        { name: '⚙️ Vitesse Moyenne',    value: 'vitesseMoyenne' },
+      )
+    ),
+
  new SlashCommandBuilder().setName('admin_creer_ecurie')
     .setDescription('[ADMIN] Crée une nouvelle écurie en cours de partie')
     .addStringOption(o => o.setName('nom').setDescription('Nom de l\'écurie').setRequired(true))
@@ -13023,10 +13067,14 @@ client.once('ready', async () => {
     // L'index n'existe plus (déjà supprimé ou jamais créé) — pas de souci
   }
 
-  const teamCount = await Team.countDocuments();
   if (teamCount === 0) {
     await Team.insertMany(DEFAULT_TEAMS);
     console.log('✅ 8 écuries créées');
+  }
+  // Assigner un focus aux équipes qui n'en ont pas encore (migration initiale)
+  const teamsWithoutFocus = await Team.find({ devFocus: { $exists: false } });
+  for (const t of teamsWithoutFocus) {
+    await Team.findByIdAndUpdate(t._id, { devFocus: assignDevFocus(null, 0) });
   }
 
   // ── Charger la config persistante (intro vidéo, etc.) ──────
@@ -13392,7 +13440,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes'].includes(commandName);
+       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes', 'admin_set_dev_focus'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -15851,6 +15899,35 @@ async function handleInteraction(interaction) {
       .setFooter({ text: 'Bonne saison 🏎️💨' });
 
     return interaction.editReply({ embeds: [embed1] });
+  }
+
+         // ── /admin_set_dev_focus ──────────────────────────────────
+  if (commandName === 'admin_set_dev_focus') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const ecurieNom = interaction.options.getString('ecurie');
+    const stat      = interaction.options.getString('stat') || null;
+
+    const team = await Team.findOne({ name: { $regex: `^${ecurieNom}$`, $options: 'i' } });
+    if (!team)
+      return interaction.editReply({ content: `❌ Écurie **${ecurieNom}** introuvable.`, ephemeral: true });
+
+    await Team.findByIdAndUpdate(team._id, { devFocus: stat });
+
+    const statLabels = { vitesseMax:'Vitesse Max 🏎️', drs:'DRS 💨', refroidissement:'Refroidissement 🌡️', dirtyAir:'Dirty Air 💨', conservationPneus:'Conservation Pneus 🔄', vitesseMoyenne:'Vitesse Moyenne ⚙️' };
+
+    return interaction.editReply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`${team.emoji} Focus développement — ${team.name}`)
+        .setColor(team.color || '#888888')
+        .setDescription(
+          stat
+            ? `✅ Focus forcé sur **${statLabels[stat]}**.\n55% des upgrades iront sur cette stat jusqu'au prochain changement de saison.`
+            : `✅ Focus retiré — développement **équilibré** (stat la plus faible prioritaire).\nÀ la prochaine saison, un focus sera automatiquement réassigné.`
+        )
+      ],
+    });
   }
 
   // ── /admin_new_season ─────────────────────────────────────
