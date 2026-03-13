@@ -14431,27 +14431,75 @@ async function handleInteraction(interaction) {
       const headerParts = [];
       if (offers.length) headerParts.push(`**${offers.length}** offre(s) à traiter`);
       if (reviewOffers.length) headerParts.push(`**${reviewOffers.length}** candidature(s) en délibération`);
+
+      // Pré-calcul du contexte mercato pour chaque offre
+      const totalOffersPilot = offers.length + reviewOffers.length;
+      const offerCtx = {};
+      for (const o of [...offers, ...reviewOffers]) {
+        const inTeam      = await Pilot.countDocuments({ teamId: o.teamId });
+        const slotsLeft   = Math.max(0, 2 - inTeam);
+        const competitors = await TransferOffer.countDocuments({
+          teamId: o.teamId,
+          status: { $in: ['pending', 'under_review'] },
+          pilotId: { $ne: pilot._id },
+        });
+        offerCtx[String(o._id)] = { inTeam, slotsLeft, competitors };
+      }
+
       await dmChannel.send({ content: `📬 **${pilot.name} (Pilote ${pilotIndex})** — ${headerParts.join(' · ')}\n> Boutons actifs 10 min. Utilise \`/accepter_offre <ID>\` en secours.` });
 
       // Offres pending : avec boutons accept/reject
-      for (const o of offers) {
+      for (let idx = 0; idx < offers.length; idx++) {
+        const o    = offers[idx];
         const team = await Team.findById(o.teamId);
         const expiresIn = o.expiresAt ? Math.max(0, Math.floor((new Date(o.expiresAt) - Date.now()) / (1000 * 60 * 60))) : null;
         const statusStr = o.driverStatus === 'numero1'
           ? '\n🔴 **Statut proposé : Pilote N°1**'
           : o.driverStatus === 'numero2' ? '\n🔵 **Statut proposé : Pilote N°2**' : '';
+
+        const ctx         = offerCtx[String(o._id)] || {};
+        const slotsLeft   = ctx.slotsLeft ?? 1;
+        const competitors = ctx.competitors ?? 0;
+        // Dernière offre = une seule au total, ou c'est la dernière pending et aucune under_review
+        const isLast = totalOffersPilot === 1
+          || (idx === offers.length - 1 && reviewOffers.length === 0);
+
+        // Contexte slots / concurrence
+        let slotStr = '';
+        if (slotsLeft === 0) {
+          slotStr = '\n⚠️ Cette équipe semble **complète** — vérifie avant d\'accepter.';
+        } else if (slotsLeft === 1 && competitors >= 2) {
+          slotStr = `\n🔥 **${competitors} autres pilotes** postulent pour le **seul slot restant** chez ${team.name}. Concurrence élevée.`;
+        } else if (slotsLeft === 1 && competitors === 1) {
+          slotStr = `\n⚔️ **1 autre pilote** est aussi en lice pour le slot restant chez ${team.name}.`;
+        } else if (slotsLeft === 1 && competitors === 0) {
+          slotStr = `\n✅ **1 slot disponible** — tu es seul(e) à postuler chez ${team.name} pour l'instant.`;
+        } else if (slotsLeft === 2 && competitors === 0) {
+          slotStr = `\n🟢 ${team.name} cherche encore **2 pilotes** — aucun concurrent en vue.`;
+        } else if (slotsLeft === 2 && competitors >= 1) {
+          slotStr = `\n🟡 **2 slots libres** chez ${team.name}, mais **${competitors} autre(s) pilote(s)** ont déjà postulé.`;
+        }
+
+        // Avertissement dernière offre
+        const urgenceStr = isLast
+          ? '\n\n⚠️ **C\'est ta dernière offre disponible.** Si tu refuses, tu n\'as plus aucune proposition en cours — attends éventuellement une 2ème vague.'
+          : '';
+
         const embed = new EmbedBuilder()
           .setTitle(`${team.emoji} ${team.name} — Offre de contrat`)
-          .setColor(team.color)
+          .setColor(isLast ? '#FF4444' : team.color)
           .setDescription(
             `×**${o.coinMultiplier}** coins | **${o.seasons}** saison(s)\n` +
             `💰 Salaire : **${o.salaireBase} 🪙**/course\n` +
             `🏆 Prime V : **${o.primeVictoire} 🪙** | 🥉 Prime P : **${o.primePodium} 🪙**` +
             statusStr +
             (expiresIn !== null ? `\n⏳ Expire dans ~${expiresIn}h` : '') +
+            slotStr +
+            urgenceStr +
             `\n\n*Si tu acceptes, l'équipe a 24h pour délibérer — elle peut préférer un autre candidat.*`
           )
-          .setFooter({ text: `ID de secours : ${o._id}` });
+          .setFooter({ text: `Offre ${idx + 1}/${offers.length}${isLast ? ' · ⚠️ Dernière offre' : ''} · ID : ${o._id}` });
+
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`offer_accept_${o._id}`).setLabel(`✅ Rejoindre ${team.name}`).setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId(`offer_reject_${o._id}`).setLabel('❌ Refuser').setStyle(ButtonStyle.Danger),
@@ -14465,13 +14513,24 @@ async function handleInteraction(interaction) {
         const deadlineStr = o.reviewDeadline
           ? o.reviewDeadline.toLocaleString('fr-FR', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })
           : '?';
+        const ctx         = offerCtx[String(o._id)] || {};
+        const slotsLeft   = ctx.slotsLeft ?? 1;
+        const competitors = ctx.competitors ?? 0;
+        const slotCtxR = slotsLeft === 1 && competitors >= 1
+          ? `\n🔥 **${competitors + 1} candidats** pour **1 seul slot** — décision avant le ${deadlineStr}.`
+          : slotsLeft === 1 && competitors === 0
+          ? `\n✅ Tu es le/la seul(e) candidat(e) pour ce slot.`
+          : competitors > 0
+          ? `\n📊 **${competitors} autre(s) candidat(s)** aussi en délibération.`
+          : '';
         const embed = new EmbedBuilder()
           .setTitle(`⏳ ${team.emoji} ${team.name} — Délibération en cours`)
           .setColor('#888888')
           .setDescription(
             `**${pilot.name}** est en lice pour rejoindre ${team.emoji} **${team.name}**.\n\n` +
-            `L'équipe délibère jusqu'au **${deadlineStr}**. Tu recevras un DM dès que la décision est prise.\n\n` +
-            `*D'autres candidats peuvent encore se manifester avant la deadline.*`
+            `L'équipe délibère jusqu'au **${deadlineStr}**. Tu recevras un DM dès que la décision est prise.` +
+            slotCtxR +
+            `\n\n*D'autres candidats peuvent encore se manifester avant la deadline.*`
           )
           .setFooter({ text: `ID : ${o._id}` });
         await dmChannel.send({ embeds: [embed] });
@@ -14485,10 +14544,26 @@ async function handleInteraction(interaction) {
       // DMs bloqués → fallback éphémère dans le channel
       console.warn(`[Offres] DM impossible pour ${interaction.user.id}: ${dmError.message}`);
       const embeds = [], components = [];
-      for (const o of offers) {
+      const totalOffersF = offers.length + reviewOffers.length;
+      for (let idx = 0; idx < offers.length; idx++) {
+        const o    = offers[idx];
         const team = await Team.findById(o.teamId);
-        embeds.push(new EmbedBuilder().setTitle(`${team.emoji} ${team.name}`).setColor(team.color)
-          .setDescription(`×**${o.coinMultiplier}** | **${o.seasons}** saison(s) | 💰 **${o.salaireBase} 🪙**/course | 🏆 **${o.primeVictoire} 🪙** | 🥉 **${o.primePodium} 🪙**\n*L'équipe délibère 24h après ton acceptation.*`)
+        const inTeamF      = await Pilot.countDocuments({ teamId: o.teamId });
+        const slotsLeftF   = Math.max(0, 2 - inTeamF);
+        const competitorsF = await TransferOffer.countDocuments({ teamId: o.teamId, status: { $in: ['pending', 'under_review'] }, pilotId: { $ne: pilot._id } });
+        const isLastF      = totalOffersF === 1 || (idx === offers.length - 1 && reviewOffers.length === 0);
+        const slotLineF    = slotsLeftF === 1 && competitorsF >= 1
+          ? `🔥 ${competitorsF} concurrent(s) pour 1 slot. `
+          : slotsLeftF === 1 && competitorsF === 0 ? '✅ Seul(e) en lice. '
+          : slotsLeftF === 2 ? '🟢 2 slots libres. ' : '';
+        const urgenceF = isLastF ? '\n⚠️ **Dernière offre disponible.**' : '';
+        embeds.push(new EmbedBuilder()
+          .setTitle(`${team.emoji} ${team.name}${isLastF ? ' — ⚠️ Dernière offre' : ''}`)
+          .setColor(isLastF ? '#FF4444' : team.color)
+          .setDescription(
+            `×**${o.coinMultiplier}** | **${o.seasons}** saison(s) | 💰 **${o.salaireBase} 🪙**/course | 🏆 **${o.primeVictoire} 🪙** | 🥉 **${o.primePodium} 🪙**\n` +
+            `${slotLineF}*L'équipe délibère 24h après ton acceptation.*${urgenceF}`
+          )
           .setFooter({ text: `ID : ${o._id}` }));
         components.push(new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`offer_accept_${o._id}`).setLabel(`✅ ${team.name}`).setStyle(ButtonStyle.Success),
@@ -16855,9 +16930,15 @@ async function handleInteraction(interaction) {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
-    const season = await getActiveSeason();
-    if (!season || season.status !== 'transfer')
-      return interaction.editReply({ content: '❌ Aucune période de transfert active.', ephemeral: true });
+    // getActiveSeason() ne cherche que status:'active' — ici on cherche aussi 'transfer' et 'finished'
+    const season = await Season.findOne({ status: { $in: ['transfer', 'active', 'finished'] } }).sort({ year: -1 });
+    if (!season)
+      return interaction.editReply({ content: '❌ Aucune saison trouvée.', ephemeral: true });
+    // Forcer le statut transfer si nécessaire
+    if (season.status !== 'transfer') {
+      await Season.findByIdAndUpdate(season._id, { status: 'transfer' });
+      season.status = 'transfer';
+    }
 
     const forceAll = interaction.options.getBoolean('force') || false;
 
