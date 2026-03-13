@@ -6785,10 +6785,10 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
   }
 
   // ── 7-quart. RÉACTION EN CHAÎNE ──────────────────────────────
-  // Désactivée sur le dernier GP : il n'y a pas de "prochain GP" pour la suite.
-  // Vérifier si un article du GP précédent a un pendingReply actif
+  // Désactivée sur le dernier GP et les 2 premiers GPs de la saison
+  // (pas assez d'historique pour justifier un "droit de réponse")
   try {
-    const pendingRels = !isSeasonFinal ? await PilotRelation.find({ pendingReply: true }).limit(3) : [];
+    const pendingRels = (!isSeasonFinal && doneRaces >= 3) ? await PilotRelation.find({ pendingReply: true }).limit(3) : [];
     for (const pRel of pendingRels) {
       const ctx = pRel.pendingReplyCtx || {};
       const pResp = pilotMap.get(String(ctx.responderId || pRel.pilotA));
@@ -8191,10 +8191,18 @@ async function runScheduledNews(discordClient, slotName = 'soir') {
     if (rawWeights.lifestyle) rawWeights.lifestyle = Math.max(2, rawWeights.lifestyle - 5);
     if (rawWeights.charity) rawWeights.charity = Math.max(2, rawWeights.charity - 3);
   }
-  if (phaseIdx === 0) { // début de saison : plus de positif
+  if (phaseIdx === 0) { // début de saison : plus de positif, moins de drama
     if (rawWeights.lifestyle) rawWeights.lifestyle += 5;
     if (rawWeights.brand_deal) rawWeights.brand_deal += 4;
     if (rawWeights.transfer_rumor) rawWeights.transfer_rumor = Math.max(0, (rawWeights.transfer_rumor||0) - 8);
+    // Premiers GPs (< 3 courses jouées) : zéro drama/crise/rivalité — saison fraîche
+    if (doneRaces < 3) {
+      if (rawWeights.drama)         rawWeights.drama         = 0;
+      if (rawWeights.form_crisis)   rawWeights.form_crisis   = 0;
+      if (rawWeights.rivalry_news)  rawWeights.rivalry_news  = 0;
+      if (rawWeights.scandal)       rawWeights.scandal       = 0;
+      if (rawWeights.scandal_offtrack) rawWeights.scandal_offtrack = 0;
+    }
   }
 
   // ── MERCATO : boost massif des rumeurs de transfert ──────────
@@ -8492,9 +8500,21 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       pos          : idx + 1,
       startPos     : idx + 1,
       lastPos      : idx + 1,
-      // Écart initial réaliste : ~1.2s par position (P20 est à ~22s du leader)
-      // Correspond à la réalité F1 où le peloton s'étire progressivement après le départ
-      totalTime       : idx * 400, // ~0.4s entre positions au départ (réaliste F1 quali)
+      // ── Gap initial progressif et réaliste ────────────────────
+      // En F1 réel, les écarts sur la grille ne sont pas linéaires :
+      //   P1-P5  : ~0.3s entre positions (train de tête compact)
+      //   P6-P10 : ~0.5s entre positions (milieu de grille)
+      //   P11+   : ~0.7s entre positions (fond de grille + moins de sillage)
+      // + variance ±80ms pour éviter les écarts identiques entre positions adjacentes
+      // Résultat : P2 à ~0.3s, P5 à ~1.3s, P10 à ~4.0s, P16 à ~8.5s du leader
+      totalTime: (() => {
+        let t = 0;
+        for (let i = 0; i < idx; i++) {
+          const baseGap = i < 5 ? 300 : i < 10 ? 500 : 700;
+          t += baseGap + Math.round((Math.random() - 0.5) * 160); // ±80ms de variance
+        }
+        return Math.max(0, t);
+      })(),
       tireCompound    : startCompound,
       tireWear        : 0,
       tireAge         : 0,
@@ -8576,7 +8596,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   // le peloton est compact — on limite les remontées express pour rester réaliste.
   // Lap 1 : max +3 places (départ déjà traité séparément avec +2 via startSwaps)
   // Laps 2-3 : max +2 places (peloton encore groupé)
-  let startCooldown    = 3; // tours restants de cap de positions post-départ
+  let startCooldown    = 5; // tours restants de cap de positions post-départ (était 3)
   let fastestLapMs     = Infinity;
   let fastestLapHolder = null;
   let prevFastestHolder = null; // pour détecter nouveau meilleur tour
@@ -9152,7 +9172,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     // ── Fin de SC/VSC : green flag ────────────────────────────
     if (prevScState !== 'NONE' && scState.state === 'NONE') {
       scCooldown = 6; // 6 tours de variance réduite après restart
-      scRestartCooldown = 3; // cap +2 positions par tour pendant 3 tours post-relance
+      scRestartCooldown = 5; // cap +1 position par tour pendant 5 tours post-relance (était 3)
       const rankedRestart = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
       const top3str = rankedRestart.slice(0,3).map((d,i) => `P${i+1} ${d.team.emoji}**${d.pilot.name}**`).join(' · ');
       events.push({ priority: 10, gif: pickGif('green_flag'), text: pick([
@@ -9171,6 +9191,10 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         driver.totalTime += scLapBase + randInt(-50, 50);
         driver.tireAge += 1;
         if ((driver.warmupLapsLeft || 0) > 0) driver.warmupLapsLeft--;
+        // ── FIX : décrémenter trafficLapsLeft aussi sous SC ──────
+        // Sans ça, un pilote qui pite sous SC reste bloqué en trafic
+        // pour toute la durée de la SC (voire la course entière).
+        if ((driver.trafficLapsLeft || 0) > 0) driver.trafficLapsLeft--;
       } else {
         let lt = calcLapTime(
           driver.pilot, driver.team,
@@ -9182,7 +9206,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         );
 
         // ── DRS réaliste : bonus si < 1.2s du pilote devant ──
-        if (scCooldown === 0 && (driver.pos || 1) > 1 && lap > 1) {
+        if (scCooldown === 0 && (driver.pos || 1) > 1 && lap >= 3) { // DRS activé seulement à partir du tour 3
           const drsCircuit = gpStyle === 'rapide' || gpStyle === 'mixte';
           if (drsCircuit) {
             const pilotAheadObj = drivers.find(d => !d.dnf && d.pos === driver.pos - 1);
@@ -9332,7 +9356,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => {
         const prev = preRestartSnap.find(s => s.id === String(d.pilot._id));
         const prevPos = prev ? prev.pos : i + 1;
-        const maxGain = 2; // max 2 places par tour pendant scRestartCooldown
+        const maxGain = 1; // max 1 place par tour pendant scRestartCooldown (était 2)
         const newPos = i + 1;
         if (newPos < prevPos - maxGain) {
           // Bloquer en échangeant totalTime avec le pilote à prevPos-maxGain
@@ -9348,11 +9372,12 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
     }
 
-    // ── Cap positions début de course : max +3 lap1, +2 laps 2-3 ──────
+    // ── Cap positions début de course : max +2 lap1, +1 laps 2-5 ──────
     // Empêche les bolides de fond de grille de surgir en tête en 1 tour.
-    // Le peloton est compact au départ → les écarts réels mettent quelques tours à se former.
+    // Le peloton est compact au départ → les écarts réels mettent plusieurs tours à se former.
+    // Réduit de +3/+2 à +2/+1 pour limiter les swaps de positions abusifs en début de GP.
     if (startCooldown > 0 && !scActive) {
-      const maxGainStart = lap === 1 ? 3 : 2;
+      const maxGainStart = lap === 1 ? 2 : 1; // T1: max +2 places, T2-T5: max +1 place
       const preSnap2 = drivers.filter(d => !d.dnf).map(d => ({ id: String(d.pilot._id), pos: d.pos }));
       drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => {
         const prev = preSnap2.find(s => s.id === String(d.pilot._id));
@@ -9697,15 +9722,14 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const preLapP = preLapTimes.get(String(passed.pilot._id)) ?? passed.totalTime;
         const bigGap  = Math.abs(preLapP - preLapD) > 5000; // > 5s = changement stratégique, pas un dépassement en piste
 
-        // ── Tours 1-4 : stabiliser la grille — seuls les duels réels passent ───
-        // Un dépassement légitime en début de GP nécessite un gap pré-tour < 1.5s
-        // (les voitures sont proches sur une grille serrée).
-        // Gap > 1.5s sur ces tours = "rangement naturel" selon le rythme, pas un duel narratable.
-        // On annule le changement de position physiquement pour éviter l'effet "6 dépassements en T3".
-        const isEarlyRace = lap <= 4;
+        // ── Tours 1-6 : stabiliser la grille — seuls les duels très serrés passent ───
+        // Un dépassement légitime en début de GP nécessite un gap pré-tour < 800ms
+        // (seuil réduit de 1500ms à 800ms pour éviter les swap de positions abusifs).
+        // Gap > 800ms sur ces tours = "rangement naturel" selon le rythme, pas un duel narratable.
+        const isEarlyRace = lap <= 6;
         if (isEarlyRace && !bigGap) {
           const preGap = Math.abs(preLapP - preLapD);
-          if (preGap > 1500) {
+          if (preGap > 800) {
             // Annuler le dépassement physiquement : remettre les totalTime pour que le classement ne change pas
             const tmpTime = driver.totalTime;
             driver.totalTime = passed.totalTime - 1;
@@ -9843,10 +9867,10 @@ const exitNeighborStr = neighborAhead && neighborBehind
     // ⚠️  Pas avant T5 hors DNF — les micro-variances des premiers tours ne doivent pas
     //     générer une vague de messages "grapille/recule" irréaliste.
     if (!scActive && !justRestarted && lap > 2) {
-      // Compteur de messages narratifs ce tour (hors DNF/fresh tires) — max 2 par tour en milieu de course
-      // En début de GP (T3-T6), on monte à 4 pour couvrir le bordel du premier peloton
+      // Cap strict : max 2 messages de remontée/recul par tour, quelle que soit la phase
+      // (était 4 en T3-T6 → trop de flood en début de GP)
       let multiPosNarrCount = 0;
-      const MAX_MULTI_NARR = (lap <= 6) ? 4 : 2;
+      const MAX_MULTI_NARR = 2;
 
       for (const driver of ranked) {
         if (driver.pittedThisLap) continue;
@@ -9862,7 +9886,6 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const isTireWorn  = worn > wornThresh * 0.85;
         const isFreshTire = (driver.warmupLapsLeft || 0) === 0 && (driver.tireAge || 0) < 8 && (driver.pitStops || 0) > 0;
         const tireEmoji   = TIRE[driver.tireCompound]?.emoji || '🏎️';
-        // Compter les DNFs de CE tour qui étaient devant ce pilote AVANT le tour
         const dnfsAhead = lapDnfs.filter(d => (d.driver.lastPos ?? d.driver.pos) < driver.lastPos).length;
         const fromDnf   = dnfsAhead > 0;
 
@@ -9885,16 +9908,47 @@ const exitNeighborStr = neighborAhead && neighborBehind
         } else {
           // ── Gain de positions ───────────────────────────────
           const gained = posChange;
+
+          // ── Cap physique pneus frais — progressif selon la zone du classement ──
+          // En F1, les pneus frais permettent de remonter MAIS pas de téléporter dans le top.
+          // La remontée doit se faire dépassement par dépassement, surtout vers le podium.
+          //
+          //   Vers P1-P5  : max +1 place/tour → chaque position = un duel narré séparément
+          //   Vers P6-P10 : max +2 places/tour
+          //   Fond grille : max +3 places/tour (inchangé)
+          //
+          // Le pilote est physiquement bloqué derrière l'occupant de la position cible.
+          // Au tour suivant, s'il est toujours plus rapide, le dépassement 1v1 sera narré normalement.
+          if (isFreshTire && !fromDnf) {
+            const destPos    = driver.lastPos - gained; // position actuelle après calcul
+            const maxGainFT  = destPos <= 5 ? 1 : destPos <= 10 ? 2 : 3;
+            if (gained > maxGainFT) {
+              const targetPos = driver.lastPos - maxGainFT;
+              const occupant  = ranked.find(dx => !dx.dnf && dx.pos === targetPos);
+              if (occupant && occupant !== driver) {
+                const tmpTime = driver.totalTime;
+                driver.totalTime = occupant.totalTime + 1;
+                occupant.totalTime = tmpTime - 1;
+              }
+              ranked.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+              // ── FIX : re-synchroniser lastPos après le cap ────────────────
+              // Sans ça, quand la boucle de narration atteint `occupant` plus
+              // loin dans le MÊME tour, elle calcule posChange depuis l'ancienne
+              // valeur de lastPos → faux message "perd X positions".
+              driver.lastPos = driver.pos;
+              if (occupant && occupant !== driver) occupant.lastPos = occupant.pos;
+              continue; // pas de message — le dépassement se fera 1v1 au prochain tour
+            }
+          }
+
           if (isFreshTire) {
             if (multiPosNarrCount >= MAX_MULTI_NARR) continue;
             multiPosNarrCount++;
             events.push({ priority: 4, text: pick([
               `📈 **T${lap}** — ${n} remonte **P${driver.lastPos}→P${driver.pos}** sur pneus frais ${tireEmoji} ! Les gommes neuves font toute la différence.`,
-              `📈 **T${lap}** — ${n} (+${gained} place${gained>1?'s':''}, P${driver.lastPos}→**P${driver.pos}**) — pneus frais ${tireEmoji}, il dévore le classement. La stratégie paye.`,
-              `📈 **T${lap}** — La remontée de ${n} est impressionnante : P${driver.lastPos}→**P${driver.pos}** sur gommes neuves ${tireEmoji}.`,
+              `📈 **T${lap}** — ${n} (+${gained} place${gained>1?'s':''}, P${driver.lastPos}→**P${driver.pos}**) — pneus frais ${tireEmoji}, la stratégie paye.`,
             ]) });
           } else if (fromDnf) {
-            // Le gain réel dû aux DNFs = min(gained, dnfsAhead)
             const gainedByDnf = Math.min(gained, dnfsAhead);
             const dnfNames    = lapDnfs
               .filter(d => (d.driver.lastPos ?? d.driver.pos) < driver.lastPos)
@@ -9905,13 +9959,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
               `📊 **T${lap}** — L'abandon de ${dnfNames} profite à ${n} qui remonte P${driver.lastPos}→**P${driver.pos}**.`,
             ]) });
           } else {
-            // Gain de 3+ places en 1 tour sans fresh tires
             if (multiPosNarrCount >= MAX_MULTI_NARR) continue;
             multiPosNarrCount++;
-            // Gain de 3+ places en 1 tour sans fresh tires
             if (gained >= 3) {
-              // Ajouter resistance trafic : ralentir ce pilote les prochains tours
-              // Remontée depuis le fond = trafic dense devant → friction plus longue
               const trafficPenalty = (driver.startPos >= 12) ? randInt(2, 4) : randInt(1, 2);
               if (!driver.trafficLapsLeft || driver.trafficLapsLeft === 0) {
                 driver.trafficLapsLeft = trafficPenalty;
@@ -10077,7 +10127,6 @@ const exitNeighborStr = neighborAhead && neighborBehind
                   lapDnfs.push({ driver: victim, type: 'CRASH' });
                   lapIncidents.push({ type: 'CRASH', onTrack: true });
                   battleMap.delete(bkey);
-                  // ── Descriptions d'accident plus riches ──────────────
                   const vpos  = victim.pos;
                   const opos  = other.pos;
                   const isP1P2 = (vpos <= 2 || opos <= 2) && vpos <= 3 && opos <= 3;
@@ -10087,16 +10136,21 @@ const exitNeighborStr = neighborAhead && neighborBehind
                     `touche à l'arrière au freinage`, `contact en défendant le dedans`,
                   ];
                   const accDesc = pick(accidentTypes);
+                  // Déterminer l'initiateur du contact (aggr = celui qui attaquait par derrière)
+                  const fautif  = aggr; // toujours le pilote qui attaquait
+                  const faultStr = victim === aggr
+                    ? `*${fautif.pilot.name} impliqué — il perd le contrôle en attaquant.*`
+                    : `*${fautif.team.emoji}**${fautif.pilot.name}** initiateur du contact — ${victim.team.emoji}**${victim.pilot.name}** paie les pots cassés.*`;
                   const crashTexts = battleAreRivals ? [
-                    `***💥 T${lap} — CRASH ! LA RIVALITÉ VIENT DE TOUT EMPORTER !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) et ${other.team.emoji}**${other.pilot.name}** (P${opos}) — ${accDesc}. ***${victim.pilot.name} sort de la piste, voiture détruite. ABANDON.*** La rivalité vient de coûter une course entière. *Le paddock va parler de ça pendant des semaines.*`,
-                    `🔴 ***T${lap} — RIVAL HORS COURSE !***\nAprès ${battle.lapsClose} tours de duel tendu, ${victim.team.emoji}**${victim.pilot.name}** abandonne suite au contact avec ${other.team.emoji}**${other.pilot.name}**. ${accDesc}. ${battleRivalHeat >= 50 ? `***Cette rivalité ne connaît plus de limite.***` : `*Le duel tourne à la catastrophe.*`}`,
+                    `***💥 T${lap} — CRASH ! LA RIVALITÉ VIENT DE TOUT EMPORTER !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) et ${other.team.emoji}**${other.pilot.name}** (P${opos}) — ${accDesc}. ***${victim.pilot.name} sort de la piste, voiture détruite. ABANDON.*** ${faultStr} La rivalité vient de coûter une course entière.`,
+                    `🔴 ***T${lap} — RIVAL HORS COURSE !***\nAprès ${battle.lapsClose} tours de duel, ${victim.team.emoji}**${victim.pilot.name}** abandonne suite au contact avec ${other.team.emoji}**${other.pilot.name}**. ${accDesc}. ${faultStr} ${battleRivalHeat >= 50 ? `***Cette rivalité ne connaît plus de limite.***` : `*Le duel tourne à la catastrophe.*`}`,
                   ] : isP1P2 ? [
-                    `***💥 T${lap} — CATASTROPHE EN TÊTE DE COURSE !!!***\nP${vpos} vs P${opos} — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent : ${accDesc}. ***${victim.pilot.name} dans le mur, ABANDON.*** Le GP vient de basculer. Incroyable.`,
-                    `🚨 ***T${lap} — LE CRASH QUI CHANGE TOUT !***\nLa bataille entre P${vpos} et P${opos} se termine dans les barrières : ${victim.team.emoji}**${victim.pilot.name}** perd le contrôle après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}**. ***FIN DE COURSE. Le podium s'écrit entièrement en 3 secondes.***`,
+                    `***💥 T${lap} — CATASTROPHE EN TÊTE DE COURSE !!!***\nP${vpos} vs P${opos} — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent : ${accDesc}. ***${victim.pilot.name} dans le mur, ABANDON.*** ${faultStr}`,
+                    `🚨 ***T${lap} — LE CRASH QUI CHANGE TOUT !***\n${victim.team.emoji}**${victim.pilot.name}** perd le contrôle après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}**. ***FIN DE COURSE.*** ${faultStr}`,
                   ] : [
-                    `***💥 T${lap} — CRASH !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) sort violemment après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}** (P${opos}). Voiture dans le bac à graviers — ***ABANDON.***`,
-                    `🚨 ***T${lap} — INCIDENT GRAVE !***\n${victim.team.emoji}**${victim.pilot.name}** perd le contrôle en défendant face à ${other.team.emoji}**${other.pilot.name}** — ${accDesc}. ***DNF. Race over.***`,
-                    `💥 ***T${lap}*** — La bataille P${vpos}/P${opos} entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** finit mal : ${accDesc}, voiture dans les barrières. ***ABANDON.***`,
+                    `***💥 T${lap} — CRASH !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) sort violemment après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}** (P${opos}). ***ABANDON.*** ${faultStr}`,
+                    `🚨 ***T${lap} — INCIDENT GRAVE !***\n${victim.team.emoji}**${victim.pilot.name}** perd le contrôle en défendant face à ${other.team.emoji}**${other.pilot.name}** — ${accDesc}. ***DNF.*** ${faultStr}`,
+                    `💥 ***T${lap}*** — La bataille P${vpos}/P${opos} entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** finit mal : ${accDesc}, voiture dans les barrières. ***ABANDON.*** ${faultStr}`,
                   ];
                   const crashGif = isP1P2 ? pickGif('crash_collision') : pick([pickGif('crash_collision'), pickGif('crash_solo')]);
                   events.push({ priority: battleAreRivals ? 10 : isP1P2 ? 10 : 9, text: pick(crashTexts), gif: crashGif });
@@ -10108,50 +10162,78 @@ const exitNeighborStr = neighborAhead && neighborBehind
                 });
                 lapIncidents.push({ type: 'CRASH', onTrack: true });
                 battleMap.delete(bkey);
+                // aggr = initiateur du contact (celui qui attaquait)
                 const doubleCrashTexts = battleAreRivals ? [
-                  `💥 **T${lap} — DOUBLE CRASH DE RIVAUX !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent après ${battle.lapsClose} tours de duel ! **Deux abandons.** *La rivalité s'est terminée dans les graviers.*`,
-                  `🔴 **T${lap} — ILS SE SONT DÉTRUITS L'UN L'AUTRE !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** hors course. *La rivalité la plus explosive du paddock vient de s'enflammer.*`,
+                  `💥 **T${lap} — DOUBLE CRASH DE RIVAUX !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent après ${battle.lapsClose} tours de duel ! **Deux abandons.** *${aggr.team.emoji}**${aggr.pilot.name}** à l'origine du contact — la rivalité s'est terminée dans les graviers.*`,
+                  `🔴 **T${lap} — ILS SE SONT DÉTRUITS L'UN L'AUTRE !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** hors course. *${aggr.team.emoji}**${aggr.pilot.name}** initiateur — la rivalité la plus explosive du paddock vient de s'enflammer.*`,
                 ] : [
-                  `💥 **T${lap} — DOUBLE CRASH !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent ! **Deux abandons.** La bataille tourne au cauchemar.`,
-                  `🚨 ***T${lap} — LES DEUX HORS COURSE !*** ${victim.team.emoji}**${victim.pilot.name}** (P${victim.pos}) et ${other.team.emoji}**${other.pilot.name}** (P${other.pos}) se rentrent dedans dans un contact violent — les deux voitures finissent dans le bac à graviers. ***Double DNF. La course ne pardonne pas.***`,
-                  `💥 **T${lap} — CARNAGE !** Le duel P${victim.pos}/P${other.pos} entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** s'achève de la pire façon — impact brutal, les deux voitures immobilisées. **Deux courses gâchées en une fraction de seconde.**`,
-                  `🔥 ***T${lap}*** — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se détruisent mutuellement : contact violent, les deux dans les graviers. ***La piste retrouve son calme — mais deux pilotes, eux, ont tout perdu ce week-end.***`,
+                  `💥 **T${lap} — DOUBLE CRASH !** ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent ! **Deux abandons.** *${aggr.team.emoji}**${aggr.pilot.name}** à l'origine du contact.*`,
+                  `🚨 ***T${lap} — LES DEUX HORS COURSE !*** ${victim.team.emoji}**${victim.pilot.name}** (P${victim.pos}) et ${other.team.emoji}**${other.pilot.name}** (P${other.pos}) — impact brutal, les deux voitures immobilisées. ***Double DNF.*** *La FIA va examiner les images — ${aggr.team.emoji}**${aggr.pilot.name}** semble responsable.*`,
+                  `💥 **T${lap} — CARNAGE !** Contact violent entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** — les deux dans les graviers. **Deux courses gâchées.** *${aggr.team.emoji}**${aggr.pilot.name}** sous enquête FIA.*`,
+                  `🔥 ***T${lap}*** — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se détruisent mutuellement. *${aggr.team.emoji}**${aggr.pilot.name}** initiateur — les commissaires vont trancher.*`,
                 ];
                 events.push({ priority: battleAreRivals ? 11 : 10, text: pick(doubleCrashTexts) });
               } else if (rollInc < 0.75) {
-                // Crevaison suite au contact
+                // Crevaison suite au contact — même logique que les crevaisons normales :
+                // canRecover = pit d'urgence si assez de tours restants (pas forcément DNF)
                 if (!victim.dnf) {
-                  victim.dnf = true; victim.dnfLap = lap; victim.dnfReason = 'PUNCTURE';
-                  lapDnfs.push({ driver: victim, type: 'PUNCTURE' });
+                  const canRecoverBattle = lapsRemaining > 5 && (victim.pitStops || 0) < 3 && Math.random() < 0.40;
                   lapIncidents.push({ type: 'PUNCTURE', onTrack: true });
                   battleMap.delete(bkey);
-                  const punctureTexts = battleAreRivals ? [
-                    `🫧 **T${lap} — CREVAISON DANS LE DUEL DE RIVAUX !** ${victim.team.emoji}**${victim.pilot.name}** prend un accroc lors du combat avec ${other.team.emoji}**${other.pilot.name}** — pneu à plat. **Abandon.** *${battleRivalHeat >= 40 ? 'La rivalité a encore frappé.' : 'La bataille se termine de la pire façon.'}*`,
-                  ] : [
-                    `🫧 **T${lap} — CREVAISON !** ${victim.team.emoji}**${victim.pilot.name}** prend un accroc lors du duel avec ${other.team.emoji}**${other.pilot.name}** — pneu crevé, abandon immédiat.`,
-                    `🫧 **T${lap}** — Contact roue-à-roue fatal ! ${victim.team.emoji}**${victim.pilot.name}** rentre aux stands avec un pneu à plat. **Fin de course.**`,
-                  ];
-                  events.push({ priority: battleAreRivals ? 9 : 8, text: pick(punctureTexts) });
+                  if (canRecoverBattle) {
+                    // Pit d'urgence — même traitement que crevaison classique
+                    victim.pendingRepair = 'puncture_repair';
+                    victim.tireWear = 99;
+                    victim.tireAge  = 99;
+                    victim.totalTime += randInt(8000, 15000);
+                    const faultRecStr = victim === aggr
+                      ? `*${aggr.team.emoji}**${aggr.pilot.name}** prend le pneu lui-même en attaquant.*`
+                      : `*${aggr.team.emoji}**${aggr.pilot.name}** à l'origine du contact.*`;
+                    const punctureRecoverTexts = battleAreRivals ? [
+                      `🫧 **T${lap} — CREVAISON DANS LE DUEL !** ${victim.team.emoji}**${victim.pilot.name}** prend un accroc lors du combat avec ${other.team.emoji}**${other.pilot.name}** — pneu à plat. **Pit d'urgence !** ${faultRecStr} *Course compromise mais pas terminée.*`,
+                    ] : [
+                      `🫧 **T${lap}** — Contact roue-à-roue ! ${victim.team.emoji}**${victim.pilot.name}** rentre aux stands avec un pneu à plat. **Pit forcé — il repart !** ${faultRecStr}`,
+                      `🫧 **T${lap} — CREVAISON !** ${victim.team.emoji}**${victim.pilot.name}** prend un accroc lors du duel avec ${other.team.emoji}**${other.pilot.name}** — pneu crevé, pit d'urgence. ${faultRecStr}`,
+                    ];
+                    events.push({ priority: battleAreRivals ? 9 : 8, text: pick(punctureRecoverTexts) });
+                  } else {
+                    // Crevaison fatale → DNF
+                    victim.dnf = true; victim.dnfLap = lap; victim.dnfReason = 'PUNCTURE';
+                    lapDnfs.push({ driver: victim, type: 'PUNCTURE' });
+                    const faultDnfStr = victim === aggr
+                      ? `*${aggr.team.emoji}**${aggr.pilot.name}** paie cash son attaque trop agressive.*`
+                      : `*${aggr.team.emoji}**${aggr.pilot.name}** responsable du contact — la FIA va examiner les images.*`;
+                    const punctureTexts = battleAreRivals ? [
+                      `🫧 **T${lap} — CREVAISON DANS LE DUEL DE RIVAUX !** ${victim.team.emoji}**${victim.pilot.name}** prend un accroc lors du combat avec ${other.team.emoji}**${other.pilot.name}** — pneu à plat. **Abandon.** ${faultDnfStr} *${battleRivalHeat >= 40 ? 'La rivalité a encore frappé.' : 'La bataille se termine de la pire façon.'}*`,
+                    ] : [
+                      `🫧 **T${lap} — CREVAISON !** ${victim.team.emoji}**${victim.pilot.name}** prend un accroc lors du duel avec ${other.team.emoji}**${other.pilot.name}** — pneu crevé, abandon immédiat. ${faultDnfStr}`,
+                      `🫧 **T${lap}** — Contact roue-à-roue fatal ! ${victim.team.emoji}**${victim.pilot.name}** rentre aux stands avec un pneu à plat. **Fin de course.** ${faultDnfStr}`,
+                    ];
+                    events.push({ priority: battleAreRivals ? 9 : 8, text: pick(punctureTexts) });
+                  }
                 }
               } else {
                 // Dégâts carrosserie → pit forcé + pénalité de rythme
                 const battleDmgType  = Math.random() < 0.55 ? 'aileron' : 'suspension';
                 const battleDmgLabel = battleDmgType === 'aileron' ? 'aileron avant' : 'suspension';
-                const battleLapPenalty = randInt(1400, 2800); // pénalité PAR TOUR (ms) jusqu'au pit
+                const battleLapPenalty = randInt(1400, 2800);
                 victim.damagedCar = { lapPenalty: battleLapPenalty };
                 victim.pendingRepair    = battleDmgType;
                 victim.damagedPartLabel = battleDmgLabel;
                 victim.tireWear = Math.max(victim.tireWear || 0, 50);
                 victim.tireAge  = 99;
                 battleMap.delete(bkey);
-                // attacker = other (l'initiateur du contact) ; victim = le pilote qui subit
-                const dmgAttacker = other; // other = celui qui n'est PAS victim
+                const dmgAttacker = other; // other = celui qui n'est PAS victim = l'initiateur
                 const dmgVictim   = victim;
+                // aggr = always the attacker (from behind) — determine blame
+                const dmgFaultStr = dmgVictim === aggr
+                  ? `*${aggr.team.emoji}**${aggr.pilot.name}** se blesse lui-même dans son attaque.*`
+                  : `*${aggr.team.emoji}**${aggr.pilot.name}** responsable — enquête FIA probable.*`;
                 raceCollisions.push({ attackerId: String(dmgAttacker.pilot._id), victimId: String(dmgVictim.pilot._id), type: 'damage' });
                 events.push({ priority: 7, text: pick([
-                  `⚙️ **T${lap} — DÉGÂTS !** Contact entre ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** et ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** — **${battleDmgLabel}** endommagé${battleDmgType === 'aileron' ? '' : 'e'} ! Pit d'urgence nécessaire.`,
-                  `🔧 **T${lap}** — Accrochage dans la bataille ! ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** a l'**${battleDmgLabel}** abimé${battleDmgType === 'aileron' ? '' : 'e'} après le contact avec ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** — rentre aux stands en urgence.`,
-                  `🚨 **T${lap}** — ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** sort perdant du duel avec ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** : **${battleDmgLabel} endommagé${battleDmgType === 'aileron' ? '' : 'e'}.** *L'arrêt aux stands est inévitable.*`,
+                  `⚙️ **T${lap} — DÉGÂTS !** Contact entre ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** et ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** — **${battleDmgLabel}** endommagé${battleDmgType === 'aileron' ? '' : 'e'} ! Pit d'urgence nécessaire. ${dmgFaultStr}`,
+                  `🔧 **T${lap}** — Accrochage dans la bataille ! ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** a l'**${battleDmgLabel}** abimé${battleDmgType === 'aileron' ? '' : 'e'} après le contact avec ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** — rentre en urgence. ${dmgFaultStr}`,
+                  `🚨 **T${lap}** — ${dmgVictim.team.emoji}**${dmgVictim.pilot.name}** sort perdant du duel avec ${dmgAttacker.team.emoji}**${dmgAttacker.pilot.name}** : **${battleDmgLabel} endommagé${battleDmgType === 'aileron' ? '' : 'e'}.** *L'arrêt aux stands est inévitable.* ${dmgFaultStr}`,
                 ]) });
               }
             }
@@ -10481,10 +10563,10 @@ const exitNeighborStr = neighborAhead && neighborBehind
     // ⚠️ pts * 22 → P10 (1pt) = 22 > participBonus 20 — P10 gagne toujours plus que P11
     const participBonus = driver.dnf ? 0 : (driver.pos > 10 ? 20 : 0);
 
-    const coins = Math.round(
+    const coins = Math.min(800, Math.round(
       (pts * 22 + (driver.dnf ? 0 : 40) + participBonus) * multi
       + salary + primeV + primeP + (fl ? 30 : 0)
-    );
+    ));
 
     results.push({
       pilotId   : driver.pilot._id,
