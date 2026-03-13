@@ -13029,6 +13029,10 @@ const commands = [
     .addStringOption(o => o.setName('couleur').setDescription('Couleur hex (ex: #AA00FF) — défaut: #888888').setRequired(false))
     .addIntegerOption(o => o.setName('budget').setDescription('Budget (défaut: 80)').setRequired(false).setMinValue(50).setMaxValue(150)),
 
+         new SlashCommandBuilder().setName('admin_force_deliberation')
+    .setDescription('[ADMIN] Force la résolution immédiate de la délibération d\'une écurie')
+    .addStringOption(o => o.setName('ecurie').setDescription('Nom de l\'écurie').setRequired(true)),
+
   new SlashCommandBuilder().setName('admin_assigner_pilotes')
     .setDescription('[ADMIN] Assigne 2 pilotes existants à une écurie (créée via /admin_creer_ecurie)')
     .addStringOption(o => o.setName('ecurie').setDescription('Nom exact de l\'écurie').setRequired(true))
@@ -13442,7 +13446,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes', 'admin_set_dev_focus'].includes(commandName);
+       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes', 'admin_set_dev_focus', 'admin_force_deliberation'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
