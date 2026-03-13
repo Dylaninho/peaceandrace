@@ -10969,8 +10969,11 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
     // ── Enregistrement GPRecord ──────────────────────────────
     if (raceDoc) {
       const team = teams.find(t => String(t._id) === String(r.teamId));
+      // FIX : pilotName était absent de gpRecordData → affichage "? (année)" dans la présentation GP
+      const pilotDoc = await Pilot.findById(r.pilotId).select('name').lean();
       const gpRecordData = {
         pilotId      : r.pilotId,
+        pilotName    : pilotDoc?.name || r.name || '?',
         seasonId     : season._id,
         seasonYear   : season.year,
         raceId       : raceId,
