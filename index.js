@@ -11207,6 +11207,18 @@ async function createNewSeason() {
   const year   = lastSeason ? lastSeason.year + 1 : new Date().getFullYear();
   const regSet = lastSeason ? (lastSeason.year % 4 === 3 ? lastSeason.regulationSet + 1 : lastSeason.regulationSet) : 1;
 
+  // ── FIX : archiver TOUTES les saisons non-active avant d'en créer une nouvelle ──
+  // Sans ça, les anciennes saisons restent en status 'transfer' indéfiniment,
+  // ce qui bloque les commandes qui vérifient Season.findOne({ status:'transfer' }).
+  try {
+    const archived = await Season.updateMany(
+      { status: { $in: ['transfer', 'upcoming'] } },
+      { $set: { status: 'finished' } }
+    );
+    if (archived.modifiedCount > 0)
+      console.log(`[createNewSeason] ${archived.modifiedCount} saison(s) archivée(s) → 'finished'.`);
+  } catch(e) { console.error('[createNewSeason] Erreur archivage saisons :', e.message); }
+
   const season = await Season.create({ year, status: 'active', regulationSet: regSet });
 
   if (regSet > 1) await applyRegulationChange(season);
@@ -14099,7 +14111,7 @@ async function handleInteraction(interaction) {
       // Pilotes ayant COURU pour l'écurie championne constructeur cette saison-là
       // Masqué pendant le mercato : les transferts ne sont pas encore conclus,
       // afficher les noms spoilerait qui reste / qui part.
-      const currentSeason = await Season.findOne({ status: { $in: ['active', 'transfer'] } }).lean();
+      const currentSeason = await Season.findOne({ status: { $in: ['active', 'transfer'] } }).sort({ year: -1 }).lean();
       const isMercatoNow  = currentSeason?.status === 'transfer';
       const isLastSeason  = currentSeason && currentSeason.year === e.seasonYear;
 
