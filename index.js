@@ -11785,7 +11785,7 @@ async function startTransferPeriod() {
   if (!season) return 0;
 
   // 1. Passer la saison en mode transfert
-   await Season.findByIdAndUpdate(season._id, { status: 'finished' });
+  await Season.findByIdAndUpdate(season._id, { status: 'transfer' });
 
   // 2. Décrémenter les contrats actifs — UNE SEULE FOIS par mercato.
   // Guard : si la saison est déjà en status 'transfer' avant cet appel,
