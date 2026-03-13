@@ -12952,6 +12952,9 @@ const commands = [
   new SlashCommandBuilder().setName('concept')
     .setDescription('Présentation complète du jeu F1 PL — pour les nouveaux !'),
 
+          new SlashCommandBuilder().setName('admin_fix_contracts')
+    .setDescription('[ADMIN] Crée un contrat de base pour chaque pilote assigné sans contrat actif'),
+
   new SlashCommandBuilder().setName('performances')
     .setDescription('📊 Historique détaillé des GPs, équipes et records d\'un pilote')
     .addStringOption(o => o.setName('nom').setDescription('Nom du pilote (recherche directe — prioritaire)'))
@@ -15862,6 +15865,38 @@ async function handleInteraction(interaction) {
           (season ? `📋 Classement pilotes saison ${season.year} mis à jour.` : `⚠️ Aucune saison active.`)
         )
       ],
+    });
+  }
+
+        // ── /admin_fix_contracts ──────────────────────────────────
+  if (commandName === 'admin_fix_contracts') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const pilotsInTeam = await Pilot.find({ teamId: { $ne: null } });
+    let fixed = 0;
+    for (const p of pilotsInTeam) {
+      const existing = await Contract.findOne({ pilotId: p._id, active: true });
+      if (!existing) {
+        await Contract.create({
+          pilotId         : p._id,
+          teamId          : p.teamId,
+          seasonsDuration : 1,
+          seasonsRemaining: 1,
+          coinMultiplier  : 1.0,
+          primeVictoire   : 0,
+          primePodium     : 0,
+          salaireBase     : 100,
+          active          : true,
+        });
+        fixed++;
+      }
+    }
+    return interaction.editReply({
+      content: fixed > 0
+        ? `✅ **${fixed}** contrat(s) de base créé(s).`
+        : `✅ Aucun contrat manquant — tous les pilotes assignés ont un contrat actif.`,
+      ephemeral: true,
     });
   }
 
