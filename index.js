@@ -12976,6 +12976,19 @@ const commands = [
   new SlashCommandBuilder().setName('titre_scenario')
     .setDescription('🏆 Voir les scénarios possibles pour qu\'un pilote remporte le titre cette saison')
     .addStringOption(o => o.setName('pilote').setDescription('Nom du pilote').setRequired(true)),
+
+ new SlashCommandBuilder().setName('admin_creer_ecurie')
+    .setDescription('[ADMIN] Crée une nouvelle écurie en cours de partie')
+    .addStringOption(o => o.setName('nom').setDescription('Nom de l\'écurie').setRequired(true))
+    .addStringOption(o => o.setName('emoji').setDescription('Emoji de l\'écurie (ex: 🟣)').setRequired(true))
+    .addStringOption(o => o.setName('couleur').setDescription('Couleur hex (ex: #AA00FF) — défaut: #888888').setRequired(false))
+    .addIntegerOption(o => o.setName('budget').setDescription('Budget (défaut: 80)').setRequired(false).setMinValue(50).setMaxValue(150)),
+
+  new SlashCommandBuilder().setName('admin_assigner_pilotes')
+    .setDescription('[ADMIN] Assigne 2 pilotes existants à une écurie (créée via /admin_creer_ecurie)')
+    .addStringOption(o => o.setName('ecurie').setDescription('Nom exact de l\'écurie').setRequired(true))
+    .addStringOption(o => o.setName('pilote1').setDescription('Nom exact du pilote 1 (numéro 1)').setRequired(true))
+    .addStringOption(o => o.setName('pilote2').setDescription('Nom exact du pilote 2 (numéro 2)').setRequired(true)),
 ];
 
 // ============================================================
@@ -13379,7 +13392,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-    'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale'].includes(commandName);
+       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -15677,6 +15690,125 @@ async function handleInteraction(interaction) {
     } catch(e) {
       return interaction.editReply(`❌ Erreur : ${e.message}`);
     }
+  }
+
+          // ── /admin_creer_ecurie ───────────────────────────────────
+  if (commandName === 'admin_creer_ecurie') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const nom     = interaction.options.getString('nom');
+    const emoji   = interaction.options.getString('emoji');
+    const couleur = interaction.options.getString('couleur') || '#888888';
+    const budget  = interaction.options.getInteger('budget') || 80;
+
+    const already = await Team.findOne({ name: { $regex: `^${nom}$`, $options: 'i' } });
+    if (already)
+      return interaction.editReply({ content: `❌ Une écurie nommée **${nom}** existe déjà.`, ephemeral: true });
+
+    const team = await Team.create({
+      name: nom, emoji, color: couleur, budget,
+      vitesseMax: 70, drs: 70, refroidissement: 70,
+      dirtyAir: 70, conservationPneus: 70, vitesseMoyenne: 70,
+      devPoints: 0,
+    });
+
+    const season = await getActiveSeason();
+    if (season) {
+      await ConstructorStanding.create({ seasonId: season._id, teamId: team._id, points: 0 });
+    }
+
+    return interaction.editReply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`${emoji} Écurie créée : **${nom}**`)
+        .setColor(couleur)
+        .setDescription(
+          `💰 Budget : **${budget}**\n` +
+          `🚗 Stats voiture : **70** partout\n` +
+          `📋 ID : \`${team._id}\`\n\n` +
+          (season
+            ? `✅ Ajoutée au classement constructeurs — saison ${season.year}.`
+            : `⚠️ Aucune saison active — l'écurie ne figure pas encore au classement constructeurs.`) +
+          `\n\n> Utilise \`/admin_assigner_pilotes\` pour y placer 2 pilotes.`
+        )
+      ],
+    });
+  }
+
+  // ── /admin_assigner_pilotes ────────────────────────────────
+  if (commandName === 'admin_assigner_pilotes') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const ecurieNom = interaction.options.getString('ecurie');
+    const nom1      = interaction.options.getString('pilote1');
+    const nom2      = interaction.options.getString('pilote2');
+
+    // Trouver l'écurie
+    const team = await Team.findOne({ name: { $regex: `^${ecurieNom}$`, $options: 'i' } });
+    if (!team)
+      return interaction.editReply({ content: `❌ Écurie **${ecurieNom}** introuvable.`, ephemeral: true });
+
+    // Trouver les pilotes
+    const p1 = await Pilot.findOne({ name: { $regex: nom1.trim(), $options: 'i' } });
+    if (!p1)
+      return interaction.editReply({ content: `❌ Pilote **${nom1}** introuvable.`, ephemeral: true });
+
+    const p2 = await Pilot.findOne({ name: { $regex: nom2.trim(), $options: 'i' } });
+    if (!p2)
+      return interaction.editReply({ content: `❌ Pilote **${nom2}** introuvable.`, ephemeral: true });
+
+    if (String(p1._id) === String(p2._id))
+      return interaction.editReply({ content: `❌ Les deux pilotes doivent être différents.`, ephemeral: true });
+
+    // Vérifier que l'écurie n'est pas déjà pleine
+    const alreadyIn = await Pilot.find({ teamId: team._id });
+    if (alreadyIn.length >= 2)
+      return interaction.editReply({ content: `❌ **${team.name}** a déjà 2 pilotes.`, ephemeral: true });
+
+    const season = await getActiveSeason();
+
+    // Assigner les pilotes
+    for (const [pilot, idx, status] of [[p1, 1, 'numero1'], [p2, 2, 'numero2']]) {
+      const wasTeamless = !pilot.teamId;
+      pilot.teamId     = team._id;
+      pilot.teamStatus = status;
+      pilot.teamHistory = pilot.teamHistory || [];
+      pilot.teamHistory.push({
+        teamId    : team._id,
+        teamName  : team.name,
+        teamEmoji : team.emoji,
+        seasonStart: season?.year || null,
+        seasonEnd  : null,
+      });
+      await pilot.save();
+
+      // Ajouter au classement pilotes si saison active et pilote pas encore dedans
+      if (season && wasTeamless) {
+        const alreadyStanding = await Standing.findOne({ seasonId: season._id, pilotId: pilot._id });
+        if (!alreadyStanding) {
+          await Standing.create({ seasonId: season._id, pilotId: pilot._id, points: 0 });
+        }
+      }
+    }
+
+    const bar = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10 - Math.round(v/10));
+    const pilotLine = (p) => {
+      const ov = overallRating(p); const tier = ratingTier(ov);
+      return `${tier.badge} **${p.name}** #${p.racingNumber} ${p.nationality} — **${ov}** OVR`;
+    };
+
+    return interaction.editReply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`✅ Pilotes assignés à ${team.emoji} ${team.name}`)
+        .setColor(team.color || '#888888')
+        .setDescription(
+          `**Pilote N°1** : ${pilotLine(p1)}\n` +
+          `**Pilote N°2** : ${pilotLine(p2)}\n\n` +
+          (season ? `📋 Classement pilotes saison ${season.year} mis à jour.` : `⚠️ Aucune saison active.`)
+        )
+      ],
+    });
   }
 
   // ── /concept ──────────────────────────────────────────────
