@@ -10768,12 +10768,13 @@ async function evolveCarStats(raceResults, teams) {
     // = 1 upgrade de moins toutes les ~13 courses. Un trade-off perceptible sur la saison.
     const teamContracts = await Contract.find({ teamId: team._id, active: true }).lean();
     const totalSalaire  = teamContracts.reduce((sum, c) => sum + (c.salaireBase || 0), 0);
-    // Pénalité : chaque 100 PLcoins de masse salariale = -1 devPt (cap à -8 pour éviter l'écrasement)
-    const salaryPenalty = Math.min(8, Math.floor(totalSalaire / 100));
+    // Pénalité progressive : floor(salaire / 40), cap à 20
+    // 200 sal → −5/course → ~3 upgrades perdus sur 24 GPs
+    // 300 sal → −7/course → ~4 upgrades perdus sur 24 GPs
+    const salaryPenalty = Math.min(20, Math.floor(totalSalaire / 40));
 
-    // Bonus voiture si l'équipe a misé sur une voiture plutôt que des pilotes :
-    // Masse salariale très basse (< 150 total) → bonus de développement +3
-    const lowWageBonusDev = totalSalaire < 150 ? 3 : 0;
+    // Bonus développement si masse salariale basse (voiture prioritaire sur pilotes)
+    const lowWageBonusDev = totalSalaire < 100 ? 4 : totalSalaire < 200 ? 2 : 0;
 
     const devGained = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3 - salaryPenalty + lowWageBonusDev);
 
@@ -13066,7 +13067,8 @@ client.once('ready', async () => {
   } catch (_) {
     // L'index n'existe plus (déjà supprimé ou jamais créé) — pas de souci
   }
-
+        
+const teamCount = await Team.countDocuments();
   if (teamCount === 0) {
     await Team.insertMany(DEFAULT_TEAMS);
     console.log('✅ 8 écuries créées');
@@ -15925,6 +15927,45 @@ async function handleInteraction(interaction) {
           stat
             ? `✅ Focus forcé sur **${statLabels[stat]}**.\n55% des upgrades iront sur cette stat jusqu'au prochain changement de saison.`
             : `✅ Focus retiré — développement **équilibré** (stat la plus faible prioritaire).\nÀ la prochaine saison, un focus sera automatiquement réassigné.`
+        )
+      ],
+    });
+  }
+
+         // ── /admin_force_deliberation ─────────────────────────────
+  if (commandName === 'admin_force_deliberation') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const ecurieNom = interaction.options.getString('ecurie');
+    const team = await Team.findOne({ name: { $regex: `^${ecurieNom}$`, $options: 'i' } });
+    if (!team)
+      return interaction.editReply({ content: `❌ Écurie **${ecurieNom}** introuvable.`, ephemeral: true });
+
+    const reviews = await TransferOffer.find({ teamId: team._id, status: 'under_review' });
+    if (!reviews.length)
+      return interaction.editReply({ content: `⚠️ **${team.name}** n'a aucune candidature en cours de délibération.`, ephemeral: true });
+
+    // Forcer la deadline dans le passé pour tous les candidats de cette équipe
+    await TransferOffer.updateMany(
+      { teamId: team._id, status: 'under_review' },
+      { reviewDeadline: new Date(Date.now() - 1000) }
+    );
+
+    // Lancer la résolution immédiatement
+    await resolveTeamDeliberations();
+
+    // Vérifier le résultat
+    const signed = await Pilot.find({ teamId: team._id }).lean();
+    const signedNames = signed.map(p => `**${p.name}** (#${p.racingNumber})`).join(', ') || '*aucun*';
+
+    return interaction.editReply({
+      embeds: [new EmbedBuilder()
+        .setTitle(`⚡ Délibération forcée — ${team.emoji} ${team.name}`)
+        .setColor(team.color || '#888888')
+        .setDescription(
+          `${reviews.length} candidature(s) traitée(s) immédiatement.\n\n` +
+          `🏎️ Pilotes actuels dans l'équipe : ${signedNames}`
         )
       ],
     });
