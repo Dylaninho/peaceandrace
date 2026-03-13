@@ -751,6 +751,52 @@ function ratingTier(r) {
   return              { badge: '⬜', label: 'ROOKIE',          color: '#888888' };
 }
 
+// ── Percentiles dynamiques de grille ──────────────────────
+// Calcule les seuils réels d'overall à partir de la grille active.
+// baseline = médiane (remplace 75 dans Math.pow(ov/baseline))
+// elite    = P85 (seuil "bon pilote" — ancienne constante 80)
+// top      = P90 (seuil "star" — ancienne constante 90)
+// p25      = P25 (profil accessible pour petites écuries — ancienne constante 63/65)
+// p75      = P75 (seuil surenchères — ancienne constante 72)
+async function computeGridThresholds() {
+  const pilots = await Pilot.find({ teamId: { $ne: null } });
+  if (!pilots.length) return { median: 70, p25: 60, p75: 75, p85: 80, p90: 85, baseline: 70, elite: 80, top: 85, best: 90, n: 0 };
+  const ovs = pilots.map(p => overallRating(p)).sort((a, b) => a - b);
+  const n   = ovs.length;
+  const pct = (p) => ovs[Math.max(0, Math.min(n - 1, Math.round((p / 100) * (n - 1))))];
+  return {
+    n,
+    best    : ovs[n - 1],
+    p90     : pct(90),
+    p85     : pct(85),
+    p75     : pct(75),
+    median  : pct(50),
+    p25     : pct(25),
+    baseline: pct(50),
+    elite   : pct(85),
+    top     : pct(90),
+  };
+}
+// Variante synchrone à partir d'un tableau de pilotes déjà chargés
+function gridThresholdsFromPilots(pilots) {
+  if (!pilots || !pilots.length) return { median: 70, p25: 60, p75: 75, p85: 80, p90: 85, baseline: 70, elite: 80, top: 85, best: 90, n: 0 };
+  const ovs = pilots.map(p => overallRating(p)).sort((a, b) => a - b);
+  const n   = ovs.length;
+  const pct = (p) => ovs[Math.max(0, Math.min(n - 1, Math.round((p / 100) * (n - 1))))];
+  return {
+    n,
+    best    : ovs[n - 1],
+    p90     : pct(90),
+    p85     : pct(85),
+    p75     : pct(75),
+    median  : pct(50),
+    p25     : pct(25),
+    baseline: pct(50),
+    elite   : pct(85),
+    top     : pct(90),
+  };
+}
+
 // ── Réputation ────────────────────────────────────────────
 // Tier affiché dans profil et articles
 function reputationTier(rep) {
@@ -1778,6 +1824,9 @@ async function simulateQualifying(race, pilots, teams) {
     return { time: improved ? raw : best, raw, aborted: false, improved };
   }
 
+  // Seuils dynamiques basés sur la grille réelle de cette session
+  const qualiGridThr = gridThresholdsFromPilots(pilots);
+
   // ─────────────────────────────────────────────────────────
   // Q1 — tous les pilotes, session indépendante
   // Track evo croissante : 2ème tentative bénéficie d'un circuit plus gommé
@@ -1826,7 +1875,8 @@ async function simulateQualifying(race, pilots, teams) {
   const q1Eliminated = q1State.slice(q2Size);
   const upsetQ1 = q1Eliminated.find(s => {
     const ov = (s.pilot.depassement + s.pilot.freinage + s.pilot.controle) / 3;
-    return ov >= 65;
+    // "Favori surpris" = au-dessus de la médiane de la grille (était censé passer)
+    return ov >= qualiGridThr.median;
   });
   if (upsetQ1) q1Events.push({ type: 'upset_q1', pilot: upsetQ1 });
 
@@ -12082,7 +12132,7 @@ async function startTransferPeriod() {
 
   // ── ENCHÈRES : surenchère automatique sur les top pilotes convoités ──
   // Après la génération des offres, si plusieurs écuries ont ciblé le même
-  // pilote top (ov ≥ 75), elles surenchérissent automatiquement l'une l'autre.
+  // pilote top (ov ≥ P75 de la grille), elles surenchérissent automatiquement l'une l'autre.
   // Le pilote voit TOUTES les offres et choisit la meilleure.
   const allNewOffers = await TransferOffer.find({ status: 'pending' });
   // Grouper par pilote
@@ -12096,14 +12146,17 @@ async function startTransferPeriod() {
   const topChampStandings = [...allStandings].sort((a, b) => b.points - a.points).slice(0, 3);
   const topChampPilotIds  = new Set(topChampStandings.map(s => String(s.pilotId)));
 
+  // Seuil surenchères dynamique : P75 de la grille (pilotes au-dessus de la médiane haute)
+  const bidGridThr = await computeGridThresholds();
+
   for (const [pilotId, offers] of offerGrouped) {
     if (offers.length < 2) continue; // pas de concurrence
     const pilot = await Pilot.findById(pilotId);
     if (!pilot) continue;
     const ov = overallRating(pilot);
-    // Surenchères si ov >= 72 OU si pilote dans le top 3 du championnat pilotes
+    // Surenchères si ov >= P75 de la grille OU si pilote dans le top 3 du championnat
     const isTopChamp = topChampPilotIds.has(String(pilot._id));
-    if (ov < 72 && !isTopChamp) continue;
+    if (ov < bidGridThr.p75 && !isTopChamp) continue;
     // Trier par salaireBase décroissant
     offers.sort((a, b) => b.salaireBase - a.salaireBase);
     const topOfferSalaire = offers[0].salaireBase; // salaire de référence (avant surenchères)
