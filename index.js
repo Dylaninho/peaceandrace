@@ -13449,7 +13449,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes', 'admin_set_dev_focus', 'admin_force_deliberation'].includes(commandName);
+       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes', 'admin_set_dev_focus', 'admin_force_deliberation', 'admin_fix_contracts'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -15873,6 +15873,7 @@ async function handleInteraction(interaction) {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
+    await interaction.deferReply({ ephemeral: true });
     const pilotsInTeam = await Pilot.find({ teamId: { $ne: null } });
     let fixed = 0;
     for (const p of pilotsInTeam) {
