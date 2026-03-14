@@ -14416,17 +14416,27 @@ async function handleInteraction(interaction) {
         if (y) standingByYear.set(y, st);
       }
 
+      // ── Charger le HallOfFame pour détecter titres pilote / constructeur ──
+      const hofEntries = await HallOfFame.find().lean();
+      // Map : year → { champPilotId (string), champConstrName (string) }
+      const hofByYear = new Map();
+      for (const e of hofEntries) {
+        hofByYear.set(e.seasonYear, {
+          pilotId   : e.champPilotId ? String(e.champPilotId) : null,
+          constrName: e.champConstrName || null,
+        });
+      }
+
       // Construire les lignes — exclure l'équipe de la saison EN COURS
       const histLines = [];
       for (const [, stint] of teamStintMap) {
         const isCurrentTeam = pilot.teamId && String(stint.teamId) === String(pilot.teamId);
-        const years = [...stint.years].sort((a, b) => a - b);
-        // Garder ce stint si : pas l'équipe courante, OU a des saisons passées
-        const pastYears = years.filter(y => y < currentYear);
-        if (isCurrentTeam && pastYears.length === 0) continue; // écurie actuelle, que saison en cours → skip
+        // Toujours exclure l'équipe actuelle — même si le pilote y était saison(s) passée(s)
+        // La section "Anciennes écuries" ne concerne que les équipes QUITTÉES
+        if (isCurrentTeam) continue;
 
-        // N'afficher que les années passées pour l'équipe actuelle
-        const displayYears = isCurrentTeam ? pastYears : years;
+        const years = [...stint.years].sort((a, b) => a - b);
+        const displayYears = years.filter(y => y < currentYear); // sécurité : que les saisons passées
         if (displayYears.length === 0) continue;
 
         const firstY = displayYears[0], lastY = displayYears[displayYears.length - 1];
@@ -14442,7 +14452,21 @@ async function handleInteraction(interaction) {
         const perfStr = (totalPts > 0 || totalWins > 0)
           ? ` — **${totalPts} pts** · ${totalWins}V · ${totalPodiums}P`
           : '';
-        histLines.push(`${stint.teamEmoji} **${stint.teamName}** *(${periodStr})*${perfStr}`);
+
+        // ── Titres remportés avec cette écurie ces années-là ──
+        let titleBadge = '';
+        for (const y of displayYears) {
+          const hof = hofByYear.get(y);
+          if (!hof) continue;
+          const wonPilot  = hof.pilotId    && hof.pilotId === String(pilot._id);
+          const wonConstr = hof.constrName && hof.constrName === stint.teamName;
+          if (wonPilot && wonConstr) { titleBadge += ' 👑🏗️'; break; }
+          if (wonPilot)  titleBadge += ' 👑';
+          if (wonConstr) titleBadge += ' 🏗️';
+          if (titleBadge) break; // on n'affiche que la 1ère année titrée du stint
+        }
+
+        histLines.push(`${stint.teamEmoji} **${stint.teamName}**${titleBadge} *(${periodStr})*${perfStr}`);
       }
 
       if (histLines.length > 0) {
