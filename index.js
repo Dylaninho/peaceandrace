@@ -14416,16 +14416,24 @@ async function handleInteraction(interaction) {
         if (y) standingByYear.set(y, st);
       }
 
-      // ── Charger le HallOfFame pour détecter titres pilote / constructeur ──
-      const hofEntries = await HallOfFame.find().lean();
-      // Map : year → { champPilotId (string), champConstrName (string) }
-      const hofByYear = new Map();
-      for (const e of hofEntries) {
-        hofByYear.set(e.seasonYear, {
-          pilotId   : e.champPilotId ? String(e.champPilotId) : null,
-          constrName: e.champConstrName || null,
-        });
-      }
+      // ── Construire une map fiable des titres par année via les standings ──
+      // On ne se fie PAS au HallOfFame pour la comparaison (nom string fragile) :
+      // on interroge directement Standing et ConstructorStanding par saison.
+      // Map : year → { champPilotId (string), champTeamId (string) }
+      const titleByYear = new Map();
+      try {
+        const allSeasonsForTitles = await Season.find().lean();
+        for (const szn of allSeasonsForTitles) {
+          // Champion pilote : meilleur Standing de la saison
+          const topPilot = await Standing.findOne({ seasonId: szn._id }).sort({ points: -1 }).lean();
+          // Champion constructeur : meilleur ConstructorStanding de la saison
+          const topConstr = await ConstructorStanding.findOne({ seasonId: szn._id }).sort({ points: -1 }).lean();
+          titleByYear.set(szn.year, {
+            champPilotId : topPilot  ? String(topPilot.pilotId)  : null,
+            champTeamId  : topConstr ? String(topConstr.teamId)   : null,
+          });
+        }
+      } catch(e) { /* silencieux */ }
 
       // Construire les lignes — exclure l'équipe de la saison EN COURS
       const histLines = [];
@@ -14469,16 +14477,16 @@ async function handleInteraction(interaction) {
           : '';
 
         // ── Titres remportés avec cette écurie ces années-là ──
+        // Comparaison par ID (fiable) — pas par nom (fragile)
         let titleBadge = '';
         for (const y of displayYears) {
-          const hof = hofByYear.get(y);
-          if (!hof) continue;
-          const wonPilot  = hof.pilotId    && hof.pilotId === String(pilot._id);
-          const wonConstr = hof.constrName && hof.constrName === stint.teamName;
-          if (wonPilot && wonConstr) { titleBadge += ' 👑🏗️'; break; }
-          if (wonPilot)  titleBadge += ' 👑';
-          if (wonConstr) titleBadge += ' 🏗️';
-          if (titleBadge) break; // on n'affiche que la 1ère année titrée du stint
+          const titles = titleByYear.get(y);
+          if (!titles) continue;
+          const wonPilot  = titles.champPilotId && titles.champPilotId === String(pilot._id);
+          const wonConstr = titles.champTeamId  && titles.champTeamId  === String(stint.teamId);
+          if (wonPilot && wonConstr) { titleBadge = ' 👑🏗️'; break; }
+          if (wonPilot)  { titleBadge = ' 👑'; break; }
+          if (wonConstr) { titleBadge = ' 🏗️'; break; }
         }
 
         histLines.push(`${stint.teamEmoji} **${stint.teamName}**${titleBadge} *(${periodStr})*${perfStr}`);
