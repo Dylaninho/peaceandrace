@@ -2817,7 +2817,7 @@ if (finishedSorted[0]) {
 
     // Construire le contexte riche
     const ctx = {
-      name       : pilot.name,
+      name       : pilot.nickname ? nickOrName(pilot) : pilot.name, // surnom utilisé ~30% du temps si existant
       emoji      : team.emoji,
       teamName   : team.name,
       pos        : result.pos,
@@ -13602,7 +13602,15 @@ const commands = [
     .setDescription('[ADMIN] Lance le draft snake — chaque joueur choisit son écurie'),
 
   new SlashCommandBuilder().setName('legends')
-    .setDescription('🏆 Classement all-time des pilotes — victoires, points, podiums toutes saisons confondues'),
+    .setDescription('🏆 Classement all-time des pilotes — victoires, points, podiums toutes saisons confondues')
+    .addStringOption(o => o.setName('vue')
+      .setDescription('Quel classement afficher ?')
+      .setRequired(false)
+      .addChoices(
+        { name: '🏆 Points cumulés all-time', value: 'points_ever' },
+        { name: '📅 Meilleure saison (record de points)', value: 'best_season' },
+        { name: '🏁 Victoires all-time', value: 'wins' },
+      )),
   new SlashCommandBuilder().setName('palmares')
     .setDescription('🏛️ Hall of Fame — Champions de chaque saison'),
 
@@ -14377,9 +14385,16 @@ async function handleInteraction(interaction) {
     }
 
     // ── Historique des écuries avec perfs ──────────────────────
+    const activeSznForHist = await getActiveSeason();
     const teamHistFull = (pilot.teamHistory || []).filter(h => {
+      // Exclure uniquement l'entrée COURANTE (même équipe + saison en cours + seasonEnd null)
+      // Un pilote dans la même équipe depuis S1→S2 a seasonEnd=null mais seasonStart=S1 → doit apparaître
       if (!pilot.teamId) return true;
-      return !(String(h.teamId) === String(pilot.teamId) && h.seasonEnd == null);
+      const isCurrent = String(h.teamId) === String(pilot.teamId) && h.seasonEnd == null;
+      if (!isCurrent) return true;
+      // C'est l'entrée courante : afficher quand même si elle couvre au moins une saison passée
+      const currentYear = activeSznForHist?.year ?? new Date().getFullYear();
+      return h.seasonStart != null && h.seasonStart < currentYear;
     });
     if (teamHistFull.length > 0) {
       // Récupérer tous les standings de toutes les saisons pour ce pilote
@@ -14472,7 +14487,8 @@ async function handleInteraction(interaction) {
     }
 
     // ── Aperçu rapide des performances (GPRecord) ────────────
-    const gpRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
+    // Exclure les records créés par la pole (finishPos=0) sans course associée — évite le +1 GP parasite
+    const gpRecs = await PilotGPRecord.find({ pilotId: pilot._id, finishPos: { $gt: 0 } }).sort({ raceDate: -1 });
     if (gpRecs.length) {
       const totalGPs   = gpRecs.length;
       const finished   = gpRecs.filter(r => !r.dnf);
@@ -14736,129 +14752,156 @@ async function handleInteraction(interaction) {
 
   // ── /legends ──────────────────────────────────────────────
   if (commandName === 'legends') {
-    // ── Récupérer tous les pilotes ayant au moins une course en carrière ──
-    const allPilotsL = await Pilot.find({ careerRaces: { $gt: 0 } }).lean();
+    const legendVue = interaction.options.getString('vue') || 'points_ever';
 
-    // ── Pour les pilotes sans careerPoints (saison 1 avant le fix), reconstituer
-    //    en agrégeant tous leurs Standing de toutes saisons ──
-    const needsAgg = allPilotsL.filter(p => !p.careerPoints && p.careerRaces > 0);
-    const aggMap = new Map();
-    if (needsAgg.length > 0) {
-      const pilotIds = needsAgg.map(p => p._id);
-      const allSt = await Standing.find({ pilotId: { $in: pilotIds } }).lean();
-      for (const st of allSt) {
-        const id = String(st.pilotId);
-        const cur = aggMap.get(id) || { pts: 0, wins: 0, podiums: 0, dnfs: 0 };
-        aggMap.set(id, {
-          pts:    cur.pts    + (st.points  || 0),
-          wins:   cur.wins   + (st.wins    || 0),
-          podiums:cur.podiums+ (st.podiums || 0),
-          dnfs:   cur.dnfs   + (st.dnfs    || 0),
-        });
-      }
-    }
+    // ── Récupérer tous les pilotes (y compris saison 1 sans careerRaces) ──
+    const allPilotsL = await Pilot.find().lean();
 
-    // ── Aussi agréger la saison en cours (pas encore archivée dans careerPoints) ──
+    // ── Saison active : standings en cours (pas encore archivés) ──
     const activeSznL = await getActiveSeason();
     const currentStMap = new Map();
+    const allStandings = await Standing.find().lean(); // toutes saisons
     if (activeSznL) {
-      const curSt = await Standing.find({ seasonId: activeSznL._id }).lean();
-      for (const st of curSt) {
-        currentStMap.set(String(st.pilotId), st);
+      const curSt = allStandings.filter(s => String(s.seasonId) === String(activeSznL._id));
+      for (const st of curSt) currentStMap.set(String(st.pilotId), st);
+    }
+
+    // ── Pour vue best_season : chercher le meilleur standing par pilote ──
+    const bestSeasonMap = new Map(); // pilotId → { pts, year }
+    if (legendVue === 'best_season') {
+      const allSeasons = await Season.find().lean();
+      const seasonYearMap = new Map(allSeasons.map(s => [String(s._id), s.year]));
+      for (const st of allStandings) {
+        const id = String(st.pilotId);
+        const year = seasonYearMap.get(String(st.seasonId)) || 0;
+        const prev = bestSeasonMap.get(id);
+        if (!prev || st.points > prev.pts) {
+          bestSeasonMap.set(id, { pts: st.points || 0, wins: st.wins || 0, podiums: st.podiums || 0, year });
+        }
       }
     }
 
-    // ── Construire les stats finales par pilote ──
+    // ── Agréger les points pour les pilotes sans careerPoints archivés ──
+    const aggMap = new Map();
+    const pastStandings = activeSznL
+      ? allStandings.filter(s => String(s.seasonId) !== String(activeSznL._id))
+      : allStandings;
+    for (const st of pastStandings) {
+      const id = String(st.pilotId);
+      const cur = aggMap.get(id) || { pts: 0, wins: 0, podiums: 0, dnfs: 0, races: 0 };
+      aggMap.set(id, {
+        pts:    cur.pts    + (st.points  || 0),
+        wins:   cur.wins   + (st.wins    || 0),
+        podiums:cur.podiums+ (st.podiums || 0),
+        dnfs:   cur.dnfs   + (st.dnfs    || 0),
+      });
+    }
+
+    // ── Compter les GPRecords pour le totalRaces réel (saison courante incluse) ──
+    const gpCountMap = new Map();
+    const allGpRecs = await PilotGPRecord.find({ finishPos: { $gt: 0 } }, { pilotId: 1 }).lean();
+    for (const r of allGpRecs) {
+      const id = String(r.pilotId);
+      gpCountMap.set(id, (gpCountMap.get(id) || 0) + 1);
+    }
+
+    // ── Construire les rows ──
     const rows = allPilotsL.map(p => {
       const id  = String(p._id);
       const cur = currentStMap.get(id) || {};
       const agg = aggMap.get(id)       || {};
 
-      // careerPoints : cumulé archivé + saison courante + fallback agrégation
       const basePoints  = p.careerPoints  || agg.pts    || 0;
       const baseWins    = p.careerWins    || agg.wins   || 0;
       const basePodiums = p.careerPodiums || agg.podiums|| 0;
       const baseDnfs    = p.careerDnfs    || agg.dnfs   || 0;
-      const baseRaces   = p.careerRaces   || 0;
 
       const totalPoints  = basePoints  + (cur.points  || 0);
       const totalWins    = baseWins    + (cur.wins    || 0);
       const totalPodiums = basePodiums + (cur.podiums || 0);
       const totalDnfs    = baseDnfs    + (cur.dnfs    || 0);
-      const totalRaces   = baseRaces; // careerRaces ne compte pas la saison en cours
+      // totalRaces : GPRecords réels (toutes saisons y compris en cours)
+      const totalRaces   = gpCountMap.get(id) || 0;
+
+      if (totalRaces === 0 && totalPoints === 0) return null;
 
       const winRate = totalRaces > 0 ? ((totalWins / totalRaces) * 100).toFixed(1) : '0.0';
       const podRate = totalRaces > 0 ? ((totalPodiums / totalRaces) * 100).toFixed(1) : '0.0';
 
-      return { p, totalPoints, totalWins, totalPodiums, totalDnfs, totalRaces, winRate, podRate };
-    }).filter(r => r.totalRaces > 0 || r.totalPoints > 0);
+      const best = bestSeasonMap.get(id) || null;
+
+      return { p, totalPoints, totalWins, totalPodiums, totalDnfs, totalRaces, winRate, podRate, best };
+    }).filter(Boolean);
 
     if (!rows.length) {
       return interaction.editReply({ content: '🏆 Aucune donnée de carrière disponible pour l\'instant.', ephemeral: true });
     }
 
-    // ── Trier par points totaux (critère principal), puis victoires ──
-    rows.sort((a, b) => b.totalPoints - a.totalPoints || b.totalWins - a.totalWins);
-
-    // ── Podium top 3 ──
-    const medals = ['🥇', '🥈', '🥉'];
-    const tierColors = ['#FFD700', '#C0C0C0', '#CD7F32'];
-
-    // ── Construire les lignes du classement ──
-    const MAX_DISPLAY = 15;
-    const lines = rows.slice(0, MAX_DISPLAY).map((r, i) => {
-      const medal    = medals[i] || `**${i + 1}.**`;
-      const champ    = r.p.careerBestRank === 1 ? ' 👑' : '';
-      const spec     = r.p.specialization  ? ` *(${r.p.specialization})*` : '';
-      const teamStr  = r.p.teamId ? '' : ' *(sans écurie)*';
-      return (
-        `${medal} **${r.p.name}**${champ}${spec}${teamStr}
-` +
-        `┣ 🏆 **${r.totalPoints} pts** · 🏁 **${r.totalWins}V** · 🏅 ${r.totalPodiums}P · 💀 ${r.totalDnfs} DNF
-` +
-        `┗ 📊 ${r.totalRaces} courses · Taux victoire : ${r.winRate}% · Podiums : ${r.podRate}%`
-      );
-    });
-
-    // ── Statistiques globales en footer ──
-    const totalWinsAll    = rows.reduce((s, r) => s + r.totalWins, 0);
-    const totalRacesAll   = rows.reduce((s, r) => s + r.totalRaces, 0);
-    const topWinner       = rows.slice().sort((a,b) => b.totalWins - a.totalWins)[0];
-    const topConsistency  = rows.filter(r => r.totalRaces >= 5).sort((a,b) => parseFloat(b.podRate) - parseFloat(a.podRate))[0];
-
-    // ── Sections de l'embed (split si > 15 pilotes) ──
-    const CHUNK = 5;
-    const chunks = [];
-    for (let i = 0; i < lines.length; i += CHUNK) chunks.push(lines.slice(i, i + CHUNK).join("\n\n"));
-
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 LEGENDS — Classement All-Time')
-      .setColor('#FFD700')
-      .setDescription(
-        `*Classement cumulé toutes saisons confondues — trié par points de championnat*
-​`
-      );
-
-    chunks.forEach((chunk, idx) => {
-      embed.addFields({
-        name: idx === 0 ? '📊 Classement général' : '​',
-        value: chunk,
-        inline: false,
-      });
-    });
-
-    // ── Records all-time en bas ──
-    const recordLines = [];
-    if (topWinner)      recordLines.push(`🏁 **Roi des victoires :** ${topWinner.p.name} — ${topWinner.totalWins}V`);
-    if (topConsistency) recordLines.push(`🎯 **Meilleur taux podiums (≥5 courses) :** ${topConsistency.p.name} — ${topConsistency.podRate}%`);
-    const mostRaces = rows.slice().sort((a,b) => b.totalRaces - a.totalRaces)[0];
-    if (mostRaces)      recordLines.push(`🔄 **Plus de courses :** ${mostRaces.p.name} — ${mostRaces.totalRaces} GP`);
-
-    if (recordLines.length) {
-      embed.addFields({ name: '📈 Records', value: recordLines.join("\n"), inline: false });
+    // ── Trier selon la vue ──
+    if (legendVue === 'wins') {
+      rows.sort((a, b) => b.totalWins - a.totalWins || b.totalPoints - a.totalPoints);
+    } else if (legendVue === 'best_season') {
+      rows.sort((a, b) => (b.best?.pts || 0) - (a.best?.pts || 0) || b.totalWins - a.totalWins);
+    } else {
+      rows.sort((a, b) => b.totalPoints - a.totalPoints || b.totalWins - a.totalWins);
     }
 
-    embed.setFooter({ text: `${rows.length} pilote(s) en carrière · ${totalWinsAll} victoires réparties · ${totalRacesAll} courses archivées` });
+    const medals = ['🥇', '🥈', '🥉'];
+    const TOP = 10;
+
+    // ── Titres et descriptions par vue ──
+    const vueConfig = {
+      points_ever:  { title: '🏆 LEGENDS — Points All-Time', desc: '*Top 10 — points cumulés toutes saisons confondues*' },
+      wins:         { title: '🏁 LEGENDS — Victoires All-Time', desc: '*Top 10 — nombre de victoires cumulées toutes saisons*' },
+      best_season:  { title: '📅 LEGENDS — Meilleure Saison', desc: '*Top 10 — record de points sur une seule saison*' },
+    };
+    const { title, desc } = vueConfig[legendVue] || vueConfig.points_ever;
+
+    // ── Construire les lignes du top 10 ──
+    const lines = rows.slice(0, TOP).map((r, i) => {
+      const medal   = medals[i] || `**${i + 1}.**`;
+      const champ   = r.p.careerBestRank === 1 ? ' 👑' : '';
+      const nick    = r.p.nickname ? ` *"${r.p.nickname}"*` : '';
+      const teamStr = r.p.teamId ? '' : ' *(sans écurie)*';
+
+      if (legendVue === 'best_season') {
+        const bPts  = r.best?.pts  || 0;
+        const bWins = r.best?.wins || 0;
+        const bPod  = r.best?.podiums || 0;
+        const bYear = r.best?.year ? ` *(S${r.best.year})*` : '';
+        return `${medal} **${r.p.name}**${champ}${nick}${teamStr}\n` +
+               `┣ 📅 **${bPts} pts**${bYear} · ${bWins}V · ${bPod}P\n` +
+               `┗ 📊 Career : ${r.totalPoints} pts · ${r.totalRaces} GP`;
+      }
+      if (legendVue === 'wins') {
+        return `${medal} **${r.p.name}**${champ}${nick}${teamStr}\n` +
+               `┣ 🏁 **${r.totalWins}V** · 🏅 ${r.totalPodiums}P · 🏆 ${r.totalPoints} pts\n` +
+               `┗ 📊 ${r.totalRaces} GP · Taux victoire : ${r.winRate}%`;
+      }
+      return `${medal} **${r.p.name}**${champ}${nick}${teamStr}\n` +
+             `┣ 🏆 **${r.totalPoints} pts** · 🏁 **${r.totalWins}V** · 🏅 ${r.totalPodiums}P · 💀 ${r.totalDnfs} DNF\n` +
+             `┗ 📊 ${r.totalRaces} GP · Victoires : ${r.winRate}% · Podiums : ${r.podRate}%`;
+    });
+
+    // ── Records en bas (toujours en vue points_ever) ──
+    const totalWinsAll  = rows.reduce((s, r) => s + r.totalWins, 0);
+    const totalRacesAll = rows.reduce((s, r) => s + r.totalRaces, 0);
+
+    const embed = new EmbedBuilder()
+      .setTitle(title)
+      .setColor('#FFD700')
+      .setDescription(desc)
+      .addFields({ name: '\u200B', value: lines.join('\n\n'), inline: false });
+
+    // ── Vue switcher ──
+    const otherVues = [
+      { label: '🏆 Points cumulés', value: 'points_ever' },
+      { label: '📅 Meilleure saison', value: 'best_season' },
+      { label: '🏁 Victoires', value: 'wins' },
+    ].filter(v => v.value !== legendVue).map(v => `\`/legends vue:${v.label}\``).join(' · ');
+    embed.addFields({ name: '🔀 Autres vues', value: otherVues, inline: false });
+
+    embed.setFooter({ text: `${rows.length} pilote(s) · ${totalWinsAll} victoires · ${totalRacesAll} GP disputés` });
 
     return interaction.editReply({ embeds: [embed] });
   }
