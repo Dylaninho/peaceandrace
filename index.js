@@ -14431,12 +14431,27 @@ async function handleInteraction(interaction) {
       const histLines = [];
       for (const [, stint] of teamStintMap) {
         const isCurrentTeam = pilot.teamId && String(stint.teamId) === String(pilot.teamId);
-        // Toujours exclure l'équipe actuelle — même si le pilote y était saison(s) passée(s)
-        // La section "Anciennes écuries" ne concerne que les équipes QUITTÉES
-        if (isCurrentTeam) continue;
-
         const years = [...stint.years].sort((a, b) => a - b);
-        const displayYears = years.filter(y => y < currentYear); // sécurité : que les saisons passées
+
+        // Seules les années strictement passées peuvent être affichées
+        const pastYears = years.filter(y => y < currentYear);
+
+        if (isCurrentTeam) {
+          // Même équipe qu'actuellement :
+          // - Si toutes les années sont la saison courante → rien à montrer, skip
+          // - Si des années passées existent (ex: parti et revenu) → on les affiche
+          //   MAIS seulement s'il y a eu une rupture : au moins une année intermédiaire
+          //   où il n'était PAS dans cette équipe (détecté via un gap dans les années)
+          if (pastYears.length === 0) continue;
+          // Vérifier qu'il y a bien eu un départ : chercher un gap entre les pastYears et currentYear
+          // ou un gap interne (ex: années 2023, 2024 puis absent 2025, revenu 2026)
+          const allYearsSorted = years; // déjà trié
+          const hasGap = allYearsSorted.some((y, i) => i > 0 && y - allYearsSorted[i - 1] > 1);
+          const leftAndCameBack = hasGap; // gap dans les années = parti puis revenu
+          if (!leftAndCameBack) continue; // jamais parti → c'est juste son équipe actuelle, skip
+        }
+
+        const displayYears = pastYears; // toujours n'afficher que le passé
         if (displayYears.length === 0) continue;
 
         const firstY = displayYears[0], lastY = displayYears[displayYears.length - 1];
