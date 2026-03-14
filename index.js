@@ -14384,56 +14384,70 @@ async function handleInteraction(interaction) {
       });
     }
 
-    // ── Historique des écuries avec perfs ──────────────────────
+    // ── Historique des écuries — basé sur les PilotGPRecord (source de vérité) ──
+    // teamHistory peut être mal renseigné ; les GPRecords eux sont toujours corrects.
+    // On groupe par (teamId, teamName, teamEmoji, seasonYear) pour reconstruire les stints.
     const activeSznForHist = await getActiveSeason();
-    const teamHistFull = (pilot.teamHistory || []).filter(h => {
-      // Exclure uniquement l'entrée COURANTE (même équipe + saison en cours + seasonEnd null)
-      // Un pilote dans la même équipe depuis S1→S2 a seasonEnd=null mais seasonStart=S1 → doit apparaître
-      if (!pilot.teamId) return true;
-      const isCurrent = String(h.teamId) === String(pilot.teamId) && h.seasonEnd == null;
-      if (!isCurrent) return true;
-      // C'est l'entrée courante : afficher quand même si elle couvre au moins une saison passée
-      const currentYear = activeSznForHist?.year ?? new Date().getFullYear();
-      return h.seasonStart != null && h.seasonStart < currentYear;
-    });
-    if (teamHistFull.length > 0) {
-      // Récupérer tous les standings de toutes les saisons pour ce pilote
-      const allSeasons   = await Season.find().lean();
-      const seasonYearToId = new Map(allSeasons.map(s => [s.year, String(s._id)]));
+    const currentYear = activeSznForHist?.year ?? 0;
 
-      const histLines = await Promise.all(teamHistFull.map(async h => {
-        const startStr  = h.seasonStart ? String(h.seasonStart) : '?';
-        const endStr    = h.seasonEnd   ? String(h.seasonEnd)   : '…';
-        const periodStr = startStr === endStr ? `S${startStr}` : `S${startStr}–${endStr}`;
+    const allPilotRecs = await PilotGPRecord.find(
+      { pilotId: pilot._id, finishPos: { $gt: 0 } },
+      { teamId: 1, teamName: 1, teamEmoji: 1, seasonYear: 1 }
+    ).lean();
 
-        // Récupérer les standings pour chaque saison couverte par ce stint
-        const stintYears = [];
-        if (h.seasonStart && h.seasonEnd) {
-          for (let y = h.seasonStart; y <= h.seasonEnd; y++) stintYears.push(y);
-        } else if (h.seasonStart) {
-          stintYears.push(h.seasonStart);
+    if (allPilotRecs.length > 0) {
+      // Grouper par équipe : { teamId → { teamName, teamEmoji, years: Set } }
+      const teamStintMap = new Map();
+      for (const r of allPilotRecs) {
+        const key = String(r.teamId);
+        if (!teamStintMap.has(key)) {
+          teamStintMap.set(key, { teamId: r.teamId, teamName: r.teamName || '?', teamEmoji: r.teamEmoji || '🏎️', years: new Set() });
         }
+        if (r.seasonYear) teamStintMap.get(key).years.add(r.seasonYear);
+      }
 
+      // Charger tous les standings de ce pilote en une seule requête
+      const allPilotStandings = await Standing.find({ pilotId: pilot._id }).lean();
+      const allSeasonsList = await Season.find().lean();
+      const seasonIdToYear = new Map(allSeasonsList.map(s => [String(s._id), s.year]));
+      const standingByYear = new Map();
+      for (const st of allPilotStandings) {
+        const y = seasonIdToYear.get(String(st.seasonId));
+        if (y) standingByYear.set(y, st);
+      }
+
+      // Construire les lignes — exclure l'équipe de la saison EN COURS
+      const histLines = [];
+      for (const [, stint] of teamStintMap) {
+        const isCurrentTeam = pilot.teamId && String(stint.teamId) === String(pilot.teamId);
+        const years = [...stint.years].sort((a, b) => a - b);
+        // Garder ce stint si : pas l'équipe courante, OU a des saisons passées
+        const pastYears = years.filter(y => y < currentYear);
+        if (isCurrentTeam && pastYears.length === 0) continue; // écurie actuelle, que saison en cours → skip
+
+        // N'afficher que les années passées pour l'équipe actuelle
+        const displayYears = isCurrentTeam ? pastYears : years;
+        if (displayYears.length === 0) continue;
+
+        const firstY = displayYears[0], lastY = displayYears[displayYears.length - 1];
+        const periodStr = firstY === lastY ? `S${firstY}` : `S${firstY}–${lastY}`;
+
+        // Cumuler les perfs sur ces années
         let totalPts = 0, totalWins = 0, totalPodiums = 0;
-        for (const y of stintYears) {
-          const sid = seasonYearToId.get(y);
-          if (!sid) continue;
-          const st = await Standing.findOne({ seasonId: sid, pilotId: pilot._id }).lean();
-          if (st) {
-            totalPts    += st.points  || 0;
-            totalWins   += st.wins    || 0;
-            totalPodiums+= st.podiums || 0;
-          }
+        for (const y of displayYears) {
+          const st = standingByYear.get(y);
+          if (st) { totalPts += st.points || 0; totalWins += st.wins || 0; totalPodiums += st.podiums || 0; }
         }
 
-        const perfStr = stintYears.length > 0 && (totalPts > 0 || totalWins > 0)
+        const perfStr = (totalPts > 0 || totalWins > 0)
           ? ` — **${totalPts} pts** · ${totalWins}V · ${totalPodiums}P`
           : '';
+        histLines.push(`${stint.teamEmoji} **${stint.teamName}** *(${periodStr})*${perfStr}`);
+      }
 
-        return `${h.teamEmoji || '🏎️'} **${h.teamName || '?'}** *(${periodStr})*${perfStr}`;
-      }));
-
-      embed.addFields({ name: '📁 Anciennes écuries', value: histLines.join('\n') });
+      if (histLines.length > 0) {
+        embed.addFields({ name: '📁 Anciennes écuries', value: histLines.join('\n') });
+      }
     }
 
     // Spécialisation
@@ -14887,19 +14901,30 @@ async function handleInteraction(interaction) {
     const totalWinsAll  = rows.reduce((s, r) => s + r.totalWins, 0);
     const totalRacesAll = rows.reduce((s, r) => s + r.totalRaces, 0);
 
+    // ── Sécurité : chaque field Discord est limité à 1024 chars — on split les lignes ──
     const embed = new EmbedBuilder()
       .setTitle(title)
       .setColor('#FFD700')
-      .setDescription(desc)
-      .addFields({ name: '\u200B', value: lines.join('\n\n'), inline: false });
+      .setDescription(desc);
+
+    // Ajouter les lignes en chunks de 5 max pour rester sous 1024 chars par field
+    const CHUNK_SIZE = 5;
+    for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
+      const chunk = lines.slice(i, i + CHUNK_SIZE).join('\n\n');
+      if (chunk.trim()) {
+        embed.addFields({ name: i === 0 ? '📊 Classement' : '\u200B', value: chunk.slice(0, 1024), inline: false });
+      }
+    }
 
     // ── Vue switcher ──
     const otherVues = [
       { label: '🏆 Points cumulés', value: 'points_ever' },
       { label: '📅 Meilleure saison', value: 'best_season' },
       { label: '🏁 Victoires', value: 'wins' },
-    ].filter(v => v.value !== legendVue).map(v => `\`/legends vue:${v.label}\``).join(' · ');
-    embed.addFields({ name: '🔀 Autres vues', value: otherVues, inline: false });
+    ].filter(v => v.value !== legendVue)
+     .map(v => `\`/legends vue:${v.label}\``)
+     .join(' · ');
+    if (otherVues) embed.addFields({ name: '🔀 Autres vues', value: otherVues, inline: false });
 
     embed.setFooter({ text: `${rows.length} pilote(s) · ${totalWinsAll} victoires · ${totalRacesAll} GP disputés` });
 
