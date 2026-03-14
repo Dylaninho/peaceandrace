@@ -204,6 +204,7 @@ const PilotSchema = new mongoose.Schema({
   careerPodiums   : { type: Number, default: 0    }, // podiums cumulés toutes saisons
   careerDnfs      : { type: Number, default: 0    }, // DNFs cumulés toutes saisons
   careerRaces     : { type: Number, default: 0    }, // courses disputées cumulées
+  careerPoints    : { type: Number, default: 0    }, // points de championnat cumulés toutes saisons
   // ── Réputation ───────────────────────────────────────────
   // Score 0-100 public. Gagne via victoires/poles/titres/articles positifs.
   // Perd via DNFs répétés, scandales, mauvaise presse.
@@ -1792,11 +1793,13 @@ function checkIncident(pilot, team, lap = 1, totalLaps = 50, reliabilityMalus = 
                       : 0.70 + lapProgress * 0.50;
 
   // reliabilityMalus appliqué sur la probabilité mécanique uniquement (mécaniciens, pas les pilotes)
-  const reliabF  = (100 - team.refroidissement) / 100 * 0.007 * lapMultiplier * (1 + reliabilityMalus);
+  // Coefficients calibrés pour ~7% de DNF/course sur le plateau (vs 17% avant)
+  // mechCoeff 0.003 (était 0.007) · crashCoeff 0.0007 (était 0.0007) · puncture 0.0004/tour (était 0.002)
+  const reliabF  = (100 - team.refroidissement) / 100 * 0.003 * lapMultiplier * (1 + reliabilityMalus);
   const crashF   = (((100 - pilot.controle) / 100 * 0.0004) + ((100 - pilot.reactions) / 100 * 0.0003)) * lapMultiplier;
   if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
   if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
-  if (roll < 0.002)              return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
+  if (roll < 0.0004)             return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
   return null;
 }
 
@@ -5001,7 +5004,19 @@ function genRivalryArticle(pA, pB, teamA, teamB, contacts, circuit, seasonYear, 
 function genTransferRumorArticle(pilot, currentTeam, targetTeam, seasonYear) {
   const source = pick(['paddock_whispers', 'pitlane_insider']);
 
-  const headlines = [
+  // ── Détecter si c'est un retour (pilote a déjà couru pour targetTeam) ──
+  const prevStint = (pilot.teamHistory || []).find(h =>
+    h.teamId && String(h.teamId) === String(targetTeam._id) && h.seasonEnd != null
+  );
+  const isReturn = !!prevStint;
+  const returnYear = prevStint?.seasonStart
+    ? (prevStint.seasonEnd && prevStint.seasonEnd !== prevStint.seasonStart
+        ? `${prevStint.seasonStart}–${prevStint.seasonEnd}`
+        : String(prevStint.seasonStart))
+    : null;
+
+  // ── Headlines standard vs retour ──
+  const headlinesStandard = [
     `${pilot.name} chez ${targetTeam.emoji}${targetTeam.name} ? La rumeur enfle`,
     `Transfert choc : ${targetTeam.name} viserait ${pilot.name}`,
     `${pilot.name} sur le départ ? ${targetTeam.name} aux aguets`,
@@ -5009,7 +5024,18 @@ function genTransferRumorArticle(pilot, currentTeam, targetTeam, seasonYear) {
     `Exclusif : ${pilot.name} aurait rencontré des dirigeants de ${targetTeam.name}`,
   ];
 
-  const bodies = [
+  const headlinesReturn = [
+    `${targetTeam.emoji}${targetTeam.name} vise un retour de ${pilot.name} ?`,
+    `${pilot.name} de retour chez ${targetTeam.name} — le scénario improbable qui prend forme`,
+    `Retour aux sources : ${pilot.name} et ${targetTeam.name} se parleraient à nouveau`,
+    `"${pilot.name} a toujours une place dans notre cœur" — ${targetTeam.name} rouvre la porte`,
+    `${pilot.name} – ${targetTeam.name}, acte II : le come-back qui affole le paddock`,
+  ];
+
+  const headlines = isReturn ? headlinesReturn : headlinesStandard;
+
+  // ── Corps standard ──
+  const bodiesStandard = [
     `Selon nos informations, le nom de ${pilot.name} circule avec insistance dans l'entourage de ${targetTeam.emoji}${targetTeam.name}.\n\n` +
     pick([
       `Son équipe actuelle ${currentTeam?.emoji || ''}${currentTeam?.name || 'son écurie'} dément tout contact. Ce qui, dans ce milieu, veut souvent dire le contraire.`,
@@ -5031,6 +5057,34 @@ function genTransferRumorArticle(pilot, currentTeam, targetTeam, seasonYear) {
       `Paddock Whispers maintient ses informations. La balle est dans le camp des dirigeants.`,
     ]),
   ];
+
+  // ── Corps retour ──
+  const returnPeriodStr = returnYear ? ` (saison ${returnYear})` : '';
+  const bodiesReturn = [
+    `Ce serait l'un des come-backs les plus inattendus de la saison. ${pilot.name}, qui avait porté les couleurs de ${targetTeam.emoji}${targetTeam.name}${returnPeriodStr}, serait à nouveau dans le viseur de l'écurie.\n\n` +
+    pick([
+      `Les deux parties entretiennent visiblement de bons souvenirs de leur collaboration passée. Suffisant pour repartir ensemble ?`,
+      `"Il connaît notre culture, notre façon de travailler. Ça compte énormément." Difficile de ne pas y voir un signal.`,
+      `${currentTeam?.name || 'Son écurie actuelle'} n'a pas commenté. Mais des sources internes parlent d'une "option sérieuse sur la table".`,
+    ]),
+
+    `On les croyait séparés pour de bon. Pourtant, le nom de ${pilot.name} ressurgit avec insistance du côté de ${targetTeam.emoji}${targetTeam.name}${returnPeriodStr ? `, l'écurie qu'il avait quittée en ${returnPeriodStr.replace(' (saison ', '').replace(')', '')}` : ''}.\n\n` +
+    pick([
+      `Dans ce paddock, rien n'est jamais vraiment terminé. Les ponts brûlés se reconstruisent. Les portes fermées se rouvrent.`,
+      `${pilot.name} lui-même n'a jamais été avare de compliments sur son passage chez ${targetTeam.name}. Le sentiment est apparemment réciproque.`,
+      `"Un retour ? Je ne ferme jamais de porte." Ces mots prononcés il y a quelques mois prennent soudain un autre relief.`,
+    ]),
+
+    `Certains retours n'ont pas de sens. Celui-là en aurait peut-être un.\n\n` +
+    `${pilot.name} et ${targetTeam.emoji}${targetTeam.name} : une histoire qui semblait écrite, puis interrompue${returnPeriodStr}. Aujourd'hui, le feuilleton reprend.\n\n` +
+    pick([
+      `Les négociations, si elles existent, n'en sont qu'au stade exploratoire. Mais l'exploration, c'est souvent là que tout commence.`,
+      `Deux sources indépendantes confirment : le contact a eu lieu. Le reste appartient aux dirigeants — et à ${pilot.name}.`,
+      `${currentTeam?.emoji || ''}${currentTeam?.name || 'Son écurie'} regarde la situation "avec attention". Traduction paddock : avec inquiétude.`,
+    ]),
+  ];
+
+  const bodies = isReturn ? bodiesReturn : bodiesStandard;
 
   return {
     type: 'transfer_rumor', source,
@@ -11841,6 +11895,7 @@ async function createNewSeason() {
           careerPodiums : st.podiums || 0,
           careerDnfs    : st.dnfs    || 0,
           careerRaces   : realRaceCount,
+          careerPoints  : st.points  || 0,
         },
       });
     }
@@ -13546,6 +13601,8 @@ const commands = [
   new SlashCommandBuilder().setName('admin_draft_start')
     .setDescription('[ADMIN] Lance le draft snake — chaque joueur choisit son écurie'),
 
+  new SlashCommandBuilder().setName('legends')
+    .setDescription('🏆 Classement all-time des pilotes — victoires, points, podiums toutes saisons confondues'),
   new SlashCommandBuilder().setName('palmares')
     .setDescription('🏛️ Hall of Fame — Champions de chaque saison'),
 
@@ -14319,6 +14376,51 @@ async function handleInteraction(interaction) {
       });
     }
 
+    // ── Historique des écuries avec perfs ──────────────────────
+    const teamHistFull = (pilot.teamHistory || []).filter(h => {
+      if (!pilot.teamId) return true;
+      return !(String(h.teamId) === String(pilot.teamId) && h.seasonEnd == null);
+    });
+    if (teamHistFull.length > 0) {
+      // Récupérer tous les standings de toutes les saisons pour ce pilote
+      const allSeasons   = await Season.find().lean();
+      const seasonYearToId = new Map(allSeasons.map(s => [s.year, String(s._id)]));
+
+      const histLines = await Promise.all(teamHistFull.map(async h => {
+        const startStr  = h.seasonStart ? String(h.seasonStart) : '?';
+        const endStr    = h.seasonEnd   ? String(h.seasonEnd)   : '…';
+        const periodStr = startStr === endStr ? `S${startStr}` : `S${startStr}–${endStr}`;
+
+        // Récupérer les standings pour chaque saison couverte par ce stint
+        const stintYears = [];
+        if (h.seasonStart && h.seasonEnd) {
+          for (let y = h.seasonStart; y <= h.seasonEnd; y++) stintYears.push(y);
+        } else if (h.seasonStart) {
+          stintYears.push(h.seasonStart);
+        }
+
+        let totalPts = 0, totalWins = 0, totalPodiums = 0;
+        for (const y of stintYears) {
+          const sid = seasonYearToId.get(y);
+          if (!sid) continue;
+          const st = await Standing.findOne({ seasonId: sid, pilotId: pilot._id }).lean();
+          if (st) {
+            totalPts    += st.points  || 0;
+            totalWins   += st.wins    || 0;
+            totalPodiums+= st.podiums || 0;
+          }
+        }
+
+        const perfStr = stintYears.length > 0 && (totalPts > 0 || totalWins > 0)
+          ? ` — **${totalPts} pts** · ${totalWins}V · ${totalPodiums}P`
+          : '';
+
+        return `${h.teamEmoji || '🏎️'} **${h.teamName || '?'}** *(${periodStr})*${perfStr}`;
+      }));
+
+      embed.addFields({ name: '📁 Anciennes écuries', value: histLines.join('\n') });
+    }
+
     // Spécialisation
     if (pilot.specialization) {
       const specMeta = SPECIALIZATION_META[pilot.specialization];
@@ -14401,23 +14503,6 @@ async function handleInteraction(interaction) {
         (best ? `\n⭐ Meilleur résultat : **P${best.finishPos}** ${best.circuitEmoji} ${best.circuit} *(S${best.seasonYear})*` : '');
 
       embed.addFields({ name: `📊 Carrière — ${totalGPs} GP(s)  ·  Forme : ${formIcons}`, value: perfLine });
-    }
-
-    // ── Historique des écuries ───────────────────────────────
-    // Affiché uniquement si le pilote a déjà quitté au moins une équipe
-    const teamHist = (pilot.teamHistory || []).filter(h => {
-      // Exclure l'équipe actuellement active (même teamId ET seasonEnd null)
-      if (!pilot.teamId) return true; // sans équipe actuelle → tout afficher
-      return !(String(h.teamId) === String(pilot.teamId) && h.seasonEnd == null);
-    });
-    if (teamHist.length > 0) {
-      const histLines = teamHist.map(h => {
-        const endStr = h.seasonEnd ? String(h.seasonEnd) : '…';
-        const startStr = h.seasonStart ? String(h.seasonStart) : '?';
-        const periodStr = startStr === endStr ? startStr : `${startStr}–${endStr}`;
-        return `${h.teamEmoji || '🏎️'} **${h.teamName || '?'}** *(${periodStr})*`;
-      });
-      embed.addFields({ name: '📁 Anciennes écuries', value: histLines.join('\n') });
     }
 
     return interaction.editReply({ embeds: [embed] });
@@ -14647,6 +14732,135 @@ async function handleInteraction(interaction) {
         .setDescription(descLines.join('\n'))
       ],
     });
+  }
+
+  // ── /legends ──────────────────────────────────────────────
+  if (commandName === 'legends') {
+    // ── Récupérer tous les pilotes ayant au moins une course en carrière ──
+    const allPilotsL = await Pilot.find({ careerRaces: { $gt: 0 } }).lean();
+
+    // ── Pour les pilotes sans careerPoints (saison 1 avant le fix), reconstituer
+    //    en agrégeant tous leurs Standing de toutes saisons ──
+    const needsAgg = allPilotsL.filter(p => !p.careerPoints && p.careerRaces > 0);
+    const aggMap = new Map();
+    if (needsAgg.length > 0) {
+      const pilotIds = needsAgg.map(p => p._id);
+      const allSt = await Standing.find({ pilotId: { $in: pilotIds } }).lean();
+      for (const st of allSt) {
+        const id = String(st.pilotId);
+        const cur = aggMap.get(id) || { pts: 0, wins: 0, podiums: 0, dnfs: 0 };
+        aggMap.set(id, {
+          pts:    cur.pts    + (st.points  || 0),
+          wins:   cur.wins   + (st.wins    || 0),
+          podiums:cur.podiums+ (st.podiums || 0),
+          dnfs:   cur.dnfs   + (st.dnfs    || 0),
+        });
+      }
+    }
+
+    // ── Aussi agréger la saison en cours (pas encore archivée dans careerPoints) ──
+    const activeSznL = await getActiveSeason();
+    const currentStMap = new Map();
+    if (activeSznL) {
+      const curSt = await Standing.find({ seasonId: activeSznL._id }).lean();
+      for (const st of curSt) {
+        currentStMap.set(String(st.pilotId), st);
+      }
+    }
+
+    // ── Construire les stats finales par pilote ──
+    const rows = allPilotsL.map(p => {
+      const id  = String(p._id);
+      const cur = currentStMap.get(id) || {};
+      const agg = aggMap.get(id)       || {};
+
+      // careerPoints : cumulé archivé + saison courante + fallback agrégation
+      const basePoints  = p.careerPoints  || agg.pts    || 0;
+      const baseWins    = p.careerWins    || agg.wins   || 0;
+      const basePodiums = p.careerPodiums || agg.podiums|| 0;
+      const baseDnfs    = p.careerDnfs    || agg.dnfs   || 0;
+      const baseRaces   = p.careerRaces   || 0;
+
+      const totalPoints  = basePoints  + (cur.points  || 0);
+      const totalWins    = baseWins    + (cur.wins    || 0);
+      const totalPodiums = basePodiums + (cur.podiums || 0);
+      const totalDnfs    = baseDnfs    + (cur.dnfs    || 0);
+      const totalRaces   = baseRaces; // careerRaces ne compte pas la saison en cours
+
+      const winRate = totalRaces > 0 ? ((totalWins / totalRaces) * 100).toFixed(1) : '0.0';
+      const podRate = totalRaces > 0 ? ((totalPodiums / totalRaces) * 100).toFixed(1) : '0.0';
+
+      return { p, totalPoints, totalWins, totalPodiums, totalDnfs, totalRaces, winRate, podRate };
+    }).filter(r => r.totalRaces > 0 || r.totalPoints > 0);
+
+    if (!rows.length) {
+      return interaction.editReply({ content: '🏆 Aucune donnée de carrière disponible pour l\'instant.', ephemeral: true });
+    }
+
+    // ── Trier par points totaux (critère principal), puis victoires ──
+    rows.sort((a, b) => b.totalPoints - a.totalPoints || b.totalWins - a.totalWins);
+
+    // ── Podium top 3 ──
+    const medals = ['🥇', '🥈', '🥉'];
+    const tierColors = ['#FFD700', '#C0C0C0', '#CD7F32'];
+
+    // ── Construire les lignes du classement ──
+    const MAX_DISPLAY = 15;
+    const lines = rows.slice(0, MAX_DISPLAY).map((r, i) => {
+      const medal    = medals[i] || `**${i + 1}.**`;
+      const champ    = r.p.careerBestRank === 1 ? ' 👑' : '';
+      const spec     = r.p.specialization  ? ` *(${r.p.specialization})*` : '';
+      const teamStr  = r.p.teamId ? '' : ' *(sans écurie)*';
+      return (
+        `${medal} **${r.p.name}**${champ}${spec}${teamStr}
+` +
+        `┣ 🏆 **${r.totalPoints} pts** · 🏁 **${r.totalWins}V** · 🏅 ${r.totalPodiums}P · 💀 ${r.totalDnfs} DNF
+` +
+        `┗ 📊 ${r.totalRaces} courses · Taux victoire : ${r.winRate}% · Podiums : ${r.podRate}%`
+      );
+    });
+
+    // ── Statistiques globales en footer ──
+    const totalWinsAll    = rows.reduce((s, r) => s + r.totalWins, 0);
+    const totalRacesAll   = rows.reduce((s, r) => s + r.totalRaces, 0);
+    const topWinner       = rows.slice().sort((a,b) => b.totalWins - a.totalWins)[0];
+    const topConsistency  = rows.filter(r => r.totalRaces >= 5).sort((a,b) => parseFloat(b.podRate) - parseFloat(a.podRate))[0];
+
+    // ── Sections de l'embed (split si > 15 pilotes) ──
+    const CHUNK = 5;
+    const chunks = [];
+    for (let i = 0; i < lines.length; i += CHUNK) chunks.push(lines.slice(i, i + CHUNK).join("\n\n"));
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 LEGENDS — Classement All-Time')
+      .setColor('#FFD700')
+      .setDescription(
+        `*Classement cumulé toutes saisons confondues — trié par points de championnat*
+​`
+      );
+
+    chunks.forEach((chunk, idx) => {
+      embed.addFields({
+        name: idx === 0 ? '📊 Classement général' : '​',
+        value: chunk,
+        inline: false,
+      });
+    });
+
+    // ── Records all-time en bas ──
+    const recordLines = [];
+    if (topWinner)      recordLines.push(`🏁 **Roi des victoires :** ${topWinner.p.name} — ${topWinner.totalWins}V`);
+    if (topConsistency) recordLines.push(`🎯 **Meilleur taux podiums (≥5 courses) :** ${topConsistency.p.name} — ${topConsistency.podRate}%`);
+    const mostRaces = rows.slice().sort((a,b) => b.totalRaces - a.totalRaces)[0];
+    if (mostRaces)      recordLines.push(`🔄 **Plus de courses :** ${mostRaces.p.name} — ${mostRaces.totalRaces} GP`);
+
+    if (recordLines.length) {
+      embed.addFields({ name: '📈 Records', value: recordLines.join("\n"), inline: false });
+    }
+
+    embed.setFooter({ text: `${rows.length} pilote(s) en carrière · ${totalWinsAll} victoires réparties · ${totalRacesAll} courses archivées` });
+
+    return interaction.editReply({ embeds: [embed] });
   }
 
   // ── /palmares ─────────────────────────────────────────────
@@ -15899,6 +16113,7 @@ async function handleInteraction(interaction) {
             '`/classement_constructeurs` — Championnat constructeurs',
             '`/resultats` — Résultats de la dernière course',
             '`/record_circuit circuit:...` — Record du meilleur tour sur un circuit',
+            '`/legends` — 🏆 Classement all-time des pilotes (points, victoires, podiums toutes saisons)',
             '`/palmares` — 🏛️ Hall of Fame de toutes les saisons',
           ].join('\n'),
         },
