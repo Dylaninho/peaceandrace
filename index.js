@@ -391,6 +391,22 @@ NewsArticleSchema.index({ publishedAt: -1 });
 NewsArticleSchema.index({ queued: 1, scheduledFor: 1 });
 const NewsArticle = mongoose.model('NewsArticle', NewsArticleSchema);
 
+// ── FocusWeekend — Objectif GP d'un pilote ────────────────
+const FocusWeekendSchema = new mongoose.Schema({
+  pilotId   : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', required: true },
+  raceId    : { type: mongoose.Schema.Types.ObjectId, ref: 'Race',  required: true },
+  seasonYear: { type: Number },
+  objectiveId: { type: String, required: true }, // 'win'|'podium'|'top5'|'top10'|'beat_teammate'|'no_dnf'|'pole'
+  label     : { type: String },
+  reward    : { type: Number, default: 100 },
+  difficulty: { type: Number, default: 0.5 },
+  achieved  : { type: Boolean, default: false },
+  checkedAt : { type: Date, default: null },
+  createdAt : { type: Date, default: Date.now },
+});
+FocusWeekendSchema.index({ pilotId: 1, raceId: 1 }, { unique: true });
+const FocusWeekend = mongoose.model('FocusWeekend', FocusWeekendSchema);
+
 // ── File d'attente paddock (in-memory) ────────────────────────
 // Map<articleId (string) → timeoutId>
 // Permet d'annuler un setTimeout en attente via admin_queue cancel
@@ -412,6 +428,10 @@ const TeamSchema = new mongoose.Schema({
   // Ressources disponibles pour développement en cours de saison
   devPoints        : { type: Number, default: 0 },
     devFocus         : { type: String, default: null }, // stat prioritaire : 'vitesseMax'|'drs'|'refroidissement'|'dirtyAir'|'conservationPneus'|'vitesseMoyenne'|null
+  // ── Prestige — réputation de l'écurie (0-100) ──────────────
+  // Monte avec les victoires, titres et podiums. Descend avec les saisons catastrophiques.
+  // Influence : attractivité au mercato, salaires proposés, narration des articles.
+  prestige         : { type: Number, default: 50 },
 });
 const Team = mongoose.model('Team', TeamSchema);
 
@@ -5035,13 +5055,24 @@ function genTransferRumorArticle(pilot, currentTeam, targetTeam, seasonYear) {
   const headlines = isReturn ? headlinesReturn : headlinesStandard;
 
   // ── Corps standard ──
+  // Mentions de prestige dans les corps d'article
+  const targetPrestige  = targetTeam.prestige  ?? 50;
+  const currentPrestige = currentTeam?.prestige ?? 50;
+  const isUpgrade   = targetPrestige > currentPrestige + 15;  // montée en gamme
+  const isDowngrade = targetPrestige < currentPrestige - 15;  // descente en gamme
+  const prestigeLine = isUpgrade
+    ? pick([`Un pas vers le haut pour ${pilot.name} — ${targetTeam.name} a une des meilleures réputations du paddock.`, `${targetTeam.name} est une écurie qui fait rêver. Pour ${pilot.name}, ce serait une montée en gamme significative.`])
+    : isDowngrade
+    ? pick([`Ce mouvement interroge : ${targetTeam.name} n'a pas le prestige de son équipe actuelle. Pourquoi ce choix ?`, `Un mouvement surprenant, sur le papier. ${targetTeam.name} aurait besoin de ${pilot.name} autant que lui aurait besoin d'eux — ou presque.`])
+    : '';
+
   const bodiesStandard = [
     `Selon nos informations, le nom de ${pilot.name} circule avec insistance dans l'entourage de ${targetTeam.emoji}${targetTeam.name}.\n\n` +
     pick([
       `Son équipe actuelle ${currentTeam?.emoji || ''}${currentTeam?.name || 'son écurie'} dément tout contact. Ce qui, dans ce milieu, veut souvent dire le contraire.`,
       `"Aucune approche n'a été faite." C'est ce qu'on nous a répondu — la formule classique qui n'engage à rien.`,
       `Les deux parties font profil bas. Mais les regards échangés dans le paddock parlent d'eux-mêmes.`,
-    ]),
+    ]) + (prestigeLine ? `\n\n${prestigeLine}` : ''),
 
     `Un dîner discret. Des agents aperçus ensemble. Et soudain, le nom de ${pilot.name} revient dans toutes les conversations.\n\n` +
     pick([
@@ -11957,6 +11988,29 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
 
   await Race.findByIdAndUpdate(raceId, { status: 'done', raceResults });
 
+  // ── Mise à jour prestige des équipes après la course ─────────────────
+  // +3 par victoire, +1 par podium (hors victoire), -1 si aucun point, clamp 0-100
+  // Mis à jour en une seule opération par équipe pour ne pas multiplier les requêtes
+  const teamRaceMap = new Map(); // teamId → { wins, podiums, points }
+  for (const r of raceResults) {
+    const k = String(r.teamId);
+    const cur = teamRaceMap.get(k) || { wins: 0, podiums: 0, points: 0 };
+    if (r.pos === 1 && !r.dnf) cur.wins++;
+    if (r.pos <= 3 && !r.dnf)  cur.podiums++;
+    cur.points += (F1_POINTS[r.pos - 1] || 0);
+    teamRaceMap.set(k, cur);
+  }
+  for (const [teamId, stats] of teamRaceMap) {
+    const delta = stats.wins * 3 + (stats.podiums - stats.wins) * 1 + (stats.points === 0 ? -1 : 0);
+    if (delta !== 0) {
+      const t = await Team.findById(teamId).select('prestige').lean();
+      if (t) {
+        const newPrestige = Math.max(0, Math.min(100, (t.prestige ?? 50) + delta));
+        await Team.findByIdAndUpdate(teamId, { prestige: newPrestige });
+      }
+    }
+  }
+
   // ── Mise à jour de la forme récente de chaque pilote ──────
   // Basée sur les 3 derniers GPRecords : victoire=+1, podium=+0.5, points=+0.2,
   // P11-15=-0.1, P16+=-0.2, DNF=-0.7. Moyenne pondérée → score -1.0…+1.0.
@@ -12520,7 +12574,11 @@ function computeTeamScore(pilot, team, allStandings) {
     prefersYoung ? (100 - ov) * 0.3 + polyvalence * 0.8 + complementBonus :
                    ov * 1.0 + polyvalence * 0.6 + seasonScore * 0.02;
 
-  return Math.round(philosophyScore + complementBonus + seasonScore * 0.015);
+  // Prestige : un pilote libre préfère les équipes réputées — bonus proportionnel
+  // +10 max pour prestige 100, -5 pour prestige 0. Crée une attraction naturelle vers les tops.
+  const prestigeFactor = ((team.prestige ?? 50) - 50) / 50 * 10;
+
+  return Math.round(philosophyScore + complementBonus + seasonScore * 0.015 + prestigeFactor);
 }
 
 async function publishRefusalReaction(pilot, offer) {
@@ -13036,8 +13094,10 @@ async function startTransferPeriod() {
       // Plafond doux : une petite équipe (budget 60) propose max ~120 PLcoins/course à un top pilote
       const budgetCapPerPilot   = (team.budget / 100) * 150; // budget → cap PLcoins/course/pilote
       const ovAttractiveness    = Math.pow(ov / 75, 1.5);    // exponentiel : ov 90 vaut 1.8×, ov 60 = 0.6×
+      // Bonus prestige : une équipe au prestige élevé attire les meilleurs → peut offrir +15% de salaire max
+      const prestigeBonus       = 1 + ((team.prestige ?? 50) - 50) / 50 * 0.15; // 0 prestige → ×0.85, 100 → ×1.15
       const salaireBase = Math.round(
-        clamp(budgetCapPerPilot * ovAttractiveness * rand(0.85, 1.15), 40, 450)
+        clamp(budgetCapPerPilot * ovAttractiveness * prestigeBonus * rand(0.85, 1.15), 40, 450)
       );
 
       // Multiplicateur : les riches peuvent offrir plus de coins par course en %
@@ -14019,6 +14079,14 @@ const commands = [
         { name: '📅 Saison — GPs d\'une saison', value: 'season' },
       )),
 
+  new SlashCommandBuilder().setName('historique_gp')
+    .setDescription('🏁 Vainqueurs historiques d\'un circuit')
+    .addStringOption(o => o.setName('circuit').setDescription('Nom du circuit (partiel accepté)').setRequired(true)),
+
+  new SlashCommandBuilder().setName('focus_weekend')
+    .setDescription('🎯 Fixe un objectif pour le prochain GP — récompense selon ta difficulté')
+    .addIntegerOption(o => o.setName('pilote').setDescription('Ton Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+
   new SlashCommandBuilder().setName('record_circuit')
     .setDescription('⏱️ Consulte le record du meilleur tour sur un circuit')
     .addStringOption(o => o.setName('circuit').setDescription('Nom du circuit (partiel accepté)').setRequired(true)),
@@ -14395,6 +14463,70 @@ async function handleInteraction(interaction) {
   }
 
   if (interaction.isButton()) {
+    // ── Bouton focus_weekend ──────────────────────────────────
+    if (interaction.customId.startsWith('focus_')) {
+      // format: focus_<pilotId>_<objectiveId>_<raceId>
+      const parts = interaction.customId.split('_');
+      // parts[0]='focus', parts[1]=pilotId, parts[2]=objectiveId (peut contenir '_'), parts[-1]=raceId
+      const raceIdStr   = parts[parts.length - 1];
+      const pilotIdStr  = parts[1];
+      const objectiveId = parts.slice(2, parts.length - 1).join('_');
+
+      const pilot = await Pilot.findById(pilotIdStr).lean();
+      if (!pilot || pilot.discordId !== interaction.user.id)
+        return interaction.reply({ content: '❌ Ce bouton ne t\'appartient pas.', ephemeral: true });
+
+      // Vérifier pas déjà enregistré
+      const existing = await FocusWeekend.findOne({ pilotId: pilotIdStr, raceId: raceIdStr });
+      if (existing)
+        return interaction.update({ content: `✅ Objectif déjà enregistré : **${existing.label}** — ${existing.reward} PLcoins si atteint.`, embeds: [], components: [] });
+
+      // Récupérer les infos de l'objectif depuis l'embed (on recrée la liste)
+      const season = await getActiveSeason();
+      const race   = await Race.findById(raceIdStr).lean();
+      if (!race) return interaction.reply({ content: '❌ GP introuvable.', ephemeral: true });
+
+      const allStandings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+      const pilotRank    = allStandings.findIndex(s => String(s.pilotId) === pilotIdStr) + 1 || allStandings.length;
+      const totalPilots  = allStandings.length || 20;
+      const rankPct      = pilotRank / totalPilots;
+      const constrSt     = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+      const teamRank     = constrSt.findIndex(c => String(c.teamId) === String(pilot.teamId)) + 1 || constrSt.length;
+      const teamRankPct  = teamRank / (constrSt.length || 10);
+      const standing     = allStandings.find(s => String(s.pilotId) === pilotIdStr);
+
+      const diffMap = {
+        win           : Math.min(0.95, 0.15 + rankPct * 0.7  + teamRankPct * 0.15),
+        podium        : Math.min(0.92, 0.05 + rankPct * 0.6  + teamRankPct * 0.25),
+        top5          : Math.min(0.85, Math.max(0.03, rankPct * 0.5 + teamRankPct * 0.3)),
+        top10         : Math.min(0.75, Math.max(0.02, rankPct * 0.4 + teamRankPct * 0.25 - 0.1)),
+        beat_teammate : Math.min(0.65, Math.max(0.08, 0.3 + (pilot.teamStatus === 'numero2' ? 0.15 : pilot.teamStatus === 'numero1' ? -0.10 : 0))),
+        no_dnf        : Math.min(0.50, Math.max(0.05, (standing?.dnfs || 0) * 0.06 + teamRankPct * 0.15)),
+        pole          : Math.min(0.97, 0.20 + rankPct * 0.65 + teamRankPct * 0.12),
+      };
+      const labelMap = {
+        win: 'Remporter la victoire 🏆', podium: 'Monter sur le podium (top 3) 🏅',
+        top5: 'Finir dans le top 5 🎯', top10: 'Marquer des points (top 10) 📈',
+        beat_teammate: 'Battre ton coéquipier 👥', no_dnf: 'Terminer la course sans abandon 🛡️',
+        pole: 'Décrocher la pole position ⚡',
+      };
+
+      const diff   = diffMap[objectiveId] ?? 0.5;
+      const reward = Math.min(800, Math.max(50, Math.round(50 + Math.pow(diff, 0.65) * 750)));
+      const label  = labelMap[objectiveId] ?? objectiveId;
+
+      await FocusWeekend.create({
+        pilotId: pilotIdStr, raceId: raceIdStr,
+        seasonYear: season.year, objectiveId, label, reward, difficulty: diff,
+      });
+
+      return interaction.update({
+        content: `✅ **${pilot.name}** — Objectif enregistré pour **${race.emoji} ${race.circuit}** !
+🎯 **${label}** → **${reward} PLcoins** si atteint.`,
+        embeds: [], components: [],
+      });
+    }
+
     const [, action, offerId] = interaction.customId.split('_');  // offer_accept_<id> / offer_reject_<id>
     if (action !== 'accept' && action !== 'reject') return;
 
@@ -15514,6 +15646,13 @@ async function handleInteraction(interaction) {
     if (cStand) {
       embed.addFields({ name: `🏗️ Saison ${season.year}`, value: `**${cStand.points} pts** au constructeurs` });
     }
+
+    // Prestige
+    const pres = team.prestige ?? 50;
+    const presBar  = '█'.repeat(Math.round(pres / 10)) + '░'.repeat(10 - Math.round(pres / 10));
+    const presLabel = pres >= 80 ? 'Légendaire' : pres >= 65 ? 'Réputée' : pres >= 45 ? 'Établie' : pres >= 30 ? 'Modeste' : 'Confidentielle';
+    embed.addFields({ name: '⭐ Prestige', value: `\`${presBar}\` **${pres}** — *${presLabel}*
+*Influence les salaires proposés et l'attractivité au mercato.*` });
 
     return interaction.editReply({ embeds: [embed] });
   }
@@ -16884,6 +17023,212 @@ async function handleInteraction(interaction) {
   }
 
   // ── /record_circuit ───────────────────────────────────────
+  // ── /historique_gp ──────────────────────────────────────────
+  if (commandName === 'historique_gp') {
+    const query = interaction.options.getString('circuit').trim();
+    const wins = await PilotGPRecord.find({
+      circuit: { $regex: query, $options: 'i' },
+      finishPos: 1, dnf: false,
+    }).sort({ seasonYear: -1 }).lean();
+
+    if (!wins.length) return interaction.editReply({ content: `❌ Aucun historique trouvé pour "${query}".`, ephemeral: true });
+
+    // Résoudre les pilotNames manquants (anciens records)
+    const missingIds = [...new Set(wins.filter(w => !w.pilotName).map(w => String(w.pilotId)))];
+    const nameMap = new Map();
+    if (missingIds.length) {
+      const ps = await Pilot.find({ _id: { $in: missingIds } }).select('name').lean();
+      for (const p of ps) nameMap.set(String(p._id), p.name);
+    }
+
+    // Dédoublonner par saison
+    const seenYears = new Set();
+    const rows = [];
+    for (const w of wins) {
+      if (!seenYears.has(w.seasonYear)) {
+        seenYears.add(w.seasonYear);
+        rows.push(w);
+      }
+    }
+
+    // Compter les victoires par pilote sur ce circuit
+    const winCountMap = new Map();
+    for (const w of wins) {
+      const id = String(w.pilotId);
+      winCountMap.set(id, (winCountMap.get(id) || 0) + 1);
+    }
+
+    const circuitName = rows[0].circuit;
+    const circuitEmoji = rows[0].circuitEmoji || '🏁';
+    const lines = rows.map((w, i) => {
+      const name = w.pilotName || nameMap.get(String(w.pilotId)) || '?';
+      const team = w.teamEmoji ? `${w.teamEmoji} ${w.teamName}` : w.teamName || '?';
+      const totalWins = winCountMap.get(String(w.pilotId)) || 1;
+      const winsTag = totalWins > 1 ? ` *(×${totalWins} sur ce circuit)*` : '';
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `**${i+1}.**`;
+      return `${medal} S${w.seasonYear} — **${name}** (${team})${winsTag}`;
+    });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${circuitEmoji} Historique — ${circuitName}`)
+      .setColor('#FF1801')
+      .setDescription(lines.join("\n") || '*Aucune donnée*')
+      .setFooter({ text: `${rows.length} édition(s) disputée(s)` });
+
+    return interaction.editReply({ embeds: [embed] });
+  }
+
+  // ── /focus_weekend ────────────────────────────────────────
+  if (commandName === 'focus_weekend') {
+    const pilotIndex = interaction.options.getInteger('pilote') || 1;
+    const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
+    if (!pilot) return interaction.editReply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
+    if (!pilot.teamId) return interaction.editReply({ content: '❌ Ton pilote doit être dans une écurie.', ephemeral: true });
+
+    const season = await getActiveSeason();
+    if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
+
+    // Vérifier pas déjà un focus actif pour ce GP
+    const nextRace = await Race.findOne({ seasonId: season._id, status: { $in: ['upcoming','practice_done','quali_done'] } }).sort({ index: 1 }).lean();
+    if (!nextRace) return interaction.editReply({ content: '❌ Aucun GP à venir.', ephemeral: true });
+
+    const existingFocus = await FocusWeekend.findOne({ pilotId: pilot._id, raceId: nextRace._id });
+    if (existingFocus) {
+      return interaction.editReply({
+        content: `🎯 Tu as déjà un objectif pour **${nextRace.emoji} ${nextRace.circuit}** : **${existingFocus.label}** *(récompense : ${existingFocus.reward} PLcoins)*`,
+        ephemeral: true,
+      });
+    }
+
+    // ── Calculer le niveau attendu du pilote ──────────────────
+    const standing  = await Standing.findOne({ seasonId: season._id, pilotId: pilot._id }).lean();
+    const allStandings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const pilotRank    = allStandings.findIndex(s => String(s.pilotId) === String(pilot._id)) + 1 || allStandings.length;
+    const totalPilots  = allStandings.length || 20;
+    const rankPct      = pilotRank / totalPilots; // 0.05 = top 5%, 0.5 = mid, 0.95 = bottom
+    const ov           = overallRating(pilot);
+    const team         = await Team.findById(pilot.teamId).lean();
+    const constrSt     = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const teamRank     = constrSt.findIndex(c => String(c.teamId) === String(pilot.teamId)) + 1 || constrSt.length;
+    const totalTeams   = constrSt.length || 10;
+    const teamRankPct  = teamRank / totalTeams; // 0.1 = top team, 0.9 = bottom
+
+    // ── Définir les objectifs et leur difficulté relative ─────
+    // difficulty : 0 (trivial) → 1 (quasi impossible)
+    // reward     : proportionnel à la difficulté × 200 base
+    // La difficulté est ajustée selon le rank du pilote et l'équipe :
+    // Un top pilote finir P1 = difficulty 0.4 ; un bottom pilote finir P1 = difficulty 0.95
+
+    const objectives = [
+      // ── Victoire ──
+      {
+        id: 'win',
+        label: 'Remporter la victoire 🏆',
+        difficulty: Math.min(0.95, 0.15 + rankPct * 0.7 + teamRankPct * 0.15),
+      },
+      // ── Podium ──
+      {
+        id: 'podium',
+        label: 'Monter sur le podium (top 3) 🏅',
+        difficulty: Math.min(0.92, 0.05 + rankPct * 0.6 + teamRankPct * 0.25),
+      },
+      // ── Top 5 ──
+      {
+        id: 'top5',
+        label: 'Finir dans le top 5 🎯',
+        difficulty: Math.min(0.85, Math.max(0.03, rankPct * 0.5 + teamRankPct * 0.3)),
+      },
+      // ── Top 10 ──
+      {
+        id: 'top10',
+        label: 'Marquer des points (top 10) 📈',
+        difficulty: Math.min(0.75, Math.max(0.02, rankPct * 0.4 + teamRankPct * 0.25 - 0.1)),
+      },
+      // ── Battre le coéquipier ──
+      {
+        id: 'beat_teammate',
+        label: 'Battre ton coéquipier 👥',
+        difficulty: Math.min(0.65, Math.max(0.08, 0.3 + (pilot.teamStatus === 'numero2' ? 0.15 : pilot.teamStatus === 'numero1' ? -0.10 : 0))),
+      },
+      // ── Finir sans DNF ──
+      {
+        id: 'no_dnf',
+        label: 'Terminer la course sans abandon 🛡️',
+        // Plus difficile pour les pilotes fragiles (beaucoup de DNFs) ou mauvaise voiture
+        difficulty: Math.min(0.50, Math.max(0.05, (standing?.dnfs || 0) * 0.06 + (teamRankPct * 0.15))),
+      },
+      // ── Pole position ──
+      {
+        id: 'pole',
+        label: 'Décrocher la pole position ⚡',
+        difficulty: Math.min(0.97, 0.20 + rankPct * 0.65 + teamRankPct * 0.12),
+      },
+    ];
+
+    // Calculer la récompense : base 200 × difficulty^0.7 × 400
+    // Plus la difficulté est haute, plus la récompense est grande
+    // Min 50 PLcoins (objectif trivial), max 800 (quasi impossible)
+    for (const obj of objectives) {
+      const rawReward = Math.round(50 + Math.pow(obj.difficulty, 0.65) * 750);
+      obj.reward = Math.min(800, Math.max(50, rawReward));
+      // Label de difficulté lisible
+      obj.diffLabel = obj.difficulty >= 0.85 ? '🔴 Très difficile'
+        : obj.difficulty >= 0.65 ? '🟠 Difficile'
+        : obj.difficulty >= 0.40 ? '🟡 Modéré'
+        : obj.difficulty >= 0.20 ? '🟢 Accessible'
+        : '⚪ Facile';
+    }
+
+    // Trier par difficulté croissante pour affichage
+    objectives.sort((a, b) => a.difficulty - b.difficulty);
+
+    // Construire les boutons de sélection
+    const rows_ui = [];
+    const actionRow1 = new ActionRowBuilder();
+    const actionRow2 = new ActionRowBuilder();
+    objectives.slice(0, 4).forEach(obj => {
+      actionRow1.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`focus_${String(pilot._id)}_${obj.id}_${nextRace._id}`)
+          .setLabel(`${obj.label.slice(0, 40)} — ${obj.reward}🪙`)
+          .setStyle(ButtonStyle.Secondary)
+      );
+    });
+    objectives.slice(4).forEach(obj => {
+      actionRow2.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`focus_${String(pilot._id)}_${obj.id}_${nextRace._id}`)
+          .setLabel(`${obj.label.slice(0, 40)} — ${obj.reward}🪙`)
+          .setStyle(ButtonStyle.Secondary)
+      );
+    });
+    rows_ui.push(actionRow1);
+    if (objectives.slice(4).length) rows_ui.push(actionRow2);
+
+    const lines_disp = objectives.map(obj =>
+      `${obj.diffLabel} — **${obj.label}** → **${obj.reward} PLcoins**`
+    );
+
+    const embed = new EmbedBuilder()
+      .setTitle(`🎯 Focus Weekend — ${nextRace.emoji} ${nextRace.circuit}`)
+      .setColor('#FF6600')
+      .setDescription(
+        `**${pilot.name}** — P${pilotRank}/${totalPilots} au classement
+` +
+        `Écurie : ${team?.emoji || ''} **${team?.name || '?'}** (P${teamRank} constructeurs)
+
+` +
+        `Choisis ton objectif pour ce GP. Si atteint, tu remportes les PLcoins.
+` +
+        `*La récompense est inversement proportionnelle à ta facilité à l'atteindre.*
+​`
+      )
+      .addFields({ name: 'Objectifs disponibles', value: lines_disp.join("\n") })
+      .setFooter({ text: 'Clique un bouton pour valider ton objectif — non modifiable après.' });
+
+    return interaction.editReply({ embeds: [embed], components: rows_ui });
+  }
+
   if (commandName === 'record_circuit') {
     const query = interaction.options.getString('circuit').toLowerCase();
 
@@ -20728,6 +21073,53 @@ async function runRace(override, gpIndex = null) {
   const { results, collisions, penalties } = await simulateRace(race, grid, pilots, teams, contracts, channel, season, standingsBefore);
   await applyRaceResults(results, race._id, season, collisions, channel);
 
+  // ── Vérification des objectifs /focus_weekend ────────────
+  // Pour chaque FocusWeekend actif sur cette course, on vérifie si l'objectif est atteint
+  try {
+    const focuses = await FocusWeekend.find({ raceId: race._id, achieved: false, checkedAt: null });
+    const ch = channel || await getRaceChannel(null);
+    for (const focus of focuses) {
+      const result = results.find(r => String(r.pilotId) === String(focus.pilotId));
+      if (!result) continue;
+      const focusPilot = pilots.find(p => String(p._id) === String(focus.pilotId));
+      if (!focusPilot) continue;
+
+      let achieved = false;
+      if (focus.objectiveId === 'win')           achieved = result.pos === 1 && !result.dnf;
+      else if (focus.objectiveId === 'podium')   achieved = result.pos <= 3 && !result.dnf;
+      else if (focus.objectiveId === 'top5')     achieved = result.pos <= 5 && !result.dnf;
+      else if (focus.objectiveId === 'top10')    achieved = result.pos <= 10 && !result.dnf;
+      else if (focus.objectiveId === 'no_dnf')   achieved = !result.dnf;
+      else if (focus.objectiveId === 'pole') {
+        // Vérifier si le pilote a eu la pole (isPole dans PilotGPRecord)
+        const poleRec = await PilotGPRecord.findOne({ pilotId: focus.pilotId, raceId: race._id, isPole: true }).lean();
+        achieved = !!poleRec;
+      } else if (focus.objectiveId === 'beat_teammate') {
+        // Trouver le coéquipier et comparer les positions
+        const teammate = pilots.find(p => String(p.teamId) === String(focusPilot.teamId) && String(p._id) !== String(focusPilot._id));
+        if (teammate) {
+          const tmResult = results.find(r => String(r.pilotId) === String(teammate._id));
+          achieved = !result.dnf && (!tmResult || tmResult.dnf || result.pos < tmResult.pos);
+        }
+      }
+
+      await FocusWeekend.findByIdAndUpdate(focus._id, { achieved, checkedAt: new Date() });
+
+      if (achieved) {
+        // Attribuer la récompense PLcoins
+        await Pilot.findByIdAndUpdate(focus.pilotId, { $inc: { plcoins: focus.reward, totalEarned: focus.reward } });
+        if (ch) {
+          await ch.send(
+            `🎯 **FOCUS WEEKEND ACCOMPLI !** ` +
+            `${focusPilot.name} a atteint son objectif — **${focus.label}** — au ${race.emoji} ${race.circuit} !
+` +
+            `💰 **+${focus.reward} PLcoins** crédités sur son compte.`
+          );
+        }
+      }
+    }
+  } catch(e) { console.error('[focus_weekend check]', e.message); }
+
   // ── Annonce rivalités nouvellement déclarées ─────────────
   // On n'annonce que si la rivalité vient d'être créée CE GP (rivalDeclaredAt === race.index)
   if (channel && collisions.length) {
@@ -21031,6 +21423,45 @@ function startScheduler() {
   cron.schedule('0 17 * * *', guardedRun(runPractice,   'Essais libres  slot 1'), { timezone: 'Europe/Paris' });
   cron.schedule('0 18 * * *', guardedRun(runQualifying, 'Qualifications slot 1'), { timezone: 'Europe/Paris' });
   cron.schedule('0 20 * * *', guardedRun(runRace,       'Course         slot 1'), { timezone: 'Europe/Paris' });
+
+  // ── Rappels 30 min avant chaque session ──────────────────
+  const sendReminder = async (slotType, sessionLabel, emoji) => {
+    if (global.schedulerPaused) return;
+    try {
+      const season = await getActiveSeason();
+      if (!season) return;
+      const slot = slotType === 0 ? 0 : 1;
+      // Chercher le prochain GP non terminé du slot
+      const race = await getCurrentRace(season, slot);
+      if (!race) return;
+      // Vérifier que la session n'est pas déjà faite
+      const sessionDone =
+        sessionLabel === 'EL' ? race.status !== 'upcoming' :
+        sessionLabel === 'Q'  ? (race.status === 'quali_done' || race.status === 'done' || race.status === 'race_computed') :
+        (race.status === 'done' || race.status === 'race_computed');
+      if (sessionDone) return;
+      const ch = await client.channels.fetch(RACE_CHANNEL).catch(() => null);
+      if (!ch) return;
+      const times = {
+        EL: slotType === 0 ? '11h00' : '17h00',
+        Q:  slotType === 0 ? '13h00' : '18h00',
+        R:  slotType === 0 ? '15h00' : '20h00',
+      };
+      await ch.send(
+        `${emoji} **${race.emoji} ${race.circuit}** — **${sessionLabel === 'EL' ? 'Essais Libres' : sessionLabel === 'Q' ? 'Qualifications' : 'Grand Prix'}** dans **30 minutes** ! (${times[sessionLabel]})
+` +
+        `*Préparez-vous — vérifiez \`/planning\` et votre \`/profil\`.*`
+      );
+    } catch(e) { console.error('[Reminder]', e.message); }
+  };
+
+  cron.schedule('30 10 * * *', () => sendReminder(0, 'EL', '🔧'), { timezone: 'Europe/Paris' });
+  cron.schedule('30 12 * * *', () => sendReminder(0, 'Q',  '⏱️'), { timezone: 'Europe/Paris' });
+  cron.schedule('30 14 * * *', () => sendReminder(0, 'R',  '🏁'), { timezone: 'Europe/Paris' });
+  cron.schedule('30 16 * * *', () => sendReminder(1, 'EL', '🔧'), { timezone: 'Europe/Paris' });
+  cron.schedule('30 17 * * *', () => sendReminder(1, 'Q',  '⏱️'), { timezone: 'Europe/Paris' });
+  cron.schedule('30 19 * * *', () => sendReminder(1, 'R',  '🏁'), { timezone: 'Europe/Paris' });
+  console.log('✅ Rappels 30 min avant chaque session activés');
   console.log('✅ Scheduler slot 0 : 11h EL · 13h Q · 15h Course');
   console.log('✅ Scheduler slot 1 : 17h EL · 18h Q · 20h Course');
   console.log('✅ Keep-alive : ping toutes les 8min');
