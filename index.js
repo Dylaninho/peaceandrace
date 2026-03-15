@@ -11463,10 +11463,23 @@ const exitNeighborStr = neighborAhead && neighborBehind
     // ⚠️ pts * 22 → P10 (1pt) = 22 > participBonus 20 — P10 gagne toujours plus que P11
     const participBonus = driver.dnf ? 0 : (driver.pos > 10 ? 20 : 0);
 
+    // ── Bonus de rattrapage : inversement proportionnel au rang au championnat ──
+    // Compense structurellement l'écart de revenus entre top et bas joueurs.
+    // Rang 1 → 0🪙 | Rang 10 → +50🪙 | Rang 20 → +100🪙
+    // Non multiplié par coinMultiplier : c'est une aide structurelle, pas une récompense de perf.
+    const pilotChampRankForCoins = (() => {
+      const s = champStandings.find(x => String(x.pilotId) === String(driver.pilot._id));
+      return s ? s._rank || champStandings.indexOf(s) + 1 : champStandings.length || 10;
+    })();
+    const totalPilotsForCoins = champStandings.length || 20;
+    const catchupBonus = driver.dnf ? 0 : Math.round(
+      (pilotChampRankForCoins / totalPilotsForCoins) * 100
+    );
+
     const coins = Math.min(800, Math.round(
       (pts * 22 + (driver.dnf ? 0 : 40) + participBonus) * multi
       + salary + primeV + primeP + (fl ? 30 : 0)
-    ));
+    ) + catchupBonus);
 
     results.push({
       pilotId   : driver.pilot._id,
@@ -14512,7 +14525,10 @@ async function handleInteraction(interaction) {
       };
 
       const diff   = diffMap[objectiveId] ?? 0.5;
-      const reward = Math.min(800, Math.max(50, Math.round(50 + Math.pow(diff, 0.65) * 750)));
+      // no_dnf : récompense fixe plafonnée (survivre = minimum attendu)
+      const reward = objectiveId === 'no_dnf'
+        ? Math.min(100, Math.max(30, Math.round(30 + (standing?.dnfs || 0) * 10)))
+        : Math.min(800, Math.max(50, Math.round(50 + Math.pow(diff, 0.65) * 750)));
       const label  = labelMap[objectiveId] ?? objectiveId;
 
       await FocusWeekend.create({
@@ -17151,11 +17167,12 @@ async function handleInteraction(interaction) {
         difficulty: Math.min(0.65, Math.max(0.08, 0.3 + (pilot.teamStatus === 'numero2' ? 0.15 : pilot.teamStatus === 'numero1' ? -0.10 : 0))),
       },
       // ── Finir sans DNF ──
+      // Plafonné à 100 PLcoins max — survivre une course c'est le minimum attendu
       {
         id: 'no_dnf',
         label: 'Terminer la course sans abandon 🛡️',
-        // Plus difficile pour les pilotes fragiles (beaucoup de DNFs) ou mauvaise voiture
-        difficulty: Math.min(0.50, Math.max(0.05, (standing?.dnfs || 0) * 0.06 + (teamRankPct * 0.15))),
+        difficulty: 0, // difficulty=0 → reward fixe overridé ci-dessous
+        _fixedReward: Math.min(100, Math.max(30, Math.round(30 + (standing?.dnfs || 0) * 10))),
       },
       // ── Pole position ──
       {
@@ -17169,8 +17186,13 @@ async function handleInteraction(interaction) {
     // Plus la difficulté est haute, plus la récompense est grande
     // Min 50 PLcoins (objectif trivial), max 800 (quasi impossible)
     for (const obj of objectives) {
-      const rawReward = Math.round(50 + Math.pow(obj.difficulty, 0.65) * 750);
-      obj.reward = Math.min(800, Math.max(50, rawReward));
+      if (obj._fixedReward !== undefined) {
+        obj.reward = obj._fixedReward;
+        delete obj._fixedReward;
+      } else {
+        const rawReward = Math.round(50 + Math.pow(obj.difficulty, 0.65) * 750);
+        obj.reward = Math.min(800, Math.max(50, rawReward));
+      }
       // Label de difficulté lisible
       obj.diffLabel = obj.difficulty >= 0.85 ? '🔴 Très difficile'
         : obj.difficulty >= 0.65 ? '🟠 Difficile'
