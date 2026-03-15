@@ -1360,10 +1360,11 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const carFRaw = 1 - ((cScore - 70) / 70 * 0.005);
   const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.005 * (scCooldown / 6)) : carFRaw;
 
-  // Contribution pilote — max ~0.35s/tour
+  // Contribution pilote — max ~0.18s/tour (réduit de 0.004 → 0.002 pour éviter les gains de 10s/saison)
+  // Un pilote 50→75 gagne ~0.09s/tour → 4.5s sur 50 tours (réaliste vs 9s avant)
   const pScore = pilotScore(pilot, gpStyle);
-  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.004);
-  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.004 * (scCooldown / 6)) : pilotFRaw;
+  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.002);
+  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.002 * (scCooldown / 6)) : pilotFRaw;
 
   // Spécialisation — bonus très marginal (évite les sauts de position)
   let specF = 1.0;
@@ -10187,7 +10188,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
         if (gap < 2000) {
           const existing = battleMap.get(bkey) || { lapsClose: 0, lastPasser: null, lastPasserLap: -99 };
-          battleMap.set(bkey, { ...existing, lapsClose: existing.lapsClose + 1 });
+          // Cap à 15 tours : au-delà, la bataille a trouvé son équilibre — on ne l'escalade plus
+          const newLapsClose = Math.min(15, existing.lapsClose + 1);
+          battleMap.set(bkey, { ...existing, lapsClose: newLapsClose });
         } else {
           // Trop loin → reset
           battleMap.delete(bkey);
@@ -10590,8 +10593,12 @@ const exitNeighborStr = neighborAhead && neighborBehind
     }
 
     // ── Défenses sans changement de position ──────────────────
+    // Max 2 défenses rapportées par tour (évite le flood de messages de bataille)
+    let defenseReportedThisLap = 0;
+    const MAX_DEFENSES_PER_LAP = 2;
     if (!scActive && !justRestarted && lap > 2 && Math.random() < 0.35) {
       for (let i = 0; i < ranked.length - 1; i++) {
+        if (defenseReportedThisLap >= MAX_DEFENSES_PER_LAP) break;
         const ahead  = ranked[i];
         const behind = ranked[i + 1];
         if (ahead.pittedThisLap || behind.pittedThisLap) continue;
@@ -10606,7 +10613,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const battleRivalHeat = battleAreRivals
           ? Math.max(ahead.pilot.rivalHeat || 0, behind.pilot.rivalHeat || 0) : 0;
 
-        if (battle && battle.lapsClose >= 3 && gap < 1.2) {
+        // Cooldown : ne rapporter ce duel que si pas déjà rapporté dans les 2 derniers tours
+        const lastReported = battle?.lastReportedLap || 0;
+        if (battle && battle.lapsClose >= 3 && gap < 1.2 && (lap - lastReported) >= 2) {
           // ── Probabilité d'incident — boostée si les deux sont rivaux ──
           // Normal : 3T ~4%, 5T ~8%, 8T ~14%, 12T ~22%, 15T+ ~28%
           // Rivaux  : +5% flat + bonus heat (jusqu'à +10% si heat >= 60)
@@ -10662,10 +10671,11 @@ const exitNeighborStr = neighborAhead && neighborBehind
                   ];
                   const accDesc = pick(accidentTypes);
                   // Déterminer l'initiateur du contact (aggr = celui qui attaquait par derrière)
-                  const fautif  = aggr; // toujours le pilote qui attaquait
+                  // Si victim===aggr : l'attaquant s'est crashé lui-même en attaquant
+                  // Si victim!==aggr : l'attaquant a crashé l'autre pilote
                   const faultStr = victim === aggr
-                    ? `*${fautif.pilot.name} impliqué — il perd le contrôle en attaquant.*`
-                    : `*${fautif.team.emoji}**${fautif.pilot.name}** initiateur du contact — ${victim.team.emoji}**${victim.pilot.name}** paie les pots cassés.*`;
+                    ? `*${aggr.team.emoji}**${aggr.pilot.name}** perd le contrôle en attaquant — il paie cash son audace.*`
+                    : `*${aggr.team.emoji}**${aggr.pilot.name}** initiateur du contact — ${victim.team.emoji}**${victim.pilot.name}** est la victime.*`;
                   const crashTexts = battleAreRivals ? [
                     `***💥 T${lap} — CRASH ! LA RIVALITÉ VIENT DE TOUT EMPORTER !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) et ${other.team.emoji}**${other.pilot.name}** (P${opos}) — ${accDesc}. ***${victim.pilot.name} sort de la piste, voiture détruite. ABANDON.*** ${faultStr} La rivalité vient de coûter une course entière.`,
                     `🔴 ***T${lap} — RIVAL HORS COURSE !***\nAprès ${battle.lapsClose} tours de duel, ${victim.team.emoji}**${victim.pilot.name}** abandonne suite au contact avec ${other.team.emoji}**${other.pilot.name}**. ${accDesc}. ${faultStr} ${battleRivalHeat >= 50 ? `***Cette rivalité ne connaît plus de limite.***` : `*Le duel tourne à la catastrophe.*`}`,
@@ -10840,6 +10850,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
             defText += wornNote;
           }
           events.push({ priority: 4, text: defText });
+          defenseReportedThisLap++;
+          // Cooldown : ne pas reporter ce même duel avant 2 tours
+          battleMap.set(bkey, { ...battle, lastReportedLap: lap });
           break;
         }
       }
@@ -10858,9 +10871,40 @@ const exitNeighborStr = neighborAhead && neighborBehind
       }
     }
 
+    // ── Re-check SC après les batailles ─────────────────────
+    // Les crashes issus des duels sont ajoutés à lapIncidents APRÈS la première
+    // résolution SC — on re-résout ici pour ne pas les manquer.
+    if (scState.state === 'NONE') {
+      const newBattleCrashes = lapIncidents.filter(i => i.type === 'CRASH' && i.onTrack);
+      if (newBattleCrashes.length > 0) {
+        const prevScState2 = scState.state;
+        scState = resolveSafetyCar(scState, lapIncidents);
+        scActive = scState.state !== 'NONE';
+        // Annoncer le SC si déclenché par un crash de bataille
+        if (scState.state !== 'NONE' && prevScState2 === 'NONE') {
+          const aliveSC2 = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+          if (aliveSC2.length > 1) {
+            const leaderTime2 = aliveSC2[0].totalTime;
+            if (scState.state === 'SC') {
+              for (let i = 1; i < aliveSC2.length; i++) aliveSC2[i].totalTime = leaderTime2 + i * 1500;
+            } else {
+              for (let i = 1; i < aliveSC2.length; i++) {
+                const gap2 = aliveSC2[i].totalTime - leaderTime2;
+                aliveSC2[i].totalTime = leaderTime2 + Math.round(gap2 * 0.3);
+              }
+            }
+            aliveSC2.forEach((d, i) => { d.pos = i + 1; d.lastPos = i + 1; });
+          }
+          const scIcon = scState.state === 'SC' ? '🚨 **SAFETY CAR !**' : '🟡 **VIRTUAL SAFETY CAR !**';
+          events.push({ priority: 9, gif: scState.state === 'SC' ? pickGif('safety_car') : pickGif('vsc'),
+            text: `${scIcon} Suite à l'accrochage — le peloton se regroupe.` });
+        }
+      }
+    }
+
     // ── Commentary obligatoire chaque tour ───────────────────
     // Toujours un message, même si rien ne se passe
-   const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justRestarted);
+    const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justRestarted);
     if (atmo) events.push({ priority: events.length === 0 ? 3 : 1, text: atmo });
 
     // ── Composition et envoi du message ─────────────────────
