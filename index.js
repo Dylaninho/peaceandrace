@@ -1420,7 +1420,15 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   // Cap à 0.030 : max ~2.7s de perte par tour sur pneus à bout (réaliste F1 cliff).
   // Un pilote sur SOFT à 130% du seuil perd 1.8-2.5s/tour — écart visible et décisif.
   const wearPenalty  = Math.min(0.030, tireWear * effectiveDeg * cliffFactor);
-  const tireF        = (1 + wearPenalty) / tireData.grip;
+  // ── Crossover usure : au-delà de 50% de vie utile, un MEDIUM usé doit dépasser un SOFT usé.
+  // Un SOFT à >50% de wearRatio perd son avantage de grip — le MEDIUM plus résistant reprend l'avantage.
+  // On applique un malus supplémentaire sur le SOFT quand wearRatio > 0.5, proportionnel à l'écart.
+  let softWornMalus = 0;
+  if (tireCompound === 'SOFT' && wearRatio > 0.5) {
+    // +0 à 50%, +0.004 à 100%, +0.010 à 150% → dégradation accélérée après la mi-vie
+    softWornMalus = Math.min(0.010, (wearRatio - 0.5) * 0.008);
+  }
+  const tireF        = (1 + wearPenalty + softWornMalus) / tireData.grip;
 
   // Dirty air — pénalité ~0.1s max sur circuit mixte, jusqu'à ~0.4s sur urbain
   // Les rues étroites rendent le suivi très difficile : peu d'espaces pour dépasser,
@@ -2111,17 +2119,9 @@ async function simulatePractice(race, pilots, teams) {
   // milieu de peloton = +5-15ms, fond = 0ms (mauvais réglage = pas de bonus)
   const e3Sorted = [...e3.filter(r => r.time !== null)];
   const e3Bonuses = [];
-  e3Sorted.forEach((r, i) => {
-    const n = e3Sorted.length;
-    let bonusMs = 0;
-    if      (i === 0) bonusMs = 80;
-    else if (i === 1) bonusMs = 55;
-    else if (i === 2) bonusMs = 35;
-    else if (i < Math.floor(n * 0.4)) bonusMs = 15;
-    else if (i < Math.floor(n * 0.7)) bonusMs = 8;
-    else bonusMs = 0; // fond de tableau : mauvais setup
-    if (bonusMs > 0) e3Bonuses.push({ pilotId: String(r.pilot._id), bonusMs });
-  });
+  // Bonus setup weekend désactivés — E3 sert uniquement à la narration/classement EL
+  // e3Bonuses reste vide → aucun avantage de temps en course lié au setup
+  e3Sorted.forEach(() => {}); // placeholder — pas de bonus
 
   function pickIncidents(results) {
     return results.filter(r => r.noTime).map(r => ({ type: 'no_time', pilot: r.pilot, team: r.team }));
@@ -3881,30 +3881,79 @@ function genChainReactionArticle(pResponder, pCited, teamR, teamC, originalHeadl
   const arch   = pResponder?.personality?.archetype || 'guerrier';
   const isTension = triggerType === 'rivalry' || triggerType === 'drama';
 
+  // Contexte de la réplique — précise à quoi le pilote répond exactement
+  const replyContext = originalHeadline
+    ? `En réponse à : *"${originalHeadline}"*`
+    : `En réponse aux récentes déclarations de ${teamC.emoji}**${pCited.name}**`;
+
   const headlines = [
     `${pResponder.name} répond à ${pCited.name} — le paddock retient son souffle`,
     `Droit de réponse : ${teamR.emoji} ${pResponder.name} n'a pas digéré`,
     `${pResponder.name} brise le silence après les déclarations de ${pCited.name}`,
-    `La réplique de ${pResponder.name} : claire, directe, sans filtre`,
+    `La réplique de ${pResponder.name} à ${pCited.name} : claire, directe, sans filtre`,
   ];
 
   const bodyMap = {
-    guerrier:        isTension ? `**${teamR.emoji}${pResponder.name}** n'a pas attendu longtemps.\n\n*"Je lis. Je retiens. Et sur la piste, ça se règle comme ça doit se régler."*\n\nCourt. Sans fioritures.`
-                               : `*"Je suis content qu'il en parle. Moi j'étais là aussi."* — ${pResponder.name}, sobre et direct.`,
-    icone:           isTension ? `**${pResponder.name}** a choisi ses mots avec soin.\n\n*"Je préfère me concentrer sur ce que je contrôle. Ce que disent les autres ne m'atteint pas."*\n\nMessage reçu.`
-                               : `*"Il dit de belles choses — et je lui rends la pareille. Ce sport est plus beau quand on se respecte."* — ${pResponder.name}.`,
-    bad_boy:         isTension ? `${pResponder.name} n'a pas cherché à tempérer.\n\n*"${pick(["Il peut dire ce qu\'il veut. Rien ne change en piste.", "Sympa le commentaire. J\'en ai un aussi pour le week-end."])}"*`
-                               : `*"OK je vais l'admettre. Ce qu'il dit est juste. Mais ne lui répétez pas."* — ${pResponder.name}, avec humour.`,
-    vieux_sage:      isTension ? `${pResponder.name} a répondu avec la sérénité de quelqu'un qui a vécu trop de saisons pour s'énerver.\n\n*"${pick(["Ce genre de tension, ça passe. Ou ça empire.", "Les mots passent. Les résultats restent."])}"*`
-                               : `*"À mon âge, on sait reconnaître le mérite. ${pCited.name} en a."* — ${pResponder.name}.`,
-    rookie_ambitieux:isTension ? `${pResponder.name} a répondu avec la fougue de la jeunesse.\n\n*"Je n'ai pas à me justifier. Je fais mon travail. Si ça ne plaît pas, tant pis."*`
-                               : `*"Quand un pilote comme ${pCited.name} dit ça de moi, c'est énorme. Je ne l'oublierai pas."* — ${pResponder.name}.`,
-    calculateur:     isTension ? `${pResponder.name} a publié une réponse mesurée, presque clinique.\n\n*"J'ai pris note. J'analyse. Et je réponds sur la piste."*`
-                               : `*"Sa performance parle d'elle-même. Je m'en inspire."* — ${pResponder.name}.`,
+    guerrier:        isTension ? `${replyContext}
+
+**${teamR.emoji}${pResponder.name}** n'a pas attendu longtemps.
+
+*"Je lis. Je retiens. Et sur la piste, ça se règle comme ça doit se régler."*
+
+Court. Sans fioritures.`
+                               : `${replyContext}
+
+*"Je suis content qu'il en parle. Moi j'étais là aussi."* — ${pResponder.name}, sobre et direct.`,
+    icone:           isTension ? `${replyContext}
+
+**${pResponder.name}** a choisi ses mots avec soin.
+
+*"Je préfère me concentrer sur ce que je contrôle. Ce que disent les autres ne m'atteint pas."*
+
+Message reçu.`
+                               : `${replyContext}
+
+*"Il dit de belles choses — et je lui rends la pareille. Ce sport est plus beau quand on se respecte."* — ${pResponder.name}.`,
+    bad_boy:         isTension ? `${replyContext}
+
+${pResponder.name} n'a pas cherché à tempérer.
+
+*"${pick(["Il peut dire ce qu\'il veut. Rien ne change en piste.", "Sympa le commentaire. J\'en ai un aussi pour le week-end."])}"*`
+                               : `${replyContext}
+
+*"OK je vais l'admettre. Ce qu'il dit est juste. Mais ne lui répétez pas."* — ${pResponder.name}, avec humour.`,
+    vieux_sage:      isTension ? `${replyContext}
+
+${pResponder.name} a répondu avec la sérénité de quelqu'un qui a vécu trop de saisons pour s'énerver.
+
+*"${pick(["Ce genre de tension, ça passe. Ou ça empire.", "Les mots passent. Les résultats restent."])}"*`
+                               : `${replyContext}
+
+*"À mon âge, on sait reconnaître le mérite. ${pCited.name} en a."* — ${pResponder.name}.`,
+    rookie_ambitieux:isTension ? `${replyContext}
+
+${pResponder.name} a répondu avec la fougue de la jeunesse.
+
+*"Je n'ai pas à me justifier. Je fais mon travail. Si ça ne plaît pas, tant pis."*`
+                               : `${replyContext}
+
+*"Quand un pilote comme ${pCited.name} dit ça de moi, c'est énorme. Je ne l'oublierai pas."* — ${pResponder.name}.`,
+    calculateur:     isTension ? `${replyContext}
+
+${pResponder.name} a publié une réponse mesurée, presque clinique.
+
+*"J'ai pris note. J'analyse. Et je réponds sur la piste."*`
+                               : `${replyContext}
+
+*"Sa performance parle d'elle-même. Je m'en inspire."* — ${pResponder.name}.`,
   };
 
   const body = bodyMap[arch] ||
-    `**${teamR.emoji}${pResponder.name}** a tenu à répondre aux récentes déclarations impliquant **${pCited.name}**.\n\n` +
+    `${replyContext}
+
+**${teamR.emoji}${pResponder.name}** a tenu à répondre aux récentes déclarations impliquant **${pCited.name}**.
+
+` +
     `*"${pick(["Il y a des choses qui se règlent sur la piste.", "Pas de commentaire supplémentaire de ma part."])}"*`;
 
   return {
@@ -6931,6 +6980,23 @@ async function generateDriverOfTheDay(race, finalResults, drivers, channel) {
     { pilotId: winner.pilot._id, raceId: race._id },
     { $set: { driverOfTheDay: true } }
   );
+
+  // ── Bonus PLcoins DOTD ───────────────────────────────────
+  const DOTD_REWARD = 150; // PLcoins pour le Driver of the Day
+  await Pilot.findByIdAndUpdate(winner.pilot._id, { $inc: { plcoins: DOTD_REWARD, totalEarned: DOTD_REWARD } });
+  // Notif DM au joueur
+  try {
+    const discordUser = await client.users.fetch(winner.pilot.discordId).catch(() => null);
+    if (discordUser) {
+      await discordUser.send(
+        `🏆 **DRIVER OF THE DAY !**
+` +
+        `**${winner.pilot.name}** a été élu Driver of the Day au ${race.emoji} ${race.circuit} !
+` +
+        `💰 **+${DOTD_REWARD} PLcoins** crédités sur ton compte.`
+      ).catch(() => {});
+    }
+  } catch(e) { console.error('[DOTD PLcoins]', e.message); }
 }
 
 
@@ -8009,11 +8075,15 @@ async function generateOffTrackIncidents(race, finalResults, season, channel) {
   const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
 
   // Choisir un pilote "protagoniste" parmi ceux avec un résultat dramatique ce GP
+  // Les pilotes qui ont bien performé (podium, top 5) sont EXCLUS des incidents "critique" — pas de drama après bonne perf
   const dnfPilots    = finalResults.filter(r => r.dnf).map(r => allPilots.find(p => String(p._id) === String(r.pilotId))).filter(Boolean);
   const bottomPilots = finalResults.filter(r => !r.dnf && r.pos >= 14).map(r => allPilots.find(p => String(p._id) === String(r.pilotId))).filter(Boolean);
+  // topPilots uniquement pour les incidents positifs (fête de victoire) — pas pour les critiques
   const topPilots    = finalResults.filter(r => !r.dnf && r.pos <= 3).map(r => allPilots.find(p => String(p._id) === String(r.pilotId))).filter(Boolean);
+  // midPilots (P6-P13) : résultats neutres, eligibles aux tensions internes / polémiques réseaux
+  const midPilots    = finalResults.filter(r => !r.dnf && r.pos >= 6 && r.pos <= 13).map(r => allPilots.find(p => String(p._id) === String(r.pilotId))).filter(Boolean);
 
-  const candidates = [...dnfPilots, ...bottomPilots, ...topPilots];
+  const candidates = [...dnfPilots, ...bottomPilots, ...topPilots, ...midPilots];
   if (!candidates.length) return;
 
   const pilot  = pick(candidates);
@@ -8024,6 +8094,8 @@ async function generateOffTrackIncidents(race, finalResults, season, channel) {
   const isDnf  = result?.dnf;
   const pos    = result?.pos;
   const tone   = pilot?.personality?.tone || 'diplomatique';
+  // Guard : pas d'incident critique si le pilote a bien performé (podium ou top 5 sans DNF)
+  const hadGoodRace = !isDnf && pos && pos <= 5;
 
   const INCIDENTS = [
     // ── Critique publique de la voiture (surtout DNF mécanique) ──
@@ -8064,8 +8136,8 @@ async function generateOffTrackIncidents(race, finalResults, season, channel) {
       },
     }] : []),
 
-    // ── Incident anodin qui tourne mal ──
-    {
+    // ── Incident anodin qui tourne mal — EXCLU si bonne perf ce GP ──
+    ...(!hadGoodRace ? [{
       chance    : 0.30,
       teamChemDelta: -3,
       pressureDelta: 5,
@@ -8078,10 +8150,10 @@ async function generateOffTrackIncidents(race, finalResults, season, channel) {
         ];
         return pick(scenarios);
       },
-    },
+    }] : []),  // fin guard hadGoodRace pour tension garage
 
-    // ── Polémique réseaux sociaux ──
-    {
+    // ── Polémique réseaux sociaux — EXCLU si bonne perf ce GP ──
+    ...(!hadGoodRace ? [{
       chance    : 0.35,
       teamChemDelta: -2,
       pressureDelta: 8,
@@ -8094,7 +8166,7 @@ async function generateOffTrackIncidents(race, finalResults, season, channel) {
         ];
         return pick(posts);
       },
-    },
+    }] : []),  // fin guard hadGoodRace pour polémique réseaux
   ];
 
   // Filtrer selon les chances et choisir un incident
@@ -10018,7 +10090,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
 
     // ── Safety Car (APRÈS les incidents — on peut citer la cause) ──
     const prevScState = scState.state;
-    scState = resolveSafetyCar(scState, lapIncidents);
+    // Double crash = SC garanti (deux voitures immobilisées sur la piste)
+    const hasForcedSC = events.some(e => e.forceSC);
+    if (hasForcedSC && scState.state === 'NONE') {
+      scState = { state: 'SC', lapsLeft: 4 };
+    } else {
+      scState = resolveSafetyCar(scState, lapIncidents);
+    }
     // Mettre à jour scActive après résolution SC
     scActive = scState.state !== 'NONE';
 
@@ -10938,25 +11016,27 @@ const exitNeighborStr = neighborAhead && neighborBehind
             ? Math.max(attacker.pilot.rivalHeat || 0, victim.pilot.rivalHeat || 0) : 0;
 
           const roll = Math.random();
+          // Contacts légers → investigation seulement 35% du temps (évite trop de décisions FIA post-course)
+          const triggerInvestigation = roll < 0.35;
           if (roll < 0.5) {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), type: 'light' });
-            pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light' });
+            if (triggerInvestigation) pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light' });
             const lightContactText = lightAreRivals ? pick([
               `⚔️ **T${lap} — CONTACT ENTRE RIVAUX !** ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}** — *encore eux.* Sous investigation FIA.${lightRivalHeat >= 40 ? ` Le paddock commence à s'inquiéter.` : ''}`,
               `⚠️ **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** touche ${victim.team.emoji}**${victim.pilot.name}** — les deux rivaux encore en contact. *La FIA surveille.*`,
             ]) : pick([
-              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}** — *sous investigation FIA, décision post-course.*`,
+              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}** — *sous investigation FIA.*`,
               `⚠️ **T${lap}** — Contact ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Les commissaires vont étudier les images.*`,
             ]);
             events.push({ priority: lightAreRivals ? 7 : 5, text: lightContactText });
           } else {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), type: 'light' });
-            pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light' });
+            if (triggerInvestigation) pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light' });
             const lightContact2Text = lightAreRivals ? pick([
               `⚔️ **T${lap}** — Contact discutable entre les rivaux ${attacker.team.emoji}**${attacker.pilot.name}** et ${victim.team.emoji}**${victim.pilot.name}**. *Enquête FIA — mais la rivalité, elle, ne s'arrête pas là.*`,
             ]) : pick([
-              `🔍 **T${lap}** — Contact discutable ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Sous investigation — décision post-course.*`,
-              `🔍 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}**. *La FIA regarde les images — sentence possible après le GP.*`,
+              `🔍 **T${lap}** — Contact discutable ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Sous investigation FIA.*`,
+              `🔍 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}**. *La FIA regarde les images.*`,
             ]);
             events.push({ priority: lightAreRivals ? 6 : 3, text: lightContact2Text });
           }
@@ -10997,21 +11077,23 @@ const exitNeighborStr = neighborAhead && neighborBehind
             // Contact (70%) → enquête post-course | Incident mécanique/crevaison (30%)
             const incidentRoll = Math.random();
 
-            if (incidentRoll < 0.70) {
+            // Rival battles → toujours enquête; contacts normaux → seulement 45% (moins de décisions post-course)
+            const mediumInvThreshold = battleAreRivals || isTeamBattle ? 0.70 : 0.45;
+            if (incidentRoll < mediumInvThreshold) {
               // Contact → investigation post-course
               raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), type: 'light' });
               pendingInvestigations.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), lap, severity: 'medium' });
               battleMap.delete(bkey);
               const contactFlavors = isTeamBattle ? [
-                `💢 **T${lap} — CONTACT INTERNE !** Après ${battle.lapsClose} tours de duel, ${aggr.team.emoji}**${aggr.pilot.name}** touche son coéquipier **${ahead.pilot.name}**. *Sous investigation FIA — décision post-course.*`,
+                `💢 **T${lap} — CONTACT INTERNE !** Après ${battle.lapsClose} tours de duel, ${aggr.team.emoji}**${aggr.pilot.name}** touche son coéquipier **${ahead.pilot.name}**. *Sous investigation FIA.*`,
                 `🚨 **T${lap}** — La tension interne explose ! ${aggr.team.emoji}**${aggr.pilot.name}** accroche **${ahead.pilot.name}** (T${battle.lapsClose} de bataille). *Les commissaires vont trancher.*`,
               ] : battleAreRivals ? [
                 `⚔️ **T${lap} — CONTACT ENTRE RIVAUX !** ${battle.lapsClose} tours de duel, et ça finit par toucher. ${aggr.team.emoji}**${aggr.pilot.name}** sur ${ahead.team.emoji}**${ahead.pilot.name}** — *la rivalité s'exprime sur la piste.*${battleRivalHeat >= 40 ? ` Encore eux. Encore ça.` : ''}`,
                 `💥 **T${lap}** — ${battle.lapsClose} tours que les rivaux se battent, et voilà le résultat : contact ${aggr.team.emoji}**${aggr.pilot.name}** / ${ahead.team.emoji}**${ahead.pilot.name}**. *La FIA va trancher — mais la rivalité, elle, ne s'arrêtera pas là.*`,
                 `🚨 **T${lap}** — Inévitable. Après ${battle.lapsClose} tours au contact, ${aggr.team.emoji}**${aggr.pilot.name}** et ${ahead.team.emoji}**${ahead.pilot.name}** se touchent. *${battleRivalHeat >= 50 ? 'Rivalité qui dépasse les limites du sport.' : 'Tension de rivaux — les commissaires examinent.'}*`,
               ] : [
-                `💥 **T${lap} — CONTACT APRÈS ${battle.lapsClose} TOURS !** ${aggr.team.emoji}**${aggr.pilot.name}** percute ${ahead.team.emoji}**${ahead.pilot.name}**. *Sous investigation — sentence possible après la course.*`,
-                `🔍 **T${lap}** — ${battle.lapsClose} tours de bataille et ça finit par un contact ! ${aggr.team.emoji}**${aggr.pilot.name}** / ${ahead.team.emoji}**${ahead.pilot.name}**. *La FIA va trancher après l'arrivée.*`,
+                `💥 **T${lap} — CONTACT APRÈS ${battle.lapsClose} TOURS !** ${aggr.team.emoji}**${aggr.pilot.name}** percute ${ahead.team.emoji}**${ahead.pilot.name}**. *Sous investigation FIA.*`,
+                `🔍 **T${lap}** — ${battle.lapsClose} tours de bataille et ça finit par un contact ! ${aggr.team.emoji}**${aggr.pilot.name}** / ${ahead.team.emoji}**${ahead.pilot.name}**. *La FIA va trancher.*`,
               ];
               events.push({ priority: battleAreRivals ? 9 : (isTeamBattle ? 8 : 7), text: pick(contactFlavors) });
             } else {
@@ -11072,7 +11154,10 @@ const exitNeighborStr = neighborAhead && neighborBehind
                   `💥 **T${lap} — CARNAGE !** Contact violent entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** — les deux dans les graviers. **Deux courses gâchées.** *${aggr.team.emoji}**${aggr.pilot.name}** sous enquête FIA.*`,
                   `🔥 ***T${lap}*** — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se détruisent mutuellement. *${aggr.team.emoji}**${aggr.pilot.name}** initiateur — les commissaires vont trancher.*`,
                 ];
-                events.push({ priority: battleAreRivals ? 11 : 10, text: pick(doubleCrashTexts) });
+                // Double crash → TOUJOURS Safety Car (débris sur la piste, deux voitures immobilisées)
+                lapIncidents.push({ type: 'CRASH', onTrack: true }); // second push pour forcer SC
+                const doubleCrashGif = pickGif('crash_collision');
+                events.push({ priority: battleAreRivals ? 11 : 10, text: pick(doubleCrashTexts), gif: doubleCrashGif, forceSC: true });
               } else if (rollInc < 0.75) {
                 // Crevaison suite au contact — même logique que les crevaisons normales :
                 // canRecover = pit d'urgence si assez de tours restants (pas forcément DNF)
@@ -11370,7 +11455,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
   // Annoncer les décisions FIA + changements de classement
   if (postRacePenaltyMsgs.length && channel) {
-    await sleep(3000);
+    // Avertissement : classement provisoire en attente des décisions
+    await channel.send(`⏳ **CLASSEMENT PROVISOIRE** — Les commissaires FIA examinent ${dedupInvestigations.length} incident(s). Décision dans quelques instants…`);
+    await sleep(5000);
 
     // Détecter les pilotes dont la position a changé
     const posChanges = [];
@@ -11384,9 +11471,12 @@ const exitNeighborStr = neighborAhead && neighborBehind
     posChanges.sort((a, b) => a.after - b.after);
 
     const fiaEmbed = new EmbedBuilder()
-      .setTitle('📋 DÉCISIONS FIA — Classement post-course')
+      .setTitle('📋 DÉCISIONS FIA — Classement DÉFINITIF')
       .setColor('#003580')
-      .setDescription(postRacePenaltyMsgs.join('\n'));
+      .setDescription(
+        '*Les commissaires ont rendu leurs décisions. Le classement ci-dessous est définitif.*\n\u200B\n' +
+        postRacePenaltyMsgs.join('\n')
+      );
 
     if (posChanges.length > 0) {
       const changeLines = posChanges.map(c => {
@@ -21125,19 +21215,70 @@ async function runRace(override, gpIndex = null) {
         }
       }
 
+      // ── Calcul de la récompense réelle beat_teammate selon l'écart d'overall ──────
+      // Si le joueur a un overall SUPÉRIEUR à son coéquipier, c'était attendu → récompense réduite.
+      // Si le coéquipier est meilleur, c'est une vraie performance → récompense pleine.
+      let actualReward = focus.reward;
+      if (focus.objectiveId === 'beat_teammate' && achieved) {
+        const teammate2 = pilots.find(p => String(p.teamId) === String(focusPilot.teamId) && String(p._id) !== String(focusPilot._id));
+        if (teammate2) {
+          const myOvr = overallRating(focusPilot);
+          const tmOvr = overallRating(teammate2);
+          const ovrAdv = myOvr - tmOvr; // positif = moi meilleur, négatif = coéquipier meilleur
+          if (ovrAdv >= 15) {
+            // Je suis bien meilleur → victoire très attendue → 20% de la récompense
+            actualReward = Math.max(20, Math.round(focus.reward * 0.20));
+          } else if (ovrAdv >= 8) {
+            // Je suis notablement meilleur → 40%
+            actualReward = Math.max(30, Math.round(focus.reward * 0.40));
+          } else if (ovrAdv >= 3) {
+            // Légèrement meilleur → 65%
+            actualReward = Math.max(40, Math.round(focus.reward * 0.65));
+          } else if (ovrAdv >= -3) {
+            // Niveau comparable → récompense normale
+            actualReward = focus.reward;
+          } else if (ovrAdv >= -8) {
+            // Coéquipier un peu meilleur → 120%
+            actualReward = Math.round(focus.reward * 1.20);
+          } else if (ovrAdv >= -15) {
+            // Coéquipier notablement meilleur → 150%
+            actualReward = Math.round(focus.reward * 1.50);
+          } else {
+            // Coéquipier bien meilleur → belle perf → 200%
+            actualReward = Math.round(focus.reward * 2.00);
+          }
+        }
+      }
+
       await FocusWeekend.findByIdAndUpdate(focus._id, { achieved, checkedAt: new Date() });
 
       if (achieved) {
-        // Attribuer la récompense PLcoins
-        await Pilot.findByIdAndUpdate(focus.pilotId, { $inc: { plcoins: focus.reward, totalEarned: focus.reward } });
-        if (ch) {
-          await ch.send(
-            `🎯 **FOCUS WEEKEND ACCOMPLI !** ` +
-            `${focusPilot.name} a atteint son objectif — **${focus.label}** — au ${race.emoji} ${race.circuit} !
-` +
-            `💰 **+${focus.reward} PLcoins** crédités sur son compte.`
-          );
-        }
+        // Attribuer la récompense PLcoins (modulée selon écart overall pour beat_teammate)
+        await Pilot.findByIdAndUpdate(focus.pilotId, { $inc: { plcoins: actualReward, totalEarned: actualReward } });
+        // Notif éphémère dans le channel — visible uniquement par le joueur concerné
+        // On passe par une interaction fake impossible ici (hors slash command), donc on poste
+        // un message mention avec le flag allowedMentions limité, le plus discret possible.
+        // Note : les messages channel normaux ne sont pas éphémères hors interaction slash.
+        // Solution : on envoie au channel race avec une mention @user + flag ephemeral simulé
+        // en supprimant le message après 30s pour ne pas polluer.
+        try {
+          if (ch) {
+            // Ligne contextuelle selon écart overall pour beat_teammate
+            let bonusCtx = '';
+            if (focus.objectiveId === 'beat_teammate' && actualReward !== focus.reward) {
+              bonusCtx = actualReward < focus.reward
+                ? ` *(récompense réduite — tu étais favori)*`
+                : ` *(bonus upside — belle perf contre plus fort !)*`;
+            }
+            const notifMsg = await ch.send({
+              content: `🎯 <@${focusPilot.discordId}> — **FOCUS WEEKEND ACCOMPLI !** **${focus.label}** ✅
+💰 **+${actualReward} PLcoins** crédités sur ton compte.${bonusCtx}`,
+              allowedMentions: { users: [focusPilot.discordId] },
+            });
+            // Auto-suppression après 60s pour garder le channel propre
+            setTimeout(() => notifMsg.delete().catch(() => {}), 60_000);
+          }
+        } catch(e) { console.error('[focus_weekend notif]', e.message); }
       }
     }
   } catch(e) { console.error('[focus_weekend check]', e.message); }
@@ -21469,10 +21610,14 @@ function startScheduler() {
         Q:  slotType === 0 ? '13h00' : '18h00',
         R:  slotType === 0 ? '15h00' : '20h00',
       };
+      const sessionName = sessionLabel === 'EL' ? 'Essais Libres' : sessionLabel === 'Q' ? 'Qualifications' : 'Grand Prix';
+      const focusReminder = sessionLabel === 'R'
+        ? `
+🎯 *C'est le moment — définissez (ou vérifiez) votre objectif avec \`/focus_weekend\` avant le départ !*`
+        : `
+🎯 *Pensez à définir votre objectif de week-end avec \`/focus_weekend\` si ce n'est pas encore fait !*`;
       await ch.send(
-        `${emoji} **${race.emoji} ${race.circuit}** — **${sessionLabel === 'EL' ? 'Essais Libres' : sessionLabel === 'Q' ? 'Qualifications' : 'Grand Prix'}** dans **30 minutes** ! (${times[sessionLabel]})
-` +
-        `*Préparez-vous — vérifiez \`/planning\` et votre \`/profil\`.*`
+        `${emoji} **${race.emoji} ${race.circuit}** — **${sessionName}** dans **30 minutes** ! (${times[sessionLabel]})` + focusReminder
       );
     } catch(e) { console.error('[Reminder]', e.message); }
   };
