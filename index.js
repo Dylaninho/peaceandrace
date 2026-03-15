@@ -10224,6 +10224,20 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           }
           }
 
+        // ── Overcut : pousse plus fort pour justifier la stratégie ──────────
+        // Sans ce bonus, l'overcut ne peut JAMAIS fonctionner : le pilote reste
+        // dehors sur pneus usés pendant que le pitter chauffe ses gommes fraîches.
+        // En F1, le driver en overcut extrait du rythme sur des pneus encore chauds
+        // avant de rentrer — c'est exactement ce différentiel qu'on simule ici.
+        // Bonus : 350-750ms/tour selon réactions + dépassement du pilote.
+        // Ne s'active qu'une fois les warmup tours du concurrent passés (sinon inutile).
+        if (driver.overcutMode && !scActive) {
+          const overcutPush = Math.round(
+            350 + ((driver.pilot.reactions + driver.pilot.depassement) / 200) * 400
+          );
+          lt -= overcutPush;
+        }
+
         // ── Défense agressive = usure pneus extra ──
         const behindDrv = drivers.find(d => !d.dnf && d.pos === driver.pos + 1);
         if (behindDrv && !scActive) {
@@ -10521,13 +10535,21 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         driver.overcutMode    = false;
         if (!driver.usedCompounds.includes(newCompound)) driver.usedCompounds.push(newCompound);
 
-        // Trafic à la sortie : si 2+ voitures proches
+        // Trafic à la sortie : si des voitures sont proches du pit exit
+        // Fenêtre élargie à 6s (était 4s) pour capturer le vrai peloton compact.
+        // Durée en fonction du nombre de voitures dans la fenêtre :
+        //   1 voiture  : 1-2 tours (trafic léger — peut se dégager vite)
+        //   2-3 voitures : 2-3 tours (peloton groupé — difficile de passer)
+        //   4+ voitures : 3-4 tours (embouteillage réaliste — plein dans le trafic)
+        // Undercut agressif dans trafic dense = avantage réduit (c'est le but)
         const carsNearPitExit = aliveNow.filter(d =>
           !d.pittedThisLap &&
           String(d.pilot._id) !== String(driver.pilot._id) &&
-          Math.abs(d.totalTime - driver.totalTime) < 4000
+          Math.abs(d.totalTime - driver.totalTime) < 6000
         ).length;
-        if (carsNearPitExit >= 2) driver.trafficLapsLeft = randInt(1, 2);
+        if (carsNearPitExit >= 4)      driver.trafficLapsLeft = randInt(3, 4);
+        else if (carsNearPitExit >= 2) driver.trafficLapsLeft = randInt(2, 3);
+        else if (carsNearPitExit === 1) driver.trafficLapsLeft = randInt(1, 2);
 
         // Recalcul positions
         drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
@@ -10628,6 +10650,54 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
     // ── Reclassement final du tour ────────────────────────────
     drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+
+    // ── Stacked field clamp — freiner les chutes abruptes dans un peloton serré ──
+    // En F1, quand 5+ voitures sont regroupées en < 4s, il est physiquement impossible
+    // de perdre 5 places en un seul tour (la piste est trop dense pour que tout le monde
+    // passe en même temps). On cap la perte à 3 positions par tour pour tout pilote
+    // dont la zone est "stackée", sauf :
+    //   - Pneus vraiement au cliff (wearRatio > 1.4) : on laisse la physics jouer
+    //   - DNF / pit ce tour : pas de cap (changement légitime)
+    //   - Début de GP (tours 1-5) : startCooldown gère déjà ça
+    if (!scActive && lap > 5) {
+      const sortedFinal = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+      for (const driver of sortedFinal) {
+        if (driver.pittedThisLap || driver.dnf) continue;
+        const posLost = driver.pos - driver.lastPos;
+        if (posLost < 4) continue; // moins de 4 places perdues = ok, pas de cap nécessaire
+
+        // Compter les voitures dans une fenêtre de 4s autour de ce pilote
+        const window4s = sortedFinal.filter(d =>
+          !d.dnf &&
+          String(d.pilot._id) !== String(driver.pilot._id) &&
+          Math.abs(d.totalTime - driver.totalTime) < 4000
+        ).length;
+        if (window4s < 4) continue; // peloton pas assez serré — chute peut être réelle
+
+        // Vérifier si les pneus sont au cliff critique (laisser la physics jouer)
+        const wornThr = wornThresholdFor(driver.tireCompound, driver.team, driver.pilot);
+        const wearR   = (driver.tireWear || 0) / Math.max(wornThr, 1);
+        if (wearR > 1.4) continue; // pneus vraiment foutus — chute méritée
+
+        // Cap : au maximum 3 positions perdues dans un peloton stacké
+        const maxLoss  = 3;
+        const capPos   = driver.lastPos + maxLoss;
+        if (driver.pos > capPos) {
+          // Chercher l'occupant actuel de capPos et swapper les totalTime
+          const blocker = sortedFinal.find(d => !d.dnf && d.pos === capPos && d !== driver);
+          if (blocker) {
+            driver.totalTime  = blocker.totalTime + 1;
+            blocker.totalTime = driver.totalTime  - 2;
+          }
+          // Re-sync positions
+          sortedFinal.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+          driver.lastPos = driver.pos; // éviter faux messages au prochain tour
+        }
+      }
+      // Reclassement propre après les caps
+      drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+    }
+
     const ranked = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
 
     // ── Mise à jour du battleMap ──────────────────────────────
@@ -10869,18 +10939,31 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
         if (posChange < 0) {
           // ── Perte de positions ──────────────────────────────
-          if (multiPosNarrCount >= MAX_MULTI_NARR) continue;
-          multiPosNarrCount++;
+          const lost      = Math.abs(posChange);
+          // Grosses chutes (4+ places) passent TOUJOURS — le cap MAX_MULTI_NARR
+          // ne s'applique qu'aux chutes modestes pour éviter le flood.
+          // C'est exactement ce qui corrige le "P9 silencieux → P14" :
+          // si on a atteint le cap et qu'un pilote chute de 4+ places, on le dit quand même.
+          const isBigDrop = lost >= 4;
+          if (!isBigDrop && multiPosNarrCount >= MAX_MULTI_NARR) continue;
+          if (!isBigDrop) multiPosNarrCount++;
 
-          const lost     = Math.abs(posChange);
-          const severity = lost >= 5 ? '🚨' : '⚠️';
+          const severity = lost >= 5 ? '🚨' : isBigDrop ? '⚠️⚠️' : '⚠️';
           const tireCtx  = isTireWorn
             ? ` ${tireEmoji} *Ses pneus usés lui coûtent du temps — il ne peut pas répondre.*`
             : '';
-          events.push({ priority: 3, text: pick([
-            `${severity} **T${lap}** — ${n} recule **P${driver.lastPos}→P${driver.pos}** — plusieurs adversaires en profitent dans la même séquence.${tireCtx}`,
-            `${severity} **T${lap}** — ${n} perd **${lost} place${lost>1?'s':''}** (P${driver.lastPos}→P${driver.pos}) en l'espace d'un tour.${tireCtx}`,
-            `${severity} **T${lap}** — Glissade au classement pour ${n} : P${driver.lastPos}→**P${driver.pos}**.${tireCtx}`,
+          // Contexte peloton serré pour les grosses chutes — clarifie le bond apparent
+          const stackedCtx = isBigDrop
+            ? pick([
+                ` *Peloton très serré ici — un rien de rythme en moins et tout le monde passe.*`,
+                ` *Zone compacte : ${lost} voitures le dépassent en rafale dans le même secteur.*`,
+                ` *Le trafic est dense dans ce coin de piste — les positions partent vite.*`,
+              ])
+            : '';
+          events.push({ priority: isBigDrop ? 5 : 3, text: pick([
+            `${severity} **T${lap}** — ${n} recule **P${driver.lastPos}→P${driver.pos}** — plusieurs adversaires en profitent dans la même séquence.${tireCtx}${stackedCtx}`,
+            `${severity} **T${lap}** — ${n} perd **${lost} place${lost>1?'s':''}** (P${driver.lastPos}→P${driver.pos}) en l'espace d'un tour.${tireCtx}${stackedCtx}`,
+            `${severity} **T${lap}** — Glissade au classement pour ${n} : P${driver.lastPos}→**P${driver.pos}**.${tireCtx}${stackedCtx}`,
           ]) });
 
         } else {
