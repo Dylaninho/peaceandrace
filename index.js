@@ -372,7 +372,7 @@ const CircuitRecord = mongoose.model('CircuitRecord', CircuitRecordSchema);
 
 // ── NewsArticle — Tabloïd de paddock ──────────────────────
 const NewsArticleSchema = new mongoose.Schema({
-  type       : { type: String, required: true },  // 'rivalry','transfer_rumor','drama','hype','form_crisis','teammate_duel','dev_vague','scandal','title_fight','driver_interview','sponsoring','social_media','tv_show','relationship','friendship','lifestyle','scandal_offtrack','charity','brand_deal'
+  type       : { type: String, required: true },  // 'rivalry','transfer_rumor','drama','hype','form_crisis','teammate_duel','dev_vague','scandal','title_fight','driver_interview','sponsoring','social_media','tv_show','relationship','friendship','lifestyle','scandal_offtrack','charity','brand_deal','mid_season_report','milestone','rival_reaction'
   source     : { type: String, required: true },  // 'pitlane_insider','paddock_whispers','pl_racing_news','f1_weekly'
   headline   : { type: String, required: true },
   body       : { type: String, required: true },
@@ -1360,11 +1360,10 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const carFRaw = 1 - ((cScore - 70) / 70 * 0.005);
   const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.005 * (scCooldown / 6)) : carFRaw;
 
-  // Contribution pilote — max ~0.18s/tour (réduit de 0.004 → 0.002 pour éviter les gains de 10s/saison)
-  // Un pilote 50→75 gagne ~0.09s/tour → 4.5s sur 50 tours (réaliste vs 9s avant)
+  // Contribution pilote — max ~0.35s/tour
   const pScore = pilotScore(pilot, gpStyle);
-  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.002);
-  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.002 * (scCooldown / 6)) : pilotFRaw;
+  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.004);
+  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.004 * (scCooldown / 6)) : pilotFRaw;
 
   // Spécialisation — bonus très marginal (évite les sauts de position)
   let specF = 1.0;
@@ -6996,6 +6995,335 @@ function genSeasonOpeningArticle(season, allPilots, allTeams, lastSeasonCtx, fin
   };
 }
 
+// ============================================================
+// 📊  BILAN MI-SAISON
+// Posté une seule fois par saison au GP 12/24 (50%)
+// ============================================================
+async function generateMidSeasonReport(race, finalResults, season, channel) {
+  try {
+    // Guard : une seule fois par saison
+    const alreadyPosted = await NewsArticle.findOne({ seasonYear: season.year, type: 'mid_season_report' }).lean();
+    if (alreadyPosted) return;
+
+    const allPilots   = await Pilot.find({ teamId: { $ne: null } }).lean();
+    const allTeams    = await Team.find().lean();
+    const standings   = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const constrSt    = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const totalRaces  = await Race.countDocuments({ seasonId: season._id });
+    const pilotMap    = new Map(allPilots.map(p => [String(p._id), p]));
+    const teamMap     = new Map(allTeams.map(t => [String(t._id), t]));
+
+    if (!standings.length) return;
+
+    const leader      = standings[0];
+    const leaderPilot = pilotMap.get(String(leader.pilotId));
+    const leaderTeam  = leaderPilot ? teamMap.get(String(leaderPilot.teamId)) : null;
+    const second      = standings[1];
+    const secondPilot = second ? pilotMap.get(String(second.pilotId)) : null;
+    const gap         = second ? leader.points - second.points : 0;
+
+    // Constructeur leader
+    const constrLeader     = constrSt[0];
+    const constrLeaderTeam = constrLeader ? teamMap.get(String(constrLeader.teamId)) : null;
+
+    // Surprise : pilote en top 5 mais dans une petite équipe
+    const surprises = standings.slice(0, 5).filter((s, i) => {
+      const p = pilotMap.get(String(s.pilotId));
+      if (!p) return false;
+      const tRank = constrSt.findIndex(c => String(c.teamId) === String(p.teamId)) + 1;
+      return tRank > Math.ceil(constrSt.length / 2);
+    });
+    const surprise     = surprises[0];
+    const surprisePilot = surprise ? pilotMap.get(String(surprise.pilotId)) : null;
+    const surpriseTeam  = surprisePilot ? teamMap.get(String(surprisePilot.teamId)) : null;
+
+    // Déception : pilote attendu en top 3 (dans top team) mais P6+
+    const topTeamIds = new Set(constrSt.slice(0, 3).map(c => String(c.teamId)));
+    const disappointments = standings.filter((s, i) => {
+      if (i < 3) return false;
+      const p = pilotMap.get(String(s.pilotId));
+      return p && topTeamIds.has(String(p.teamId));
+    });
+    const disappointPilot = disappointments[0] ? pilotMap.get(String(disappointments[0].pilotId)) : null;
+    const disappointTeam  = disappointPilot ? teamMap.get(String(disappointPilot.teamId)) : null;
+
+    // Construit l'article
+    const source = pick(['f1_weekly', 'pl_racing_news', 'pitlane_insider']);
+    const headline = pick([
+      `Mi-saison ${season.year} : le bilan à mi-parcours`,
+      `GP ${Math.ceil(totalRaces / 2)}/${totalRaces} — l'heure des comptes`,
+      `Mi-saison : qui impressionne, qui déçoit ?`,
+      `Bilan mi-saison ${season.year} — le point sur le championnat`,
+    ]);
+
+    let body = `La saison ${season.year} a atteint son équateur. Il est temps de faire le point.
+
+`;
+
+    // Championnat pilotes
+    if (leaderPilot && leaderTeam) {
+      body += `**🏆 Championnat Pilotes**
+`;
+      body += `${leaderTeam.emoji} **${leaderPilot.name}** trône en tête avec **${leader.points} pts**`;
+      if (secondPilot && gap > 0) {
+        body += `, **${gap} point(s) devant** ${secondPilot.name}`;
+        if (gap <= 10) body += `. L'écart est quasi inexistant — tout se jouera en deuxième moitié.`;
+        else if (gap <= 30) body += `. Un matelas confortable, mais rien n'est joué à mi-saison.`;
+        else body += `. Une avance significative — ses rivaux vont devoir sortir le grand jeu.`;
+      }
+      body += `
+
+`;
+    }
+
+    // Championnat constructeurs
+    if (constrLeaderTeam) {
+      body += `**🏗️ Championnat Constructeurs**
+`;
+      body += `${constrLeaderTeam.emoji} **${constrLeaderTeam.name}** mène la danse avec **${constrLeader.points} pts**.`;
+      if (constrSt[1]) {
+        const constrSecond = teamMap.get(String(constrSt[1].teamId));
+        const constrGap = constrLeader.points - constrSt[1].points;
+        if (constrSecond) body += ` ${constrGap} points d'avance sur ${constrSecond.emoji} **${constrSecond.name}**.`;
+      }
+      body += `
+
+`;
+    }
+
+    // Surprise de mi-saison
+    if (surprisePilot && surpriseTeam) {
+      const sPos = standings.findIndex(s => String(s.pilotId) === String(surprisePilot._id)) + 1;
+      body += `**⭐ La surprise**
+`;
+      body += pick([
+        `${surpriseTeam.emoji} **${surprisePilot.name}** est la révélation de cette première moitié. P${sPos} au général avec une modeste ${surpriseTeam.name} — personne ne l'avait vu venir.`,
+        `Difficile de ne pas saluer la performance de ${surpriseTeam.emoji} **${surprisePilot.name}** (P${sPos}). Dans une ${surpriseTeam.name} que personne ne voyait là, il a imposé son style.`,
+      ]);
+      body += `
+
+`;
+    }
+
+    // Déception de mi-saison
+    if (disappointPilot && disappointTeam) {
+      const dPos = standings.findIndex(s => String(s.pilotId) === String(disappointPilot._id)) + 1;
+      body += `**📉 La déception**
+`;
+      body += pick([
+        `${disappointTeam.emoji} **${disappointPilot.name}** attendait mieux. P${dPos} au championnat avec une des meilleures voitures du plateau — les questions commencent à se poser dans le paddock.`,
+        `Avec le potentiel de la ${disappointTeam.name}, P${dPos} pour **${disappointPilot.name}** est un bilan décevant. La deuxième partie de saison sera scrutée de très près.`,
+      ]);
+      body += `
+
+`;
+    }
+
+    body += `*La deuxième moitié de saison commence maintenant. Les cartes peuvent encore être redistribuées — mais le temps presse.*`;
+
+    const art = await NewsArticle.create({
+      type: 'mid_season_report', source, headline, body,
+      seasonYear: season.year, raceId: race._id,
+      triggered: 'post_race', publishedAt: new Date(),
+    });
+    if (channel) { await sleep(4000); await publishNews(art, channel); }
+    console.log(`[mid_season] Bilan mi-saison ${season.year} publié.`);
+  } catch(e) { console.error('[mid_season] Erreur :', e.message); }
+}
+
+// ============================================================
+// 🏅  RECORDS HISTORIQUES DÉTECTÉS AUTOMATIQUEMENT
+// Déclenché après chaque course dans generatePostRaceNews
+// ============================================================
+async function generateMilestoneArticles(race, finalResults, season, allPilots, allTeams, standings, channel) {
+  const teamMap  = new Map(allTeams.map(t => [String(t._id), t]));
+  const articles = [];
+
+  for (const result of finalResults) {
+    if (result.dnf) continue;
+    const pilot = allPilots.find(p => String(p._id) === String(result.pilotId));
+    const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
+    if (!pilot || !team) continue;
+
+    // Victoires en carrière (cumulé + saison en cours)
+    const standing    = standings.find(s => String(s.pilotId) === String(pilot._id));
+    const seasonWins  = standing?.wins || 0;
+    const totalWins   = (pilot.careerWins || 0) + seasonWins;
+    const milestones  = [5, 10, 15, 20, 25, 30, 50];
+
+    if (result.pos === 1 && milestones.includes(totalWins)) {
+      const alreadyPosted = await NewsArticle.findOne({
+        seasonYear: season.year, type: 'milestone',
+        pilotIds: pilot._id,
+        headline: { $regex: `${totalWins}` },
+      }).lean();
+      if (!alreadyPosted) {
+        articles.push({
+          type: 'milestone', source: pick(['f1_weekly', 'pl_racing_news']),
+          headline: pick([
+            `${pilot.name} — ${totalWins} victoires en carrière, une légende en marche`,
+            `${totalWins}e victoire pour ${pilot.name} : le chiffre qui marque l'histoire`,
+            `Milestone : ${team.emoji} ${pilot.name} rejoint le cercle des ${totalWins} victoires`,
+          ]),
+          body: pick([
+            `${totalWins} victoires. Le chiffre claque. ${team.emoji} **${pilot.name}** a franchi aujourd'hui une étape qui le place parmi les grands noms de PL Racing.
+
+Cette victoire au ${race.emoji} ${race.circuit}, il la savourera différemment des autres. Elle n'est pas la plus facile, ni peut-être la plus méritée — mais c'est celle qui compte dans les livres.
+
+*${totalWins} victoires. Et le compteur continue.*`,
+            `Il en était à ${totalWins - 1}. Un de plus. Et pourtant, cette ${totalWins}e victoire résonne autrement.
+
+${team.emoji} **${pilot.name}** au ${race.emoji} ${race.circuit} — la course qui entre dans son panthéon personnel. Le paddock l'a applaudi, et pour une fois, tout le monde était d'accord.
+
+*Les grands pilotes ne comptent pas leurs victoires. Mais tout le monde les compte pour eux.*`,
+          ]),
+          pilotIds: [pilot._id], teamIds: [team._id], seasonYear: season.year, raceId: race._id,
+          triggered: 'post_race', publishedAt: new Date(),
+        });
+      }
+    }
+
+    // 50e ou 100e course disputée
+    const gpRecs = await PilotGPRecord.countDocuments({ pilotId: pilot._id, finishPos: { $gt: 0 } });
+    const raceMilestones = [50, 100, 150, 200];
+    if (raceMilestones.includes(gpRecs)) {
+      const alreadyPosted2 = await NewsArticle.findOne({
+        seasonYear: season.year, type: 'milestone',
+        pilotIds: pilot._id,
+        headline: { $regex: `${gpRecs}` },
+      }).lean();
+      if (!alreadyPosted2) {
+        articles.push({
+          type: 'milestone', source: pick(['f1_weekly', 'pl_racing_news']),
+          headline: pick([
+            `${gpRecs}e GP pour ${pilot.name} — une carrière qui s'écrit en grand`,
+            `${team.emoji} ${pilot.name} dispute son ${gpRecs}e Grand Prix`,
+            `Milestone : ${gpRecs} départs en carrière pour ${pilot.name}`,
+          ]),
+          body: `${gpRecs} Grands Prix. ${team.emoji} **${pilot.name}** franchit un cap symbolique au ${race.emoji} ${race.circuit}.
+
+${gpRecs >= 100 ? `Cent courses. Cent week-ends à se battre, à souffrir, à savourer. C'est une statistique qui dit tout — et pourtant, elle ne dit rien du tout.` : `Cinquante courses disputées. La moitié d'une longue saison de vie, déjà.`}
+
+*Et ça continue.*`,
+          pilotIds: [pilot._id], teamIds: [team._id], seasonYear: season.year, raceId: race._id,
+          triggered: 'post_race', publishedAt: new Date(),
+        });
+      }
+    }
+  }
+
+  for (const art of articles) {
+    const created = await NewsArticle.create(art);
+    if (channel) { await sleep(3000); await publishNews(created, channel); }
+  }
+}
+
+// ============================================================
+// 🏁  RÉACTION DES ÉCURIES RIVALES APRÈS DOMINATION
+// Déclenché si une écurie fait P1+P2 et/ou gagne de >30pts en une course
+// ============================================================
+async function generateRivalReactionArticle(race, finalResults, season, allPilots, allTeams, constrStandings, channel) {
+  try {
+    const teamMap = new Map(allTeams.map(t => [String(t._id), t]));
+
+    // Détecter si une écurie a fait P1+P2
+    const p1 = finalResults.find(r => r.pos === 1 && !r.dnf);
+    const p2 = finalResults.find(r => r.pos === 2 && !r.dnf);
+    if (!p1 || !p2) return;
+    const isDoublePodium = String(p1.teamId) === String(p2.teamId);
+
+    // Détecter si une écurie écrase les points (>35 pts en une course = P1+P2)
+    const teamRacePoints = new Map();
+    for (const r of finalResults) {
+      if (!r.dnf) {
+        const k = String(r.teamId);
+        teamRacePoints.set(k, (teamRacePoints.get(k) || 0) + (F1_POINTS[r.pos - 1] || 0));
+      }
+    }
+    const sortedTeamPts = [...teamRacePoints.entries()].sort((a, b) => b[1] - a[1]);
+    const topTeamId = sortedTeamPts[0]?.[0];
+    const topTeamPts = sortedTeamPts[0]?.[1] || 0;
+    const secondTeamPts = sortedTeamPts[1]?.[1] || 0;
+    const gap = topTeamPts - secondTeamPts;
+
+    // Seuil : P1+P2 OU gap de >15pts en une course
+    if (!isDoublePodium && gap <= 15) return;
+
+    const domTeam  = teamMap.get(topTeamId);
+    if (!domTeam) return;
+
+    // Choisir un rival qui commente (top 3 constructeurs hors l'équipe dominante)
+    const rivals = constrStandings
+      .filter(s => String(s.teamId) !== topTeamId)
+      .slice(0, 3)
+      .map(s => teamMap.get(String(s.teamId)))
+      .filter(Boolean);
+    if (!rivals.length) return;
+    const reactingTeam = pick(rivals);
+
+    // Trouver un pilote de cette équipe pour citer
+    const reactingPilots = allPilots.filter(p => String(p.teamId) === String(reactingTeam._id));
+    if (!reactingPilots.length) return;
+    const reactingPilot = pick(reactingPilots);
+
+    // Guard : max 1 article de ce type par GP
+    const alreadyPosted = await NewsArticle.findOne({
+      seasonYear: season.year, type: 'rival_reaction', raceId: race._id,
+    }).lean();
+    if (alreadyPosted) return;
+
+    const isP1P2 = isDoublePodium;
+    const domPilots = allPilots.filter(p => String(p.teamId) === topTeamId);
+
+    const source   = pick(['paddock_whispers', 'pitlane_insider', 'pl_racing_news']);
+    const headline = isP1P2 ? pick([
+      `Doublé ${domTeam.emoji}${domTeam.name} — les rivaux réagissent`,
+      `${domTeam.name} écrase tout — le paddock se réveille`,
+      `Après le doublé ${domTeam.name} : "On doit se remettre en question"`,
+    ]) : pick([
+      `${domTeam.name} s'envole — la concurrence prise de court`,
+      `+${gap} pts en un GP : ${domTeam.name} inquiète ses rivaux`,
+      `Domination ${domTeam.emoji}${domTeam.name} — le paddock sort du silence`,
+    ]);
+
+    const p1Pilot = allPilots.find(p => String(p._id) === String(p1.pilotId));
+    const p2Pilot = isP1P2 ? allPilots.find(p => String(p._id) === String(p2.pilotId)) : null;
+
+    const body = (isP1P2
+      ? pick([
+          `${domTeam.emoji} **${domTeam.name}** a signé un doublé parfait au ${race.emoji} ${race.circuit}. P1 **${p1Pilot?.name || '?'}**, P2 **${p2Pilot?.name || '?'}** — la démonstration de force que tout le paddock craignait.
+
+${reactingTeam.emoji} **${reactingPilot.name}**, interrogé en zone mixte, ne cherche pas les faux-semblants : ${pick([`"Ils sont très forts en ce moment. On doit travailler."`, `"On savait qu'ils montaient en puissance. Le gap est réel."`, `"Respect pour leur performance. Maintenant on rentre à l'usine et on travaille."`, `"Ce doublé n'est pas une surprise. Ce qui nous dérange, c'est que nous on n'est pas là-haut avec eux."`])}
+
+${pick([`Les regards se tournent vers les prochaines courses. Quelqu'un peut-il stopper ${domTeam.name} ?`, `La réponse viendra sur la piste — mais il faudra faire vite.`])}`,
+          `Doublé. Le mot résonne dans le paddock comme un avertissement.
+
+${domTeam.emoji} **${domTeam.name}** a tout écrasé au ${race.emoji} ${race.circuit}. ${p1Pilot?.name || '?'} et ${p2Pilot?.name || '?'} ont transformé la course en promenade de santé — 1-2 au finish, voiture en mode croisière.
+
+${reactingTeam.emoji} **${reactingPilot.name}** ne mâche pas ses mots : ${pick([`"On a du boulot. Beaucoup de boulot."`, `"Chapeau à eux — mais cette saison est loin d'être terminée."`, `"On analyse, on comprend, on attaque. C'est tout ce qu'on peut faire."`])}
+
+*Le paddock retient son souffle. Qui va répondre ?*`,
+        ])
+      : pick([
+          `${domTeam.emoji} **${domTeam.name}** a creusé un écart significatif au ${race.emoji} ${race.circuit} — **+${gap} points** dans la bataille constructeurs sur ce seul GP.
+
+${reactingTeam.emoji} **${reactingPilot.name}** : ${pick([`"Les chiffres sont là. On ne peut pas les ignorer."`, `"C'est une journée difficile à analyser — mais ça ne changera pas notre approche."`, `"On savait que ${domTeam.name} était rapide. Ce résultat le confirme."`])}
+
+${pick([`La question n'est plus de savoir si ${domTeam.name} est la meilleure équipe du plateau — mais combien de temps les autres peuvent tenir ce rythme.`, `Le paddock repart avec une certitude : ${domTeam.name} est à surveiller.`])}`,
+        ])
+    );
+
+    const art = await NewsArticle.create({
+      type: 'rival_reaction', source, headline, body,
+      pilotIds: reactingPilots.map(p => p._id),
+      teamIds: [reactingTeam._id, domTeam._id],
+      seasonYear: season.year, raceId: race._id,
+      triggered: 'post_race', publishedAt: new Date(),
+    });
+    if (channel) { await sleep(3000); await publishNews(art, channel); }
+  } catch(e) { console.error('[rival_reaction] Erreur :', e.message); }
+}
+
 async function generatePostRaceNews(race, finalResults, season, channel) {
   const allPilots  = await Pilot.find({ teamId: { $ne: null } });
   const allTeams   = await Team.find();
@@ -7019,6 +7347,21 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   const constrSt    = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
   const constrRankMap = new Map(constrSt.map((s, i) => [String(s.teamId), i + 1]));
   const articlesToPost = [];
+
+  // ── BILAN MI-SAISON — GP 12/24 uniquement (50% de la saison) ───────────
+  const halfPoint = Math.floor(totalRaces / 2);
+  if (doneRaces === halfPoint) {
+    generateMidSeasonReport(race, finalResults, season, channel)
+      .catch(e => console.error('[generatePostRaceNews] mid_season error:', e.message));
+  }
+
+  // ── RECORDS ET MILESTONES ─────────────────────────────────────────────
+  generateMilestoneArticles(race, finalResults, season, allPilots, allTeams, standings, channel)
+    .catch(e => console.error('[generatePostRaceNews] milestone error:', e.message));
+
+  // ── RÉACTION DES RIVAUX APRÈS DOMINATION ─────────────────────────────
+  generateRivalReactionArticle(race, finalResults, season, allPilots, allTeams, constrSt, channel)
+    .catch(e => console.error('[generatePostRaceNews] rival_reaction error:', e.message));
 
   // ── 0. ARTICLE OUVERTURE DE SAISON — GP 1 ou 2 uniquement ─────────────
   // Un seul article de ce type par saison (vérifié via NewsArticle.findOne).
@@ -10188,9 +10531,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const bkey = [String(ahead.pilot._id), String(behind.pilot._id)].sort().join('_');
         if (gap < 2000) {
           const existing = battleMap.get(bkey) || { lapsClose: 0, lastPasser: null, lastPasserLap: -99 };
-          // Cap à 15 tours : au-delà, la bataille a trouvé son équilibre — on ne l'escalade plus
-          const newLapsClose = Math.min(15, existing.lapsClose + 1);
-          battleMap.set(bkey, { ...existing, lapsClose: newLapsClose });
+          battleMap.set(bkey, { ...existing, lapsClose: existing.lapsClose + 1 });
         } else {
           // Trop loin → reset
           battleMap.delete(bkey);
@@ -10593,12 +10934,8 @@ const exitNeighborStr = neighborAhead && neighborBehind
     }
 
     // ── Défenses sans changement de position ──────────────────
-    // Max 2 défenses rapportées par tour (évite le flood de messages de bataille)
-    let defenseReportedThisLap = 0;
-    const MAX_DEFENSES_PER_LAP = 2;
     if (!scActive && !justRestarted && lap > 2 && Math.random() < 0.35) {
       for (let i = 0; i < ranked.length - 1; i++) {
-        if (defenseReportedThisLap >= MAX_DEFENSES_PER_LAP) break;
         const ahead  = ranked[i];
         const behind = ranked[i + 1];
         if (ahead.pittedThisLap || behind.pittedThisLap) continue;
@@ -10613,9 +10950,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const battleRivalHeat = battleAreRivals
           ? Math.max(ahead.pilot.rivalHeat || 0, behind.pilot.rivalHeat || 0) : 0;
 
-        // Cooldown : ne rapporter ce duel que si pas déjà rapporté dans les 2 derniers tours
-        const lastReported = battle?.lastReportedLap || 0;
-        if (battle && battle.lapsClose >= 3 && gap < 1.2 && (lap - lastReported) >= 2) {
+        if (battle && battle.lapsClose >= 3 && gap < 1.2) {
           // ── Probabilité d'incident — boostée si les deux sont rivaux ──
           // Normal : 3T ~4%, 5T ~8%, 8T ~14%, 12T ~22%, 15T+ ~28%
           // Rivaux  : +5% flat + bonus heat (jusqu'à +10% si heat >= 60)
@@ -10671,11 +11006,10 @@ const exitNeighborStr = neighborAhead && neighborBehind
                   ];
                   const accDesc = pick(accidentTypes);
                   // Déterminer l'initiateur du contact (aggr = celui qui attaquait par derrière)
-                  // Si victim===aggr : l'attaquant s'est crashé lui-même en attaquant
-                  // Si victim!==aggr : l'attaquant a crashé l'autre pilote
+                  const fautif  = aggr; // toujours le pilote qui attaquait
                   const faultStr = victim === aggr
-                    ? `*${aggr.team.emoji}**${aggr.pilot.name}** perd le contrôle en attaquant — il paie cash son audace.*`
-                    : `*${aggr.team.emoji}**${aggr.pilot.name}** initiateur du contact — ${victim.team.emoji}**${victim.pilot.name}** est la victime.*`;
+                    ? `*${fautif.pilot.name} impliqué — il perd le contrôle en attaquant.*`
+                    : `*${fautif.team.emoji}**${fautif.pilot.name}** initiateur du contact — ${victim.team.emoji}**${victim.pilot.name}** paie les pots cassés.*`;
                   const crashTexts = battleAreRivals ? [
                     `***💥 T${lap} — CRASH ! LA RIVALITÉ VIENT DE TOUT EMPORTER !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) et ${other.team.emoji}**${other.pilot.name}** (P${opos}) — ${accDesc}. ***${victim.pilot.name} sort de la piste, voiture détruite. ABANDON.*** ${faultStr} La rivalité vient de coûter une course entière.`,
                     `🔴 ***T${lap} — RIVAL HORS COURSE !***\nAprès ${battle.lapsClose} tours de duel, ${victim.team.emoji}**${victim.pilot.name}** abandonne suite au contact avec ${other.team.emoji}**${other.pilot.name}**. ${accDesc}. ${faultStr} ${battleRivalHeat >= 50 ? `***Cette rivalité ne connaît plus de limite.***` : `*Le duel tourne à la catastrophe.*`}`,
@@ -10850,9 +11184,6 @@ const exitNeighborStr = neighborAhead && neighborBehind
             defText += wornNote;
           }
           events.push({ priority: 4, text: defText });
-          defenseReportedThisLap++;
-          // Cooldown : ne pas reporter ce même duel avant 2 tours
-          battleMap.set(bkey, { ...battle, lastReportedLap: lap });
           break;
         }
       }
@@ -10871,40 +11202,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
       }
     }
 
-    // ── Re-check SC après les batailles ─────────────────────
-    // Les crashes issus des duels sont ajoutés à lapIncidents APRÈS la première
-    // résolution SC — on re-résout ici pour ne pas les manquer.
-    if (scState.state === 'NONE') {
-      const newBattleCrashes = lapIncidents.filter(i => i.type === 'CRASH' && i.onTrack);
-      if (newBattleCrashes.length > 0) {
-        const prevScState2 = scState.state;
-        scState = resolveSafetyCar(scState, lapIncidents);
-        scActive = scState.state !== 'NONE';
-        // Annoncer le SC si déclenché par un crash de bataille
-        if (scState.state !== 'NONE' && prevScState2 === 'NONE') {
-          const aliveSC2 = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
-          if (aliveSC2.length > 1) {
-            const leaderTime2 = aliveSC2[0].totalTime;
-            if (scState.state === 'SC') {
-              for (let i = 1; i < aliveSC2.length; i++) aliveSC2[i].totalTime = leaderTime2 + i * 1500;
-            } else {
-              for (let i = 1; i < aliveSC2.length; i++) {
-                const gap2 = aliveSC2[i].totalTime - leaderTime2;
-                aliveSC2[i].totalTime = leaderTime2 + Math.round(gap2 * 0.3);
-              }
-            }
-            aliveSC2.forEach((d, i) => { d.pos = i + 1; d.lastPos = i + 1; });
-          }
-          const scIcon = scState.state === 'SC' ? '🚨 **SAFETY CAR !**' : '🟡 **VIRTUAL SAFETY CAR !**';
-          events.push({ priority: 9, gif: scState.state === 'SC' ? pickGif('safety_car') : pickGif('vsc'),
-            text: `${scIcon} Suite à l'accrochage — le peloton se regroupe.` });
-        }
-      }
-    }
-
     // ── Commentary obligatoire chaque tour ───────────────────
     // Toujours un message, même si rien ne se passe
-    const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justRestarted);
+   const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justRestarted);
     if (atmo) events.push({ priority: events.length === 0 ? 3 : 1, text: atmo });
 
     // ── Composition et envoi du message ─────────────────────
@@ -11955,6 +12255,21 @@ async function createNewSeason() {
     const deleted = await CommandCooldown.deleteMany({ usedAt: { $lt: cutoff } });
     console.log(`[createNewSeason] CommandCooldown purgé : ${deleted.deletedCount} entrée(s) supprimée(s).`);
   } catch(e) { console.error('[createNewSeason] Erreur purge CommandCooldown :', e.message); }
+
+  // ── Purge des vieux NewsArticle (> 2 saisons) ─────────────
+  // La collection grossit indéfiniment sinon — on garde 2 saisons d'historique
+  // pour les commandes /news et les références dans les articles.
+  try {
+    const oldSeasons = await Season.find({ status: 'finished' }).sort({ year: -1 }).lean();
+    if (oldSeasons.length > 2) {
+      const yearsToKeep = oldSeasons.slice(0, 2).map(s => s.year);
+      const purgeResult = await NewsArticle.deleteMany({
+        seasonYear: { $lt: Math.min(...yearsToKeep) },
+      });
+      if (purgeResult.deletedCount > 0)
+        console.log(`[createNewSeason] NewsArticle purgés : ${purgeResult.deletedCount} articles (> 2 saisons).`);
+    }
+  } catch(e) { console.error('[createNewSeason] Erreur purge NewsArticle :', e.message); }
 
   // ── Décroissance mémorielle des affinités inter-saisons ────
   // Les affinités NE SONT PAS effacées : un ennemi reste un ennemi.
