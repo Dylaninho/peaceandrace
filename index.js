@@ -5449,12 +5449,16 @@ function genFormCrisisArticle(pilot, team, dnfs, lastResults, seasonYear, dnfThi
     `${pilot.name} dans le dur — jusqu'où ?`,
     `Les résultats ne suivent pas pour ${pilot.name} — le paddock s'interroge`,
     `${team.emoji}${team.name} commence à s'interroger sur ${pilot.name}`,
-    `${dnfs} abandon${dnfs > 1 ? 's' : ''} en saison — ${pilot.name} peine à trouver la régularité`,
+    ...(dnfs > 0 ? [`${dnfs} abandon${dnfs > 1 ? 's' : ''} en saison — ${pilot.name} peine à trouver la régularité`] : [`Pas de régularité pour ${pilot.name} — les attentes ne sont pas remplies`]),
     ...(wasChamp ? [`Champion sortant, résultats décevants — ${pilot.name} sous pression dès les premiers GPs`] : []),
   ];
 
   const bodies = [
-    `${crisisCtx}${dnfs} abandons ${lastResults ? `et des résultats en dessous des attentes` : ''} — la série noire de ${pilot.name} commence à faire parler.\n\n` +
+    `${crisisCtx}` +
+    (dnfs > 0
+      ? `${dnfs} abandon${dnfs > 1 ? 's' : ''} cette saison${lastResults ? ` et des résultats en dessous des attentes` : ''} — la série noire de ${pilot.name} commence à faire parler.`
+      : `Les résultats ne suivent pas${lastResults ? ` — en dessous des attentes sur les derniers GPs` : ''} — ${pilot.name} traverse une mauvaise passe.`
+    ) + `\n\n` +
     pick([
       `En interne, on reste solidaire officiellement. Mais les questions existent.`,
       `"Tout le monde traverse des creux. La différence c'est comment tu en sors." Message reçu ?`,
@@ -17191,21 +17195,34 @@ async function handleInteraction(interaction) {
       const dnfsS     = seasonRecs.filter(r => r.dnf).length;
       const avgPos    = finished.length ? (finished.reduce((s, r) => s + r.finishPos, 0) / finished.length).toFixed(1) : '—';
 
-      const lines = seasonRecs.map(r => {
-        const fl  = r.fastestLap ? '⚡' : '  ';
-        const gl  = gainLoss(r);
-        const pts = r.points > 0 ? `+${r.points}pts` : '     ';
-        const grid = r.startPos ? `P${String(r.startPos).padStart(2)}→` : '    ';
-        return `${r.circuitEmoji} ${styleEmojis[r.gpStyle] || ''} \`${grid}${posStr(r).padEnd(5)}\` ${fl} ${pts} — ${r.teamEmoji}${r.teamName}${gl}`;
-      }).join('\n');
+
+
+      // Footer : récupérer le bon seasonId même hors saison active
+      const seasonForCount = activeSeason || await Season.findOne({ year: targetYear }).lean();
+      const totalRaceCount = await Race.countDocuments({ seasonId: seasonForCount?._id });
 
       embed
         .setTitle(`📅 Saison ${targetYear} — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
         .setDescription(
-          `${tier.badge} **${ov}** · **${totalPts} pts** · 🥇${wins}V · 🏆${podiums}P · ❌${dnfsS} DNF · moy. P${avgPos}\n\n` +
-          `\`\`\`\n${lines}\n\`\`\``
+          `${tier.badge} **${ov}** · **${totalPts} pts** · 🥇${wins}V · 🏆${podiums}P · ❌${dnfsS} DNF · moy. P${avgPos}`
         )
-        .setFooter({ text: `${seasonRecs.length}/${(await Race.countDocuments({ seasonId: activeSeason?._id }))} GPs joués — Saison ${targetYear}` });
+        .setFooter({ text: `${seasonRecs.length}/${totalRaceCount} GPs joués — Saison ${targetYear}` });
+
+      // Découper les lignes en chunks de 15 pour éviter la limite Discord (4096 / 1024 chars)
+      const lineArr = seasonRecs.map(r => {
+        const fl   = r.fastestLap ? '⚡' : '  ';
+        const gl   = gainLoss(r);
+        const pts2 = r.points > 0 ? `+${r.points}pts` : '     ';
+        const grid = r.startPos ? `P${String(r.startPos).padStart(2)}→` : '    ';
+        return `${r.circuitEmoji} ${styleEmojis[r.gpStyle] || ''} \`${grid}${posStr(r).padEnd(5)}\` ${fl} ${pts2} — ${r.teamEmoji}${r.teamName}${gl}`;
+      });
+      const CHUNK = 15;
+      for (let i = 0; i < lineArr.length; i += CHUNK) {
+        embed.addFields({
+          name: i === 0 ? '📋 Résultats' : '\u200b',
+          value: lineArr.slice(i, i + CHUNK).join('\n') || '—',
+        });
+      }
     }
 
     return interaction.editReply({ embeds: [embed] });
