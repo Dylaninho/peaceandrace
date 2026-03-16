@@ -9582,7 +9582,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const undercutTracker = new Map(); // pilotId → { pitLap, pilotAheadPos }
   const overcutTracker  = new Map(); // pilotId → { startLap, rivalId, myPosAtStart }
   const racePenalties   = []; // { pilotId, seconds, reason, lap } — pénalités cumulées
-  const pendingInvestigations = []; // { attackerId, victimId, lap } — décision post-GP
+  const pendingInvestigations = []; // { attackerId, victimId, lap, severity, resolveAtLap } — résolution en live
+  const resolvedInvestigations = []; // { attackerId, victimId, lap, penSec, absolved } — toutes décisions FIA rendues en live
+  const livePenaltySec  = new Map(); // pilotId → secondes de pénalité déjà annoncées en live (affichage classement)
   // ── Fil radio et fenêtres stratégiques ────────────────────
   const stratWindowFired = new Set(); // pilotId_stintIndex → max 1 alerte par stint
   const radioFiredLaps   = new Set(); // `${pilotId}_${lap}` → évite les doublons radio
@@ -11107,7 +11109,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
           const triggerInvestigation = roll < 0.35;
           if (roll < 0.5) {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), type: 'light' });
-            if (triggerInvestigation) pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light' });
+            if (triggerInvestigation) pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light', resolveAtLap: lap + 3 + Math.floor(Math.random() * 4) });
             const lightContactText = lightAreRivals ? pick([
               `⚔️ **T${lap} — CONTACT ENTRE RIVAUX !** ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}** — *encore eux.* Sous investigation FIA.${lightRivalHeat >= 40 ? ` Le paddock commence à s'inquiéter.` : ''}`,
               `⚠️ **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** touche ${victim.team.emoji}**${victim.pilot.name}** — les deux rivaux encore en contact. *La FIA surveille.*`,
@@ -11118,7 +11120,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
             events.push({ priority: lightAreRivals ? 7 : 5, text: lightContactText });
           } else {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), type: 'light' });
-            if (triggerInvestigation) pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light' });
+            if (triggerInvestigation) pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light', resolveAtLap: lap + 3 + Math.floor(Math.random() * 4) });
             const lightContact2Text = lightAreRivals ? pick([
               `⚔️ **T${lap}** — Contact discutable entre les rivaux ${attacker.team.emoji}**${attacker.pilot.name}** et ${victim.team.emoji}**${victim.pilot.name}**. *Enquête FIA — mais la rivalité, elle, ne s'arrête pas là.*`,
             ]) : pick([
@@ -11169,7 +11171,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
             if (incidentRoll < mediumInvThreshold) {
               // Contact → investigation post-course
               raceCollisions.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), type: 'light' });
-              pendingInvestigations.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), lap, severity: 'medium' });
+              pendingInvestigations.push({ attackerId: String(aggr.pilot._id), victimId: String(ahead.pilot._id), lap, severity: 'medium', resolveAtLap: lap + 3 + Math.floor(Math.random() * 4) });
               battleMap.delete(bkey);
               const contactFlavors = isTeamBattle ? [
                 `💢 **T${lap} — CONTACT INTERNE !** Après ${battle.lapsClose} tours de duel, ${aggr.team.emoji}**${aggr.pilot.name}** touche son coéquipier **${ahead.pilot.name}**. *Sous investigation FIA.*`,
@@ -11438,6 +11440,88 @@ const exitNeighborStr = neighborAhead && neighborBehind
       return `${td.emoji} ${warmup || td.code} \`${bar}\`${warn}`;
     };
 
+    // ── Résolution FIA en live ─────────────────────────────────
+    const liveInvToResolve = pendingInvestigations.filter(inv => !inv._resolved && inv.resolveAtLap <= lap);
+    for (const inv of liveInvToResolve) {
+      inv._resolved = true;
+      const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
+      const vic = drivers.find(d => String(d.pilot._id) === inv.victimId);
+      if (!atk || !vic) {
+        resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: 0, absolved: true });
+        continue;
+      }
+      const givePenalty = Math.random() < 0.55;
+      if (!givePenalty) {
+        resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: 0, absolved: true });
+        const absEmbed = new EmbedBuilder()
+          .setTitle('⚖️ Décision FIA — Incident T' + inv.lap)
+          .setColor('#1a5c1a')
+          .setDescription(
+            '✅ **Aucune sanction** — ' + atk.team.emoji + '**' + atk.pilot.name + '** / ' + vic.team.emoji + '**' + vic.pilot.name + '**\n' +
+            '*Incident de course — T' + inv.lap + '. Les commissaires ont conclu à un incident de course sans faute retenue.*'
+          )
+          .setFooter({ text: 'Décision officielle des commissaires — rendue T' + lap });
+        if (channel) try { await sendWithTimeout(() => channel.send({ embeds: [absEmbed] }), 'fiaLiveAbs'); } catch(e) {}
+      } else {
+        const severity = inv.severity || 'medium';
+        const penOptions = severity === 'light' ? [5, 5, 5] : [5, 5, 10];
+        const penSec = pick(penOptions);
+        const alreadyPen = atk.totalPenalties || 0;
+        const effectivePen = atk.dnf ? 0 : Math.min(penSec, Math.max(0, 10 - alreadyPen));
+        if (!atk.dnf && effectivePen > 0) {
+          // Pénalité annoncée en live mais appliquée au temps final (comme en F1 réelle)
+          // On stocke juste pour l'affichage dans le classement et le récap de fin
+          livePenaltySec.set(inv.attackerId, (livePenaltySec.get(inv.attackerId) || 0) + effectivePen);
+        }
+        resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: effectivePen, absolved: false });
+        const penEmbed = new EmbedBuilder()
+          .setTitle('⚖️ Décision FIA — Incident T' + inv.lap)
+          .setColor('#003580')
+          .setDescription(
+            (atk.dnf || effectivePen === 0)
+              ? '✅ Aucune sanction appliquée — ' + atk.team.emoji + '**' + atk.pilot.name + '** déjà hors course ou plafonné.'
+              : '⚖️ **+' + effectivePen + 's** — ' + atk.team.emoji + '**' + atk.pilot.name + '** | Contact T' + inv.lap + ' avec ' + vic.team.emoji + '**' + vic.pilot.name + '**\n' +
+                '*La pénalité sera ajoutée au temps final en fin de course. Elle est visible dans les prochains classements.*'
+          )
+          .setFooter({ text: 'Décision officielle des commissaires — rendue T' + lap });
+        // Réaction auto selon fiaCriticism
+        if (!atk.dnf && effectivePen > 0) {
+          const pilotFull = await Pilot.findById(atk.pilot._id).select('personality name').lean();
+          const crit = pilotFull?.personality?.fiaCriticism || 0;
+          const pArch = pilotFull?.personality?.archetype || 'guerrier';
+          const n = atk.pilot.name;
+          if (crit >= 30) {
+            const isBad = ['bad_boy', 'guerrier'].includes(pArch);
+            let reaction;
+            if (crit >= 70) {
+              reaction = pick([
+                '🎙️ *Radio ' + n + ' :* *\"Encore. Toujours les mêmes. J\'ai rien à ajouter.\"*',
+                '🎙️ *Radio ' + n + ' :* *\"La FIA peut prendre leurs secondes. Ma façon de piloter, non.\"*',
+              ]);
+            } else if (crit >= 45) {
+              reaction = pick([
+                '🎙️ *Radio ' + n + ' :* *\"J\'attends toujours une explication cohérente.\"*',
+                '🎙️ *Radio ' + n + ' :* *\"' + (isBad ? 'Sérieusement ?' : 'Je ne comprends pas cette décision.') + '\"*',
+              ]);
+            } else {
+              reaction = pick([
+                '🎙️ *Radio ' + n + ' :* *\"' + (isBad ? 'La décision me choque.' : 'Je suis déçu de cette sentence.') + '\"*',
+                '🎙️ *Radio ' + n + ' :* *\"Je m\'y attendais — ça ne veut pas dire que j\'y adhère.\"*',
+              ]);
+            }
+            penEmbed.addFields({ name: '🎙️ Réaction paddock', value: reaction });
+          }
+        }
+        if (channel) try { await sendWithTimeout(() => channel.send({ embeds: [penEmbed] }), 'fiaLivePen'); } catch(e) {}
+      }
+    }
+
+    // Helper : badge pénalité live dans le classement
+    const penTag = (d) => {
+      const pen = livePenaltySec.get(String(d.pilot._id)) || 0;
+      return pen > 0 ? ' ⚖️+' + pen + 's' : '';
+    };
+
     let standingsText = '';
     if (showFullStandings) {
       const dnfLines = drivers.filter(d => d.dnf);
@@ -11445,7 +11529,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
         ranked.map((d, i) => {
           const gapMs  = i === 0 ? null : d.totalTime - ranked[0].totalTime;
           const gapStr = i === 0 ? '⏱ **LEADER**' : `${fmtGap(gapMs)} / leader`;
-          return `\`P${String(i+1).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${tireWearLabel(d)} (${d.pitStops} arr.)`;
+          return `\`P${String(i+1).padStart(2,' ')}\` ${d.team.emoji} **${d.pilot.name}**${penTag(d)} — ${gapStr} ${tireWearLabel(d)} (${d.pitStops} arr.)`;
         }).join('\n') +
         (dnfLines.length ? '\n' + dnfLines.map(d => `~~${d.team.emoji}${d.pilot.name}~~ ❌ T${d.dnfLap}`).join(' · ') : '');
     } else if (showTop5) {
@@ -11453,10 +11537,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
         ranked.slice(0, 5).map((d, i) => {
           const gapMs  = i === 0 ? null : d.totalTime - ranked[0].totalTime;
           const gapStr = i === 0 ? 'LEADER' : `${fmtGap(gapMs)} / leader`;
-          return `**P${i+1}** ${d.team.emoji} **${d.pilot.name}** — ${gapStr} ${tireWearLabel(d)}`;
+          return `**P${i+1}** ${d.team.emoji} **${d.pilot.name}**${penTag(d)} — ${gapStr} ${tireWearLabel(d)}`;
         }).join('\n');
     }
-
     // GIF d'abord — apparaît avant le commentaire pour éviter le décalage
     if (topGif && channel) {
       try { await sendWithTimeout(() => channel.send(topGif), 'topGif'); } catch(e) { console.error('[simulateRace] topGif error:', e.message); }
@@ -11473,145 +11556,93 @@ const exitNeighborStr = neighborAhead && neighborBehind
   global.activeRaces?.delete(raceKey);
   if (raceAborted) return { results: [], collisions: [], penalties: [] };
 
-  // ── Résolution des investigations post-course ─────────────
-  // Pour chaque contact "sous investigation", décider maintenant si pénalité
-  const postRacePenaltyMsgs = [];
-  // Snapshot des positions AVANT pénalités pour détecter les changements
-  const posBefore = new Map(drivers.filter(d => !d.dnf).map(d => [String(d.pilot._id), d.pos]));
-
-  // Dédupliquer : max 1 investigation jugée par attaquant (la plus grave = dernier contact)
-  const dedupInvestigations = [];
-  const seenAttackers = new Set();
-  for (const inv of [...pendingInvestigations].reverse()) {
-    if (!seenAttackers.has(inv.attackerId)) {
-      dedupInvestigations.push(inv);
-      seenAttackers.add(inv.attackerId);
-    }
-  }
-
-  for (const inv of dedupInvestigations) {
-    if (Math.random() < 0.55) { // 55% de chance de pénalité post-course
-      // Proportionnel à la sévérité : contact léger = 5s max (souvent 0), battle = 5-10s
-      const severity = inv.severity || 'medium';
-      const penOptions = severity === 'light'
-        ? [0, 5, 5, 5]           // 25% absous, 75% → 5s seulement
-        : [5, 5, 10];            // battle contact : 5 ou 10s (10s seulement si grave)
-      const penSec = pick(penOptions);
-      if (penSec === 0) {
-        // Absous explicitement
-        const atk2 = drivers.find(d => String(d.pilot._id) === inv.attackerId);
-        const vic2 = drivers.find(d => String(d.pilot._id) === inv.victimId);
-        if (atk2 && vic2) postRacePenaltyMsgs.push(
-          `✅ *Absous* — Contact T${inv.lap} ${atk2.team.emoji}**${atk2.pilot.name}** / ${vic2.team.emoji}**${vic2.pilot.name}** → *Incident de course*`
-        );
-        continue;
-      }
-      const penMs  = penSec * 1000;
-      const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
-      const vic = drivers.find(d => String(d.pilot._id) === inv.victimId);
-      if (atk && !atk.dnf) {
-        // Cap total pénalités à 10s par pilote sur toute la course
-        const alreadyPenalised = atk.totalPenalties || 0;
-        if (alreadyPenalised >= 10) {
-          if (vic) postRacePenaltyMsgs.push(
-            `✅ *Aucune sanction supplémentaire* — ${atk.team.emoji}**${atk.pilot.name}** déjà pénalisé ce GP.`
-          );
-          continue;
-        }
-        const effectivePen = Math.min(penSec, 10 - alreadyPenalised);
-        atk.totalTime += effectivePen * 1000;
-        atk.totalPenalties = alreadyPenalised + effectivePen;
-        racePenalties.push({ pilotId: inv.attackerId, seconds: effectivePen, reason: 'investigation_post', lap: inv.lap });
-        if (vic) postRacePenaltyMsgs.push(
-          `⚖️ **+${effectivePen}s** → ${atk.team.emoji}**${atk.pilot.name}** | Contact T${inv.lap} avec ${vic.team.emoji}**${vic.pilot.name}**`
-        );
-      }
+  // ── Résolution late : investigations dont resolveAtLap > totalLaps ────
+  const lateInvestigations = pendingInvestigations.filter(inv => !inv._resolved);
+  for (const inv of lateInvestigations) {
+    inv._resolved = true;
+    const atkL = drivers.find(d => String(d.pilot._id) === inv.attackerId);
+    const vicL = drivers.find(d => String(d.pilot._id) === inv.victimId);
+    if (!atkL || !vicL) { resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: 0, absolved: true }); continue; }
+    const givePenLate = Math.random() < 0.55;
+    if (!givePenLate) {
+      resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: 0, absolved: true });
     } else {
-      const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
-      const vic = drivers.find(d => String(d.pilot._id) === inv.victimId);
-      if (atk && vic) postRacePenaltyMsgs.push(
-        `✅ *Aucune sanction* — Contact T${inv.lap} ${atk.team.emoji}**${atk.pilot.name}** / ${vic.team.emoji}**${vic.pilot.name}** → *Incident de course*`
-      );
+      const penOptL = inv.severity === 'light' ? [5, 5, 5] : [5, 5, 10];
+      const penSecL = pick(penOptL);
+      const alreadyL = atkL.totalPenalties || 0;
+      const effectiveL = atkL.dnf ? 0 : Math.min(penSecL, Math.max(0, 10 - alreadyL));
+      if (!atkL.dnf && effectiveL > 0) {
+        livePenaltySec.set(inv.attackerId, (livePenaltySec.get(inv.attackerId) || 0) + effectiveL);
+      }
+      resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: effectiveL, absolved: false });
     }
   }
 
-  // Recalcul positions après pénalités post-course
-  if (pendingInvestigations.length > 0) {
-    drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
+  // ── Application finale de TOUTES les pénalités FIA décidées (live + late) ──
+  // Les décisions sont rendues en live mais appliquées au temps final, comme en F1 réelle
+  const posBefore = new Map(drivers.filter(d => !d.dnf).map(d => [String(d.pilot._id), d.pos]));
+  for (const res of resolvedInvestigations) {
+    if (res.absolved || res.penSec === 0) continue;
+    const atk = drivers.find(d => String(d.pilot._id) === res.attackerId);
+    if (!atk || atk.dnf) continue;
+    const alreadyApplied = atk.totalPenalties || 0;
+    const toApply = Math.min(res.penSec, Math.max(0, 10 - alreadyApplied));
+    if (toApply > 0) {
+      atk.totalTime += toApply * 1000;
+      atk.totalPenalties = alreadyApplied + toApply;
+      racePenalties.push({ pilotId: res.attackerId, seconds: toApply, reason: 'investigation_live', lap: res.lap });
+    }
+  }
+  if (resolvedInvestigations.some(r => !r.absolved && r.penSec > 0)) {
+    drivers.filter(d => !d.dnf).sort((a, b) => a.totalTime - b.totalTime).forEach((d, i) => d.pos = i + 1);
   }
 
-  // Annoncer les décisions FIA + changements de classement
-  if (postRacePenaltyMsgs.length && channel) {
-    // Avertissement : classement provisoire en attente des décisions
-    await channel.send(`⏳ **CLASSEMENT PROVISOIRE** — Les commissaires FIA examinent ${dedupInvestigations.length} incident(s). Décision dans quelques instants…`);
-    await sleep(5000);
+  // ── Récap FIA fin de GP — bilan de toutes les décisions rendues en course ────
+  if (resolvedInvestigations.length > 0 && channel) {
+    await sleep(4000);
 
-    // Détecter les pilotes dont la position a changé
+    // Changements de position dus aux pénalités
     const posChanges = [];
     for (const d of drivers.filter(dr => !dr.dnf)) {
       const before = posBefore.get(String(d.pilot._id));
-      const after  = d.pos;
-      if (before !== undefined && before !== after) {
-        posChanges.push({ pilot: d.pilot, team: d.team, before, after });
-      }
+      if (before !== undefined && before !== d.pos)
+        posChanges.push({ pilot: d.pilot, team: d.team, before, after: d.pos });
     }
     posChanges.sort((a, b) => a.after - b.after);
 
-    const fiaEmbed = new EmbedBuilder()
-      .setTitle('📋 DÉCISIONS FIA — Classement DÉFINITIF')
+    const recapLines = resolvedInvestigations.map(res => {
+      const a2 = drivers.find(d => String(d.pilot._id) === res.attackerId);
+      const v2 = drivers.find(d => String(d.pilot._id) === res.victimId);
+      const aN = a2 ? (a2.team.emoji + '**' + a2.pilot.name + '**') : '**?**';
+      const vN = v2 ? (v2.team.emoji + '**' + v2.pilot.name + '**') : '**?**';
+      if (res.absolved || res.penSec === 0)
+        return '✅ *Incident de course* — ' + aN + ' / ' + vN + ' *(T' + res.lap + ')* — Aucune sanction';
+      return '⚖️ **+' + res.penSec + 's** — ' + aN + ' | Contact T' + res.lap + ' avec ' + vN;
+    });
+    const lateWithPen = lateInvestigations.filter(inv => !inv.absolved && inv.penSec > 0);
+    const fiaRecapEmbed = new EmbedBuilder()
+      .setTitle('📋 BILAN FIA — Toutes les décisions du GP')
       .setColor('#003580')
       .setDescription(
-        '*Les commissaires ont rendu leurs décisions. Le classement ci-dessous est définitif.*\n\u200B\n' +
-        postRacePenaltyMsgs.join('\n')
+        '*Récapitulatif officiel. Les décisions ont été rendues en cours de course.*\n\u200B\n' +
+        recapLines.join('\n')
       );
-
     if (posChanges.length > 0) {
       const changeLines = posChanges.map(c => {
         const arrow = c.after < c.before ? `P${c.before} → **P${c.after}** ⬆️` : `P${c.before} → **P${c.after}** ⬇️`;
         return `${c.team.emoji} **${c.pilot.name}** — ${arrow}`;
       }).join('\n');
-      fiaEmbed.addFields({ name: '🔄 Classement modifié', value: changeLines });
+      fiaRecapEmbed.addFields({ name: '🔄 Classement modifié', value: changeLines });
     }
-
-    // ── Réactions auto des pilotes pénalisés selon fiaCriticism ──────────────
-    const fiaAutoReactions = [];
-    for (const inv of dedupInvestigations) {
-      const hasPenalty = postRacePenaltyMsgs.some(m => m.startsWith('⚖️') && m.includes(inv.attackerId));
-      const atk = drivers.find(d => String(d.pilot._id) === inv.attackerId);
-      if (!atk || atk.dnf) continue;
-      const pilotFull = await Pilot.findById(atk.pilot._id).select('personality name').lean();
-      const crit = pilotFull?.personality?.fiaCriticism || 0;
-      const pArch = pilotFull?.personality?.archetype || 'guerrier';
-      if (crit < 30) continue;
-      const isBad = ['bad_boy', 'guerrier'].includes(pArch);
-      const n = atk.pilot.name;
-      let reaction;
-      if (crit >= 70) {
-        reaction = pick([
-          '🎙 *Radio ' + n + ' :* *"Encore. Toujours les mêmes. J\'ai rien à ajouter."*',
-          '🎙 *Radio ' + n + ' :* *"La FIA peut prendre leurs secondes. Ma façon de piloter, non."*',
-          '🎙 *Radio ' + n + ' :* *"On en reparle. En conférence. Devant tout le monde."*',
-        ]);
-      } else if (crit >= 45) {
-        reaction = pick([
-          '🎙 *Radio ' + n + ' :* *"J\'attends toujours une explication cohérente."*',
-          '🎙 *Radio ' + n + ' :* *"' + (isBad ? 'Sérieusement ?' : 'Je ne comprends pas cette décision.') + '"*',
-          '🎙 *Radio ' + n + ' :* *"On va regarder les images ensemble. Tranquillement."*',
-        ]);
-      } else {
-        reaction = pick([
-          '🎙 *Radio ' + n + ' :* *"' + (isBad ? 'La décision me choque.' : 'Je suis déçu de cette sentence.') + '"*',
-          '🎙 *Radio ' + n + ' :* *"Je m\'y attendais — ça ne veut pas dire que j\'y adhère."*',
-        ]);
-      }
-      fiaAutoReactions.push(reaction);
+    if (lateWithPen.length > 0) {
+      const lateLines = lateWithPen.map(inv => {
+        const a2 = drivers.find(d => String(d.pilot._id) === inv.attackerId);
+        return a2 ? (a2.team.emoji + ' **' + a2.pilot.name + '** — +' + inv.penSec + 's — décision rendue après la course') : null;
+      }).filter(Boolean);
+      if (lateLines.length) fiaRecapEmbed.addFields({ name: '🕐 Décisions post-course', value: lateLines.join('\n') });
     }
-    if (fiaAutoReactions.length > 0) {
-      fiaEmbed.addFields({ name: '🎙 Réactions paddock', value: fiaAutoReactions.join('\n') });
-    }
-
-    fiaEmbed.setFooter({ text: 'Décision officielle des commissaires de course — sans appel' });
-    if (channel) try { await channel.send({ embeds: [fiaEmbed] }); await sleep(9000); } catch(e) {}
+    fiaRecapEmbed.setFooter({ text: resolvedInvestigations.length + ' incident(s) traité(s) — classement définitif' });
+    if (channel) try { await channel.send({ embeds: [fiaRecapEmbed] }); await sleep(6000); } catch(e) {}
   }
 
   // ══════════════════════════════════════════════════════════
@@ -17010,15 +17041,6 @@ async function handleInteraction(interaction) {
     // ── VUE RÉCENTS ──────────────────────────────────────────
     if (vue === 'recent') {
       const recents = allRecs.slice(0, 10);
-      const lines = recents.map(r => {
-        const fl   = r.fastestLap ? ' ⚡' : '';
-        const dotd = r.driverOfTheDay ? ' 🌟' : '';
-        const gl   = gainLoss(r);
-        const pts  = r.points > 0 ? ` · **${r.points}pts**` : '';
-        const grid = r.startPos ? ` *(grille P${r.startPos})*` : '';
-        return `${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})*\n` +
-               `  ${posStr(r)}${gl}${pts}${fl}${dotd} — ${r.teamEmoji} ${r.teamName}${grid}`;
-      }).join('\n\n');
 
       // Forme récente : 5 derniers
       const last5 = allRecs.slice(0, 5);
@@ -17034,10 +17056,24 @@ async function handleInteraction(interaction) {
         .setTitle(`🕐 Performances récentes — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
         .setDescription(
           `${tier.badge} **${ov}** — ${team ? `${team.emoji} ${team.name}` : '*Sans écurie*'}\n` +
-          `Forme : ${formStr} *(5 derniers GPs)*\n\n` +
-          lines
+          `Forme : ${formStr} *(5 derniers GPs)*`
         )
         .setFooter({ text: `${allRecs.length} GP(s) au total · Vue Récents` });
+
+      // Découper en fields pour éviter la limite 4096 chars de la description
+      const CHUNK_R = 5;
+      for (let i = 0; i < recents.length; i += CHUNK_R) {
+        const chunkLines = recents.slice(i, i + CHUNK_R).map(r => {
+          const fl   = r.fastestLap ? ' ⚡' : '';
+          const dotd = r.driverOfTheDay ? ' 🌟' : '';
+          const gl   = gainLoss(r);
+          const pts  = r.points > 0 ? ` · **${r.points}pts**` : '';
+          const grid = r.startPos ? ` *(grille P${r.startPos})*` : '';
+          return `${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})*\n` +
+                 `  ${posStr(r)}${gl}${pts}${fl}${dotd} — ${r.teamEmoji} ${r.teamName}${grid}`;
+        }).join('\n\n');
+        embed.addFields({ name: i === 0 ? '📋 Résultats' : '\u200b', value: chunkLines });
+      }
 
     // ── VUE RECORDS ──────────────────────────────────────────
     } else if (vue === 'records') {
