@@ -350,8 +350,9 @@ const PilotGPRecordSchema = new mongoose.Schema({
   driverOfTheDay: { type: Boolean, default: false },
   isPole       : { type: Boolean, default: false },   // ← P1 qualifications
   raceDate     : { type: Date, default: Date.now },
+  raceIndex    : { type: Number, default: 0 },   // index de la course dans la saison (0-based)
 });
-PilotGPRecordSchema.index({ pilotId: 1, raceDate: -1 });
+PilotGPRecordSchema.index({ pilotId: 1, seasonYear: -1, raceIndex: -1 });
 const PilotGPRecord = mongoose.model('PilotGPRecord', PilotGPRecordSchema);
 
 // ── CircuitRecord — Meilleur temps par circuit (toutes saisons) ──
@@ -7992,7 +7993,7 @@ ${isUnder ? `Avec ${t.emoji}${t.name}, ce n'était pas la voiture la plus rapide
 
     // Récupérer les 4 derniers GPRecords pour analyser la forme
     const recentGPs = await PilotGPRecord.find({ pilotId: pilot._id })
-      .sort({ raceDate: -1 }).limit(4).lean();
+      .sort({ seasonYear: -1, raceIndex: -1 }).limit(4).lean();
     if (recentGPs.length < 2) continue;
 
     const last3DNFs     = recentGPs.slice(0, 3).filter(r => r.dnf).length;
@@ -9055,7 +9056,7 @@ async function buildArticleData(type, allPilots, allTeams, teamMap, season, spPh
     let recentWin = false;
     try {
       const lastRec = await PilotGPRecord.findOne({ pilotId: pilot._id })
-        .sort({ raceDate: -1 }).lean();
+        .sort({ seasonYear: -1, raceIndex: -1 }).lean();
       const fiveDaysAgo = Date.now() - 5 * 24 * 60 * 60 * 1000;
       const isRecent = lastRec?.raceDate && new Date(lastRec.raceDate).getTime() > fiveDaysAgo;
       recentWin = isRecent && !lastRec.dnf && lastRec.finishPos === 1;
@@ -11469,9 +11470,12 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const alreadyPen = atk.totalPenalties || 0;
         const effectivePen = atk.dnf ? 0 : Math.min(penSec, Math.max(0, 10 - alreadyPen));
         if (!atk.dnf && effectivePen > 0) {
-          // Pénalité annoncée en live mais appliquée au temps final (comme en F1 réelle)
-          // On stocke juste pour l'affichage dans le classement et le récap de fin
+          atk.totalTime += effectivePen * 1000;
+          atk.totalPenalties = alreadyPen + effectivePen;
           livePenaltySec.set(inv.attackerId, (livePenaltySec.get(inv.attackerId) || 0) + effectivePen);
+          racePenalties.push({ pilotId: inv.attackerId, seconds: effectivePen, reason: 'investigation_live', lap: inv.lap });
+          // Recalcul positions immédiat
+          drivers.filter(d => !d.dnf).sort((a, b) => a.totalTime - b.totalTime).forEach((d, i) => d.pos = i + 1);
         }
         resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: effectivePen, absolved: false });
         const penEmbed = new EmbedBuilder()
@@ -11481,7 +11485,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
             (atk.dnf || effectivePen === 0)
               ? '✅ Aucune sanction appliquée — ' + atk.team.emoji + '**' + atk.pilot.name + '** déjà hors course ou plafonné.'
               : '⚖️ **+' + effectivePen + 's** — ' + atk.team.emoji + '**' + atk.pilot.name + '** | Contact T' + inv.lap + ' avec ' + vic.team.emoji + '**' + vic.pilot.name + '**\n' +
-                '*La pénalité sera ajoutée au temps final en fin de course. Elle est visible dans les prochains classements.*'
+                '*Pénalité appliquée au temps total — visible dans le classement final. Les prochains classements indiqueront +' + effectivePen + 's.*'
           )
           .setFooter({ text: 'Décision officielle des commissaires — rendue T' + lap });
         // Réaction auto selon fiaCriticism
@@ -11572,44 +11576,21 @@ const exitNeighborStr = neighborAhead && neighborBehind
       const alreadyL = atkL.totalPenalties || 0;
       const effectiveL = atkL.dnf ? 0 : Math.min(penSecL, Math.max(0, 10 - alreadyL));
       if (!atkL.dnf && effectiveL > 0) {
+        atkL.totalTime += effectiveL * 1000;
+        atkL.totalPenalties = alreadyL + effectiveL;
         livePenaltySec.set(inv.attackerId, (livePenaltySec.get(inv.attackerId) || 0) + effectiveL);
+        racePenalties.push({ pilotId: inv.attackerId, seconds: effectiveL, reason: 'investigation_live', lap: inv.lap });
       }
       resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: effectiveL, absolved: false });
     }
   }
-
-  // ── Application finale de TOUTES les pénalités FIA décidées (live + late) ──
-  // Les décisions sont rendues en live mais appliquées au temps final, comme en F1 réelle
-  const posBefore = new Map(drivers.filter(d => !d.dnf).map(d => [String(d.pilot._id), d.pos]));
-  for (const res of resolvedInvestigations) {
-    if (res.absolved || res.penSec === 0) continue;
-    const atk = drivers.find(d => String(d.pilot._id) === res.attackerId);
-    if (!atk || atk.dnf) continue;
-    const alreadyApplied = atk.totalPenalties || 0;
-    const toApply = Math.min(res.penSec, Math.max(0, 10 - alreadyApplied));
-    if (toApply > 0) {
-      atk.totalTime += toApply * 1000;
-      atk.totalPenalties = alreadyApplied + toApply;
-      racePenalties.push({ pilotId: res.attackerId, seconds: toApply, reason: 'investigation_live', lap: res.lap });
-    }
-  }
-  if (resolvedInvestigations.some(r => !r.absolved && r.penSec > 0)) {
+  if (lateInvestigations.length > 0) {
     drivers.filter(d => !d.dnf).sort((a, b) => a.totalTime - b.totalTime).forEach((d, i) => d.pos = i + 1);
   }
 
   // ── Récap FIA fin de GP — bilan de toutes les décisions rendues en course ────
   if (resolvedInvestigations.length > 0 && channel) {
     await sleep(4000);
-
-    // Changements de position dus aux pénalités
-    const posChanges = [];
-    for (const d of drivers.filter(dr => !dr.dnf)) {
-      const before = posBefore.get(String(d.pilot._id));
-      if (before !== undefined && before !== d.pos)
-        posChanges.push({ pilot: d.pilot, team: d.team, before, after: d.pos });
-    }
-    posChanges.sort((a, b) => a.after - b.after);
-
     const recapLines = resolvedInvestigations.map(res => {
       const a2 = drivers.find(d => String(d.pilot._id) === res.attackerId);
       const v2 = drivers.find(d => String(d.pilot._id) === res.victimId);
@@ -11627,19 +11608,12 @@ const exitNeighborStr = neighborAhead && neighborBehind
         '*Récapitulatif officiel. Les décisions ont été rendues en cours de course.*\n\u200B\n' +
         recapLines.join('\n')
       );
-    if (posChanges.length > 0) {
-      const changeLines = posChanges.map(c => {
-        const arrow = c.after < c.before ? `P${c.before} → **P${c.after}** ⬆️` : `P${c.before} → **P${c.after}** ⬇️`;
-        return `${c.team.emoji} **${c.pilot.name}** — ${arrow}`;
-      }).join('\n');
-      fiaRecapEmbed.addFields({ name: '🔄 Classement modifié', value: changeLines });
-    }
     if (lateWithPen.length > 0) {
       const lateLines = lateWithPen.map(inv => {
         const a2 = drivers.find(d => String(d.pilot._id) === inv.attackerId);
-        return a2 ? (a2.team.emoji + ' **' + a2.pilot.name + '** — +' + inv.penSec + 's — décision rendue après la course') : null;
+        return a2 ? (a2.team.emoji + ' **' + a2.pilot.name + '** — +' + inv.penSec + 's appliquées après la course — position recalculée') : null;
       }).filter(Boolean);
-      if (lateLines.length) fiaRecapEmbed.addFields({ name: '🕐 Décisions post-course', value: lateLines.join('\n') });
+      if (lateLines.length) fiaRecapEmbed.addFields({ name: '🔄 Ajustements de dernière minute', value: lateLines.join('\n') });
     }
     fiaRecapEmbed.setFooter({ text: resolvedInvestigations.length + ' incident(s) traité(s) — classement définitif' });
     if (channel) try { await channel.send({ embeds: [fiaRecapEmbed] }); await sleep(6000); } catch(e) {}
@@ -12197,6 +12171,7 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
         coins        : r.coins,
         fastestLap   : r.fastestLap || false,
         raceDate     : raceDoc.scheduledDate || new Date(),
+        raceIndex    : raceDoc.index ?? 0,
       };
       // Upsert pour éviter les doublons en cas de re-application (admin_apply_last_race)
       await PilotGPRecord.findOneAndUpdate(
@@ -12238,7 +12213,7 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
   for (const r of raceResults) {
     try {
       const last3 = await PilotGPRecord.find({ pilotId: r.pilotId })
-        .sort({ raceDate: -1 }).limit(3).lean();
+        .sort({ seasonYear: -1, raceIndex: -1 }).limit(3).lean();
       if (!last3.length) continue;
       const scores = last3.map(rec => {
         if (rec.dnf)             return -0.7;
@@ -15264,7 +15239,7 @@ async function handleInteraction(interaction) {
 
     // ── Aperçu rapide des performances (GPRecord) ────────────
     // Exclure les records créés par la pole (finishPos=0) sans course associée — évite le +1 GP parasite
-    const gpRecs = await PilotGPRecord.find({ pilotId: pilot._id, finishPos: { $gt: 0 } }).sort({ raceDate: -1 });
+    const gpRecs = await PilotGPRecord.find({ pilotId: pilot._id, finishPos: { $gt: 0 } }).sort({ seasonYear: -1, raceIndex: -1 });
     if (gpRecs.length) {
       const totalGPs   = gpRecs.length;
       const finished   = gpRecs.filter(r => !r.dnf);
@@ -17003,7 +16978,7 @@ async function handleInteraction(interaction) {
     }
 
     const team    = pilot.teamId ? await Team.findById(pilot.teamId) : null;
-    const allRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ raceDate: -1 });
+    const allRecs = await PilotGPRecord.find({ pilotId: pilot._id }).sort({ seasonYear: -1, raceIndex: -1 });
 
     if (!allRecs.length) {
       return interaction.editReply({
@@ -17041,6 +17016,15 @@ async function handleInteraction(interaction) {
     // ── VUE RÉCENTS ──────────────────────────────────────────
     if (vue === 'recent') {
       const recents = allRecs.slice(0, 10);
+      const lines = recents.map(r => {
+        const fl   = r.fastestLap ? ' ⚡' : '';
+        const dotd = r.driverOfTheDay ? ' 🌟' : '';
+        const gl   = gainLoss(r);
+        const pts  = r.points > 0 ? ` · **${r.points}pts**` : '';
+        const grid = r.startPos ? ` *(grille P${r.startPos})*` : '';
+        return `${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})*\n` +
+               `  ${posStr(r)}${gl}${pts}${fl}${dotd} — ${r.teamEmoji} ${r.teamName}${grid}`;
+      }).join('\n\n');
 
       // Forme récente : 5 derniers
       const last5 = allRecs.slice(0, 5);
@@ -17056,24 +17040,10 @@ async function handleInteraction(interaction) {
         .setTitle(`🕐 Performances récentes — ${pilot.name} (Pilote ${pilot.pilotIndex})`)
         .setDescription(
           `${tier.badge} **${ov}** — ${team ? `${team.emoji} ${team.name}` : '*Sans écurie*'}\n` +
-          `Forme : ${formStr} *(5 derniers GPs)*`
+          `Forme : ${formStr} *(5 derniers GPs)*\n\n` +
+          lines
         )
         .setFooter({ text: `${allRecs.length} GP(s) au total · Vue Récents` });
-
-      // Découper en fields pour éviter la limite 4096 chars de la description
-      const CHUNK_R = 5;
-      for (let i = 0; i < recents.length; i += CHUNK_R) {
-        const chunkLines = recents.slice(i, i + CHUNK_R).map(r => {
-          const fl   = r.fastestLap ? ' ⚡' : '';
-          const dotd = r.driverOfTheDay ? ' 🌟' : '';
-          const gl   = gainLoss(r);
-          const pts  = r.points > 0 ? ` · **${r.points}pts**` : '';
-          const grid = r.startPos ? ` *(grille P${r.startPos})*` : '';
-          return `${r.circuitEmoji} **${r.circuit}** *(S${r.seasonYear})*\n` +
-                 `  ${posStr(r)}${gl}${pts}${fl}${dotd} — ${r.teamEmoji} ${r.teamName}${grid}`;
-        }).join('\n\n');
-        embed.addFields({ name: i === 0 ? '📋 Résultats' : '\u200b', value: chunkLines });
-      }
 
     // ── VUE RECORDS ──────────────────────────────────────────
     } else if (vue === 'records') {
@@ -17091,7 +17061,7 @@ async function handleInteraction(interaction) {
 
       // ── Meilleure série de finitions dans les points ──────
       let bestStreak = 0, curStreak = 0;
-      for (const r of [...allRecs].sort((a, b) => new Date(a.raceDate) - new Date(b.raceDate))) {
+      for (const r of [...allRecs].sort((a, b) => (a.seasonYear !== b.seasonYear ? a.seasonYear - b.seasonYear : (a.raceIndex ?? 0) - (b.raceIndex ?? 0)))) {
         if (!r.dnf && r.finishPos <= 10) { curStreak++; bestStreak = Math.max(bestStreak, curStreak); }
         else curStreak = 0;
       }
@@ -17218,7 +17188,7 @@ async function handleInteraction(interaction) {
       // Trouver la saison active ou la plus récente
       const activeSeason = await getActiveSeason();
       const targetYear   = activeSeason?.year || (allRecs[0]?.seasonYear);
-      const seasonRecs   = allRecs.filter(r => r.seasonYear === targetYear).sort((a, b) => new Date(a.raceDate) - new Date(b.raceDate));
+      const seasonRecs   = allRecs.filter(r => r.seasonYear === targetYear).sort((a, b) => (a.seasonYear !== b.seasonYear ? a.seasonYear - b.seasonYear : (a.raceIndex ?? 0) - (b.raceIndex ?? 0)));
 
       if (!seasonRecs.length) {
         return interaction.editReply({ content: `❌ Aucune course jouée en saison ${targetYear}.`, ephemeral: true });
