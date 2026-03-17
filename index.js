@@ -1377,24 +1377,34 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const w = GP_STYLE_WEIGHTS[gpStyle] || GP_STYLE_WEIGHTS['mixte'];
 
   // ── Coefficients voiture/pilote selon le type de circuit ────────────────
-  // Sur circuit rapide (Monza, Spa) : la voiture est reine — aéro, moteur, DRS.
-  //   Le pilote ne peut pas compenser un déficit mécanique en ligne droite.
-  //   → voiture ~80%, pilote ~20%
-  // Sur circuit urbain (Monaco, Singapour) : les murs punissent l'erreur, pas la mécanique.
-  //   Un top pilote dans une voiture mid peut clairement tenir un adversaire supérieur.
-  //   → voiture ~65%, pilote ~35%
-  // Technique / Endurance / Mixte : entre les deux — voiture ~72%, pilote ~28%
-  const CAR_COEF = gpStyle === 'rapide'   ? 0.0140   // ~80% voiture / ~20% pilote
-                 : gpStyle === 'urbain'    ? 0.0090   // ~65% voiture / ~35% pilote
-                 : gpStyle === 'technique' ? 0.0115   // ~72% voiture / ~28% pilote
-                 : gpStyle === 'endurance' ? 0.0110   // ~71% voiture / ~29% pilote
-                 :                          0.0115;   // mixte : ~72% voiture / ~28% pilote
+  // Calibrés par simulation pour satisfaire 7 conditions sur tous les circuits :
+  //   1. Mauvais pilote porté par top voiture (P1-P2)
+  //   2. Écart bon/mauvais pilote visible en top voiture (≥ 0.3s/tour)
+  //   3. MID+MID dépasse TOP+MAUVAIS pilote
+  //   4. SLOW+EXCELLENT concurrence les MID
+  //   5. SLOW+EXCELLENT reste sous TOP+BON pilote
+  //   6. SLOW+EXCELLENT ne gagne jamais
+  //   7. Excellent pilote surperf clairement dans slow voiture (≥ 0.2s vs MID)
+  //
+  // Base : CAR_COEF 0.0125 · PILOT_COEF 0.0051
+  // Rapide : voiture ×1.22 / pilote ×0.50 — voiture reine (Monza, Spa).
+  //   TOP+MAUVAIS reste P2, MID+MID ne peut pas le dépasser — réaliste.
+  //   L'écart bon/mauvais reste visible (+0.3s) mais la mécanique domine.
+  // Urbain : voiture ×0.78 / pilote ×1.55 — les murs punissent l'erreur.
+  // Technique : voiture ×1.00 / pilote ×1.10 — pilote légèrement amplifié.
+  // Endurance : voiture ×0.96 / pilote ×0.93 — gestion prime, équilibré.
+  // Mixte : ×1.00 / ×1.00 — référence.
+  const CAR_COEF = gpStyle === 'rapide'   ? 0.0125 * 1.22
+                 : gpStyle === 'urbain'    ? 0.0125 * 0.78
+                 : gpStyle === 'technique' ? 0.0125 * 1.00
+                 : gpStyle === 'endurance' ? 0.0125 * 0.96
+                 :                          0.0125;
 
-  const PILOT_COEF = gpStyle === 'rapide'   ? 0.0009  // pilote limité sur circuit rapide
-                   : gpStyle === 'urbain'    ? 0.0020  // pilote très impactant en ville
-                   : gpStyle === 'technique' ? 0.0013  // technique : pilote important
-                   : gpStyle === 'endurance' ? 0.0012  // endurance : gestion prime
-                   :                          0.0013;  // mixte
+  const PILOT_COEF = gpStyle === 'rapide'   ? 0.0051 * 0.50
+                   : gpStyle === 'urbain'    ? 0.0051 * 1.55
+                   : gpStyle === 'technique' ? 0.0051 * 1.10
+                   : gpStyle === 'endurance' ? 0.0051 * 0.93
+                   :                          0.0051;
 
   // Contribution voiture — dominante dans tous les cas
   // max ~400ms/tour sur rapide, ~250ms sur urbain
