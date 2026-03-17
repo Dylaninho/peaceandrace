@@ -10324,11 +10324,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       if (aliveSC.length > 1) {
         const leaderTime = aliveSC[0].totalTime;
         if (scState.state === 'SC') {
-          // SC : resserrement progressif plafonné à 8s max total
-          // P2 = +1s, P3 = +2s... mais P8+ ne dépasse pas 8s derrière le leader
-          // (en F1 réel le SC ne fait pas +15s d'un coup)
+          // SC : tout le monde à ~1.5s max entre chaque voiture (réaliste)
           for (let i = 1; i < aliveSC.length; i++) {
-            const maxGap = Math.min(i * 1000, 8000);
+            const maxGap = i * 1500;
             aliveSC[i].totalTime = leaderTime + maxGap;
           }
         } else {
@@ -10428,14 +10426,13 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
 
         // ── Trafic post-pit ──
-        // Pénalité réduite : 400-800ms/tour max (était 1500-2500ms — trop violent)
-        // La durée est aussi limitée selon la position de sortie :
-        // sortir en fond de grille = trafic réel, mais un pit à P3 dans un trou = pas de trafic
         if ((driver.trafficLapsLeft || 0) > 0) {
-          lt += 400 + randInt(0, 400);
+          lt += 1500 + randInt(0, 1000);
           driver.trafficLapsLeft--;
+          // Max 1 message "se dégage du trafic" par tour — évite le spam multi-pilotes
           if (driver.trafficLapsLeft === 0 && !trafficEscapeAnnouncedThisLap) {
             trafficEscapeAnnouncedThisLap = true;
+            // "après son arrêt" seulement si le pilote a réellement pité récemment
             const hasPitted = (driver.pitStops || 0) > 0 && (driver.lastPitLap || 0) > 0
               && (lap - (driver.lastPitLap || 0)) <= 6;
             const trafficMsg = hasPitted
@@ -10443,7 +10440,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
               : `🚦 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** sort du trafic dense et retrouve de l'air.`;
             events.push({ priority: 2, text: trafficMsg });
           }
-        }
+          }
 
         // ── Overcut : pousse plus fort pour justifier la stratégie ──────────
         // Sans ce bonus, l'overcut ne peut JAMAIS fonctionner : le pilote reste
@@ -10757,16 +10754,21 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         driver.overcutMode    = false;
         if (!driver.usedCompounds.includes(newCompound)) driver.usedCompounds.push(newCompound);
 
-        // Trafic à la sortie : uniquement si des voitures sont vraiment proches du pit exit.
-        // Amplitude réduite (1-2 tours max) — le trafic est une gêne, pas une catastrophe.
+        // Trafic à la sortie : si des voitures sont proches du pit exit
+        // Fenêtre élargie à 6s (était 4s) pour capturer le vrai peloton compact.
+        // Durée en fonction du nombre de voitures dans la fenêtre :
+        //   1 voiture  : 1-2 tours (trafic léger — peut se dégager vite)
+        //   2-3 voitures : 2-3 tours (peloton groupé — difficile de passer)
+        //   4+ voitures : 3-4 tours (embouteillage réaliste — plein dans le trafic)
+        // Undercut agressif dans trafic dense = avantage réduit (c'est le but)
         const carsNearPitExit = aliveNow.filter(d =>
           !d.pittedThisLap &&
           String(d.pilot._id) !== String(driver.pilot._id) &&
-          Math.abs(d.totalTime - driver.totalTime) < 4000
+          Math.abs(d.totalTime - driver.totalTime) < 6000
         ).length;
-        if (carsNearPitExit >= 3)      driver.trafficLapsLeft = 2;
-        else if (carsNearPitExit >= 1) driver.trafficLapsLeft = 1;
-        // Pas de trafic si pit exit dégagé (carsNearPitExit === 0)
+        if (carsNearPitExit >= 4)      driver.trafficLapsLeft = randInt(3, 4);
+        else if (carsNearPitExit >= 2) driver.trafficLapsLeft = randInt(2, 3);
+        else if (carsNearPitExit === 1) driver.trafficLapsLeft = randInt(1, 2);
 
         // Recalcul positions
         drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
@@ -14617,6 +14619,9 @@ const commands = [
     .addStringOption(o => o.setName('ecurie').setDescription('Nom exact de l\'écurie').setRequired(true))
     .addStringOption(o => o.setName('pilote1').setDescription('Nom exact du pilote 1 (numéro 1)').setRequired(true))
     .addStringOption(o => o.setName('pilote2').setDescription('Nom exact du pilote 2 (numéro 2)').setRequired(true)),
+
+  new SlashCommandBuilder().setName('admin_grid_economy')
+    .setDescription('[ADMIN] Affiche la distribution grille (gridCtx), les coûts upgrades par pilote et l\'équilibre économique'),
 ];
 
 // ============================================================
@@ -14712,24 +14717,86 @@ const teamCount = await Team.countDocuments();
 
 // ─── Coûts d'amélioration ────────────────────────────────────
 // Gain : toujours +1 par achat
-// Coût de base par stat, avec malus progressif selon le niveau actuel :
-//   coût_réel = coût_base × (1 + (stat_actuelle - 50) / 50)
-//   → À 50 : coût normal. À 75 : ×1.5. À 99 : ×1.98.
 //
-// Calibrage cible (sans salaire) :
-//   P1 (560 coins)   → 3-4 upgrades par course
-//   P3 (360 coins)   → 2-3 upgrades
-//   P10 (80 coins)   → 1 upgrade toutes les 1-2 courses
-//   P20 (120 coins)  → 1 upgrade toutes les 1-2 courses
+// PHILOSOPHIE : le coût est relatif à la grille réelle en jeu, pas à des caps fixes.
+// On calcule le percentile du pilote dans la distribution des overall actifs,
+// et le malus suit cette position. Si tout le monde progresse, les coûts s'adaptent.
+// Si la grille converge, les coûts convergent aussi.
+//
+//   gridCtx = { minOv, maxOv }  — calculé une seule fois avant chaque commande
+//   percentile = (ov - minOv) / (maxOv - minOv)   → 0.0 = dernier, 1.0 = premier
+//   overallMult = 1.0 + percentile * 1.0           → ×1.0 (dernier) à ×2.0 (premier)
+//
+// Pente stat agressive (diviseur 30) : chaque point au-dessus de 50 coûte plus cher.
+//   stat 60 → ×1.33  ·  stat 75 → ×1.83  ·  stat 85 → ×2.17  ·  stat 95 → ×2.50
+//
+// Calibrage indicatif (grille typique minOv=55, maxOv=85) :
+//   1er de la grille (pct=1.0, stat 80) → ~250🪙/upgrade
+//   Médian  (pct=0.5, stat 70)          → ~155🪙/upgrade
+//   Dernier (pct=0.0, stat 60)          → ~105🪙/upgrade
+// STAT_COST_BASE — bases ×1.5 vs l'ancien système pour rééquilibrer
 const STAT_COST_BASE = {
-  depassement: 100, freinage: 100, defense: 85,
-  adaptabilite: 75, reactions: 75, controle: 90, gestionPneus: 75,
+  depassement: 150, freinage: 150, defense: 127,
+  adaptabilite: 112, reactions: 112, controle: 135, gestionPneus: 112,
 };
 
-function calcUpgradeCost(statKey, currentValue) {
-  const base = STAT_COST_BASE[statKey] || 85;
-  const multiplier = 1 + Math.max(0, (currentValue - 50)) / 50;
-  return Math.round(base * multiplier);
+// Calcule le contexte de grille (min/max/médiane overall actifs) — une requête, avant chaque commande
+async function buildGridContext() {
+  try {
+    const allActive = await Pilot.find({ teamId: { $ne: null } }).lean();
+    if (!allActive.length) return { minOv: 50, maxOv: 85, medianOv: 67, count: 0 };
+    const ovs = allActive.map(p => overallRating(p)).sort((a, b) => a - b);
+    const mid = Math.floor(ovs.length / 2);
+    return {
+      minOv    : ovs[0],
+      maxOv    : ovs[ovs.length - 1],
+      medianOv : ovs.length % 2 === 0 ? Math.round((ovs[mid-1] + ovs[mid]) / 2) : ovs[mid],
+      count    : ovs.length,
+    };
+  } catch(e) { return { minOv: 50, maxOv: 85, medianOv: 67, count: 0 }; }
+}
+
+// ─── calcUpgradeCost — trois multiplicateurs combinés ────────
+// 1. statMult  : pente variable selon l'overall — plus le pilote est fort, plus la pente est raide
+//    ov >= 78 → diviseur 12  (top : très punitif, stats déjà hautes)
+//    ov 65-77 → diviseur 18  (mid : modéré)
+//    ov <  65 → diviseur 25  (bas : doux, permet de rattraper)
+//
+// 2. overallMult : percentile dans la distribution réelle de la grille
+//    1er (pct=1.0) → ×2.0 · Dernier (pct=0.0) → ×1.0 — se recalibre dynamiquement
+//
+// 3. wealthMult : surtaxe richesse accumulée — punit les gros salaires sans upgrades
+//    plcoins ≤ 500 → ×1.0  ·  plcoins 1000 → ×1.5  ·  plcoins 2000 → ×2.5
+//
+// Calibrage cible (grille 55-82, salary 100, solde ~500) :
+//   P1 régulier  (ov 82, pct 0.9) : ~690 coins/GP → cost ~1172🪙 → ~14 upg/saison
+//   P5           (ov 72, pct 0.5) : ~400 coins/GP → cost  ~663🪙 → ~14 upg/saison
+//   P12          (ov 60, pct 0.2) : ~230 coins/GP → cost  ~328🪙 → ~17 upg/saison
+//   Dernier      (ov 55, pct 0.0) : ~240 coins/GP → cost  ~240🪙 → ~24 upg/saison
+//   → Le bas rattrape ~+6 upg/saison — comble ~6 pts de stat en une saison
+function calcUpgradeCost(statKey, currentValue, pilot = null, gridCtx = null) {
+  const base = STAT_COST_BASE[statKey] || 128;
+  const ov   = pilot ? overallRating(pilot) : 65;
+
+  // 1. Pente stat — diviseur selon l'overall
+  const divisor  = ov >= 78 ? 12 : ov >= 65 ? 18 : 25;
+  const statMult = 1 + Math.max(0, (currentValue - 50)) / divisor;
+
+  // 2. Percentile grille
+  let overallMult = 1.0;
+  if (gridCtx) {
+    const range = Math.max(1, gridCtx.maxOv - gridCtx.minOv);
+    const pct   = Math.max(0, Math.min(1, (ov - gridCtx.minOv) / range));
+    overallMult = 1.0 + pct * 1.0;
+  } else {
+    overallMult = 1 + Math.max(0, (ov - 55)) / 27; // fallback sans gridCtx
+  }
+
+  // 3. Surtaxe richesse
+  const plcoins    = pilot?.plcoins ?? 0;
+  const wealthMult = 1.0 + Math.max(0, plcoins - 500) / 1000;
+
+  return Math.round(base * statMult * overallMult * wealthMult);
 }
 
 // ─── Spécialisations ─────────────────────────────────────────
@@ -15551,6 +15618,7 @@ async function handleInteraction(interaction) {
     const ov    = overallRating(pilot);
     const tier  = ratingTier(ov);
     const MAX_STAT = 99;
+    const gridCtx = await buildGridContext(); // distribution réelle de la grille
 
     // ── Construction du bloc stats ────────────────────────────
     const STATS_DEF = [
@@ -15573,7 +15641,7 @@ async function handleInteraction(interaction) {
 
     const statLines = STATS_DEF.map(({ key, label, emoji, role }) => {
       const cur  = pilot[key] ?? 50;
-      const cost = cur < MAX_STAT ? calcUpgradeCost(key, cur) : null;
+      const cost = cur < MAX_STAT ? calcUpgradeCost(key, cur, pilot, gridCtx) : null;
       const maxd = cur >= MAX_STAT;
       const spec = pilot.specialization === key ? ` 🏅 *spé active*` : '';
       const costStr = maxd ? '🔒 MAX' : `**${cost} 🪙** → ${cur + 1}`;
@@ -15593,8 +15661,8 @@ async function handleInteraction(interaction) {
 
     // Total coins + prochains upgrades abordables
     const affordableStats = STATS_DEF
-      .filter(({ key }) => (pilot[key] ?? 50) < MAX_STAT && calcUpgradeCost(key, pilot[key] ?? 50) <= pilot.plcoins)
-      .map(({ key, label, emoji }) => `${emoji} ${label} (${calcUpgradeCost(key, pilot[key] ?? 50)} 🪙)`)
+      .filter(({ key }) => (pilot[key] ?? 50) < MAX_STAT && calcUpgradeCost(key, pilot[key] ?? 50, pilot, gridCtx) <= pilot.plcoins)
+      .map(({ key, label, emoji }) => `${emoji} ${label} (${calcUpgradeCost(key, pilot[key] ?? 50, pilot, gridCtx)} 🪙)`)
       .join(' · ');
 
     const flag = pilot.nationality ? pilot.nationality.split(' ')[0] : '';
@@ -15633,6 +15701,7 @@ async function handleInteraction(interaction) {
     const quantite = interaction.options.getInteger('quantite') || 1;
     const current  = pilot[statKey];
     const MAX_STAT = 99;
+    const gridCtx  = await buildGridContext(); // distribution réelle de la grille
 
     if (current >= MAX_STAT) return interaction.editReply({ content: '❌ Stat déjà au maximum (99) !', ephemeral: true });
 
@@ -15640,7 +15709,7 @@ async function handleInteraction(interaction) {
     const maxPossible = Math.min(quantite, MAX_STAT - current);
     let totalCost = 0;
     for (let i = 0; i < maxPossible; i++) {
-      totalCost += calcUpgradeCost(statKey, current + i);
+      totalCost += calcUpgradeCost(statKey, current + i, pilot, gridCtx);
     }
 
     if (pilot.plcoins < totalCost) {
@@ -15649,12 +15718,12 @@ async function handleInteraction(interaction) {
       let affordable = 0;
       let affordCost = 0;
       for (let i = 0; i < maxPossible; i++) {
-        const stepCost = calcUpgradeCost(statKey, current + i);
+        const stepCost = calcUpgradeCost(statKey, current + i, pilot, gridCtx);
         if (affordCost + stepCost <= pilot.plcoins) { affordable++; affordCost += stepCost; }
         else break;
       }
       const costBreakdown = maxPossible > 1
-        ? `\n*Détail : ${Array.from({length: maxPossible}, (_, i) => `+1 = ${calcUpgradeCost(statKey, current + i)} 🪙`).join(' · ')}*`
+        ? `\n*Détail : ${Array.from({length: maxPossible}, (_, i) => `+1 = ${calcUpgradeCost(statKey, current + i, pilot, gridCtx)} 🪙`).join(' · ')}*`
         : '';
       return interaction.editReply({
         embeds: [new EmbedBuilder()
@@ -15674,7 +15743,7 @@ async function handleInteraction(interaction) {
     const gain     = maxPossible;
     const ovBefore = overallRating(pilot);
     const newValue = current + gain;
-    const nextCost = newValue < MAX_STAT ? calcUpgradeCost(statKey, newValue) : null;
+    const nextCost = newValue < MAX_STAT ? calcUpgradeCost(statKey, newValue, pilot, gridCtx) : null;
     const remaining = pilot.plcoins - totalCost;
 
     // ── Tracker de streak de spécialisation ──────────────────
@@ -15708,7 +15777,7 @@ async function handleInteraction(interaction) {
     const streakBar = '🔥'.repeat(Math.min(newStreak, 3)) + '⬜'.repeat(Math.max(0, 3 - Math.min(newStreak, 3)));
 
     const costBreakdownStr = gain > 1
-      ? `\n> *Coût détaillé : ${Array.from({length: gain}, (_, i) => `${calcUpgradeCost(statKey, current + i)} 🪙`).join(' + ')} = **${totalCost} 🪙***`
+      ? `\n> *Coût détaillé : ${Array.from({length: gain}, (_, i) => `${calcUpgradeCost(statKey, current + i, pilot, gridCtx)} 🪙`).join(' + ')} = **${totalCost} 🪙***`
       : '';
 
     const descLines = [
@@ -19595,13 +19664,108 @@ async function handleInteraction(interaction) {
         value:
           `Vit. Max ${bar(t.vitesseMax)}${t.vitesseMax}  |  DRS ${bar(t.drs)}${t.drs}\n` +
           `Refroid. ${bar(t.refroidissement)}${t.refroidissement}  |  Dirty ${bar(t.dirtyAir)}${t.dirtyAir}\n` +
-          `Pneus ${bar(t.conservationPneus)}${t.conservationPneus}  |  Moy.Virages ${bar(t.vitesseMoyenne)}${t.vitesseMoyenne} *(poids ×1.3 technique)*\n` +
+          `Pneus ${bar(t.conservationPneus)}${t.conservationPneus}  |  Moy ${bar(t.vitesseMoyenne)}${t.vitesseMoyenne}\n` +
           `🎯 Focus dev : *${focusLabel}*\n` +
           `${salEmoji} Masse salariale : **${totalSal} 🪙/course**`,
         inline: false,
       });
     }
     return interaction.editReply({ embeds: [embed] });
+  }
+
+  // ── /admin_grid_economy ───────────────────────────────────
+  // Vue d'ensemble de l'économie upgrades : gridCtx, coûts par pilote, upgrades estimés/saison
+  if (commandName === 'admin_grid_economy') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const gridCtx = await buildGridContext();
+    const pilots  = await Pilot.find({ teamId: { $ne: null } }).lean();
+    const contracts = await Contract.find({ active: true }).lean();
+    const season  = await getActiveSeason();
+    const standings = season ? await Standing.find({ seasonId: season._id }).sort({ points: -1 }).lean() : [];
+
+    // Trier pilotes par overall décroissant
+    pilots.sort((a, b) => overallRating(b) - overallRating(a));
+
+    // Estimer les coins moyens par course selon le rang au classement
+    function estimateCoinsPerRace(pilotId, plcoins, salary) {
+      const rank = standings.findIndex(s => String(s.pilotId) === String(pilotId)) + 1 || pilots.length;
+      const total = standings.length || pilots.length;
+      // pts F1 estimés selon rang au championnat → coins approximatifs
+      const estPts = rank <= 10 ? [25,18,15,12,10,8,6,4,2,1][rank-1] : 0;
+      const participBonus = rank > 10 ? 20 : 0;
+      const catchupBonus  = Math.round((rank / total) * 100);
+      const base = Math.round((estPts * 22 + 40 + participBonus) * 1.0 + salary + catchupBonus);
+      return Math.min(800, base);
+    }
+
+    // Construire les lignes du rapport
+    const bar5 = v => '█'.repeat(Math.round(v/20)) + '░'.repeat(5 - Math.round(v/20));
+    const range = Math.max(1, gridCtx.maxOv - gridCtx.minOv);
+
+    const lines = pilots.map(p => {
+      const ov       = overallRating(p);
+      const tier     = ratingTier(ov);
+      const pct      = Math.max(0, Math.min(1, (ov - gridCtx.minOv) / range));
+      const contract = contracts.find(c => String(c.pilotId) === String(p._id));
+      const salary   = contract?.salaireBase || 0;
+      const coinsGP  = estimateCoinsPerRace(p._id, p.plcoins, salary);
+      const avgStat  = Math.round((p.depassement + p.freinage + p.defense + p.adaptabilite + p.reactions + p.controle + p.gestionPneus) / 7);
+      const costTypical = calcUpgradeCost('freinage', avgStat, p, gridCtx); // coût représentatif sur stat moyenne
+      const upgsPerGP   = coinsGP / costTypical;
+      const upgsSeason  = Math.round(upgsPerGP * 24);
+      const wealthMult  = (1.0 + Math.max(0, p.plcoins - 500) / 1000).toFixed(2);
+      const div         = ov >= 78 ? 12 : ov >= 65 ? 18 : 25;
+
+      const pctBar = bar5(Math.round(pct * 100));
+      return {
+        line: `${tier.badge} **${p.name}** · ov **${ov}** · \`${pctBar}\` pct ${Math.round(pct*100)}%\n` +
+              `  div=${div} · ov×${(1.0+pct).toFixed(2)} · riche×${wealthMult} → **${costTypical}🪙**/upg\n` +
+              `  ~${coinsGP}🪙/GP · ~**${upgsSeason} upg/saison** · solde ${p.plcoins}🪙`,
+        upgsSeason,
+      };
+    });
+
+    // Embed principal : context grille
+    const ctxEmbed = new EmbedBuilder()
+      .setTitle('📊 Grid Economy — Distribution & Coûts Upgrades')
+      .setColor('#1E3A5F')
+      .setDescription(
+        `**GridCtx actuel :** minOv **${gridCtx.minOv}** · médiane **${gridCtx.medianOv}** · maxOv **${gridCtx.maxOv}** · ${gridCtx.count} pilotes\n\n` +
+        `**Formule coût :** \`base × statMult(div) × ovMult(pct) × wealthMult(solde)\`\n` +
+        `- Premier de grille (pct=1.0) → ovMult **×2.0**\n` +
+        `- Dernier de grille (pct=0.0) → ovMult **×1.0**\n` +
+        `- Solde 1000🪙 → wealthMult **×1.5** · Solde 2000🪙 → **×2.5**\n` +
+        `- Diviseur : ov≥78 → **12** (punitif) · ov65-77 → **18** · ov<65 → **25** (doux)\n\n` +
+        `*Les coûts se recalibrent à chaque appel selon la grille du moment.*`
+      );
+
+    // Embed pilotes (max 25 champs Discord)
+    const pilotsEmbed = new EmbedBuilder()
+      .setTitle('👤 Détail par pilote — coût & upg/saison estimés')
+      .setColor('#888888');
+
+    // Grouper par tranches d'upgrades/saison pour identifier qui est OP
+    const overperformers = lines.filter(l => l.upgsSeason > 20);
+    const balanced       = lines.filter(l => l.upgsSeason >= 12 && l.upgsSeason <= 20);
+    const underdogs      = lines.filter(l => l.upgsSeason < 12);
+
+    if (overperformers.length) {
+      pilotsEmbed.addFields({ name: `🔴 Trop rapides (> 20 upg/saison) — ${overperformers.length} pilote(s)`, value: overperformers.map(l => l.line).join('\n\n').slice(0, 1024), inline: false });
+    }
+    if (balanced.length) {
+      pilotsEmbed.addFields({ name: `🟢 Équilibrés (12-20 upg/saison) — ${balanced.length} pilote(s)`, value: balanced.map(l => l.line).join('\n\n').slice(0, 1024), inline: false });
+    }
+    if (underdogs.length) {
+      pilotsEmbed.addFields({ name: `🔵 Lents (< 12 upg/saison) — ${underdogs.length} pilote(s)`, value: underdogs.map(l => l.line).join('\n\n').slice(0, 1024), inline: false });
+    }
+
+    const minUpg = Math.min(...lines.map(l => l.upgsSeason));
+    const maxUpg = Math.max(...lines.map(l => l.upgsSeason));
+    pilotsEmbed.setFooter({ text: `Écart grille : ${minUpg} → ${maxUpg} upg/saison (cible : ≤ 10 d'écart)` });
+
+    return interaction.editReply({ embeds: [ctxEmbed, pilotsEmbed] });
   }
 
   // ── /admin_apply_last_race ────────────────────────────────
