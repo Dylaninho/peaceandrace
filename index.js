@@ -1376,18 +1376,40 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
   const BASE = 90_000;
   const w = GP_STYLE_WEIGHTS[gpStyle] || GP_STYLE_WEIGHTS['mixte'];
 
-  // Contribution voiture — ~65% de l'écart de perf total (course)
-  // max ~240ms/tour entre top car (90) et base (70) — la voiture porte ou bride
-  const cScore = carScore(team, gpStyle);
-  const carFRaw = 1 - ((cScore - 70) / 70 * 0.0075);
-  const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * 0.0075 * (scCooldown / 6)) : carFRaw;
+  // ── Coefficients voiture/pilote selon le type de circuit ────────────────
+  // Sur circuit rapide (Monza, Spa) : la voiture est reine — aéro, moteur, DRS.
+  //   Le pilote ne peut pas compenser un déficit mécanique en ligne droite.
+  //   → voiture ~80%, pilote ~20%
+  // Sur circuit urbain (Monaco, Singapour) : les murs punissent l'erreur, pas la mécanique.
+  //   Un top pilote dans une voiture mid peut clairement tenir un adversaire supérieur.
+  //   → voiture ~65%, pilote ~35%
+  // Technique / Endurance / Mixte : entre les deux — voiture ~72%, pilote ~28%
+  const CAR_COEF = gpStyle === 'rapide'   ? 0.0140   // ~80% voiture / ~20% pilote
+                 : gpStyle === 'urbain'    ? 0.0090   // ~65% voiture / ~35% pilote
+                 : gpStyle === 'technique' ? 0.0115   // ~72% voiture / ~28% pilote
+                 : gpStyle === 'endurance' ? 0.0110   // ~71% voiture / ~29% pilote
+                 :                          0.0115;   // mixte : ~72% voiture / ~28% pilote
 
-  // Contribution pilote — ~35% de l'écart de perf total (course)
-  // max ~130ms/tour entre top (72) et bas (52) — fait la diff mais moins que la voiture
-  // Un très bon pilote "miraculise" une mauvaise voiture ; un correct se fait porter par une bonne
+  const PILOT_COEF = gpStyle === 'rapide'   ? 0.0009  // pilote limité sur circuit rapide
+                   : gpStyle === 'urbain'    ? 0.0020  // pilote très impactant en ville
+                   : gpStyle === 'technique' ? 0.0013  // technique : pilote important
+                   : gpStyle === 'endurance' ? 0.0012  // endurance : gestion prime
+                   :                          0.0013;  // mixte
+
+  // Contribution voiture — dominante dans tous les cas
+  // max ~400ms/tour sur rapide, ~250ms sur urbain
+  const cScore = carScore(team, gpStyle);
+  const carFRaw = 1 - ((cScore - 70) / 70 * CAR_COEF);
+  const carF = scCooldown > 0 ? 1 - ((cScore - 70) / 70 * CAR_COEF * (scCooldown / 6)) : carFRaw;
+
+  // Contribution pilote — visible mais secondaire
+  // Bonus multiplicatif si top pilote dans top voiture : le talent s'exprime mieux sur une bonne base.
+  // Un pilote à 80/100 dans une voiture à 90/100 gratte ~15% de bonus de performance supplémentaire
+  // vs le même pilote dans une voiture à 70/100. Modelé par un facteur de synergie léger.
   const pScore = pilotScore(pilot, gpStyle);
-  const pilotFRaw = 1 - ((pScore - 50) / 50 * 0.0024);
-  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * 0.0024 * (scCooldown / 6)) : pilotFRaw;
+  const synergyBonus = cScore >= 80 ? (pScore - 50) / 50 * 0.0003 : 0; // top voiture amplifie le talent
+  const pilotFRaw = 1 - ((pScore - 50) / 50 * PILOT_COEF) - synergyBonus;
+  const pilotF = scCooldown > 0 ? 1 - ((pScore - 50) / 50 * PILOT_COEF * (scCooldown / 6)) - synergyBonus : pilotFRaw;
 
   // Spécialisation — bonus très marginal (évite les sauts de position)
   let specF = 1.0;
@@ -1396,11 +1418,11 @@ function calcLapTime(pilot, team, tireCompound, tireWear, weather, trackEvo, gpS
     specF = 1 - (specWeight * 0.0002);
   }
 
-  // ── Forme récente — influence légère mais visible ─────────
+  // ── Forme récente — influence légère ─────────────────────
   // recentFormScore : -1.0 (série de DNFs) → +1.0 (série de victoires)
-  // Max ±220ms/tour — perceptible sur 50 tours (~11s d'écart en fin de course)
+  // Max ±120ms/tour — réduit en cohérence avec le poids pilote abaissé
   const formScore = pilot.recentFormScore || 0;
-  const formF = 1 - (formScore * 0.0024);
+  const formF = 1 - (formScore * 0.0013);
 
   // Pneus — dégradation linéaire avec légère accélération après 70% de vie utile
   const tireData = TIRE[tireCompound];
@@ -1486,11 +1508,16 @@ function calcQualiTime(pilot, team, weather, gpStyle) {
   const pScore = pilotScore(pilot, gpStyle);
   // En Q, le freinage et le controle comptent encore plus
   const qualiBoost = (pilot.freinage + pilot.controle) / 200 * 0.03;
-  // En Q : voiture ~55% / pilote ~45% (pilote compte un peu plus qu'en course — tour lancé, précision max)
-  // carF  : max ~6s de delta sur un tour Q entre top car et base
-  // pilotF: max ~4.7s + qualiBoost freinage/controle
-  const carF   = 1 - ((cScore - 70) / 70 * 0.20);
-  const pilotF = 1 - ((pScore - 50) / 50 * 0.10) - qualiBoost;
+  // En Q : voiture toujours dominante, mais le pilote compte plus qu'en course (tour lancé, précision max).
+  // Sur rapide : voiture ~70% / pilote ~30% (aéro décisive même sur un tour)
+  // Sur urbain  : voiture ~58% / pilote ~42% (les murs punissent l'erreur humaine + aucun DRS utile)
+  // Autres      : voiture ~65% / pilote ~35%
+  const carQCoef   = gpStyle === 'rapide' ? 0.32 : gpStyle === 'urbain' ? 0.22 : 0.28;
+  const pilotQCoef = gpStyle === 'rapide' ? 0.075 : gpStyle === 'urbain' ? 0.12 : 0.090;
+  // Synergie : top pilote dans top voiture performe encore mieux en Q (chaque ms compte)
+  const qSynergyBonus = cScore >= 80 ? (pScore - 50) / 50 * 0.004 : 0;
+  const carF   = 1 - ((cScore - 70) / 70 * carQCoef);
+  const pilotF = 1 - ((pScore - 50) / 50 * pilotQCoef) - qualiBoost - qSynergyBonus;
   const randF  = 1 + (Math.random() - 0.5) * 0.003;
   const wetF   = weather === 'WET' ? 1.13 - (pilot.adaptabilite / 100 * 0.09) : 1.0;
   return Math.round(BASE * carF * pilotF * randF * wetF);
@@ -11982,45 +12009,63 @@ async function evolveCarStats(raceResults, teams) {
     }
   } catch(e) { /* pas de surperfBonus si erreur */ }
 
+  // ── Masse salariale max et min de la grille (pour le THRESHOLD dynamique) ─
+  // Calculé une fois en dehors de la boucle : on normalise chaque équipe
+  // entre la masse la plus basse et la plus haute de la saison réelle.
+  const masseByTeam   = evolveCarStats._masseByTeam || new Map();
+  const allMassValues = [...masseByTeam.values()];
+  const masseMax      = allMassValues.length ? Math.max(...allMassValues) : 1;
+  const masseMin      = allMassValues.length ? Math.min(...allMassValues) : 0;
+  const massRange     = Math.max(1, masseMax - masseMin);
+
   for (const team of teams) {
     const key = String(team._id);
     const pts = teamPoints[key] || 0;
 
-    // ── Effet masse salariale : relatif à la médiane de la grille ────────────
-    // Au-dessus médiane : −1 devPt par 15🪙 d'excès,   cap −18
-    // En-dessous médiane: +1 devPt par 25🪙 de déficit, cap +10
-    // Asymétrique : payer beaucoup pénalise plus fort que payer peu ne récompense.
-    const totalSalaire = (evolveCarStats._masseByTeam || new Map()).get(key) ?? 0;
-    const salEcart  = totalSalaire - salaireMediane;
-    const salEffect = salEcart > 0
-      ? -Math.round(Math.min(18, salEcart / 15))
-      : Math.round(Math.min(10, -salEcart / 25));
+    // ── Masse salariale réelle de l'équipe cette saison ──────────────────────
+    // C'est la somme des salaireBase de tous les contrats actifs de l'équipe.
+    // Elle change à chaque mercato : un pilote cher recruté = masse qui monte,
+    // un pilote libéré = masse qui baisse. Tout le système dev en dépend.
+    const totalSalaire = masseByTeam.get(key) ?? 0;
 
-    // ── Surperf pilotes : bonus dev si la voiture compense des pilotes faibles ─
-    // Principe : équipe avec des pilotes faibles qui surperf → la voiture fait le travail
-    //            → on lui donne plus de dev (logique : elle a besoin de sa voiture).
-    // Équipe avec les meilleurs pilotes qui performe normalement → pas de bonus car
-    //            les pilotes portent, pas la voiture.
-    // Effet recherché : freine l'emballement des tops (forts pilotes + voiture qui monte)
-    //                   et rattrapage naturel pour les bas de grille qui surperforment.
+    // ── Budget R&D : inversement proportionnel à la masse salariale réelle ───
+    // Logique : plus une équipe paie ses pilotes, moins il reste pour la R&D.
+    // On normalise la masse de chaque équipe entre 0 (plus basse de la grille)
+    // et 1 (plus haute de la grille), puis on inverse.
+    //
+    //   massePct = 0.0 → équipe la moins payante → baseRD max (24 devPts/GP)
+    //   massePct = 0.5 → masse médiane           → baseRD moyen (15 devPts/GP)
+    //   massePct = 1.0 → équipe la plus payante  → baseRD min (6 devPts/GP)
+    //
+    // Les valeurs bornent entre 6 et 24 pour éviter les extrêmes aberrants.
+    const massePct = masseMax > masseMin ? (totalSalaire - masseMin) / massRange : 0.5;
+    const baseRD   = Math.round(clamp(24 - massePct * 18, 6, 24));
+
+    // ── Bonus points de course — secondaire, plafonné ────────────────────────
+    // Les résultats encouragent sans dominer. P1 donne ~10 devPts, pas 52.
+    // Sans ce plafond, les tops creusent l'écart via les points ET le budget.
+    const bonusPts = Math.min(10, Math.round(pts * 0.4));
+
+    // ── Surperf pilotes : la voiture compense-t-elle des pilotes faibles ? ───
+    // Si une équipe fait de bons résultats avec des pilotes sous la moyenne
+    // → c'est la voiture qui porte → bonus dev (elle a besoin d'être entretenue).
+    // Si les top pilotes de la grille portent leur équipe → pas de bonus car
+    // c'est le talent, pas la machine.
     let surperfBonus = 0;
     try {
       const teamPilotsSnap = await Pilot.find({ teamId: team._id }).lean();
       if (teamPilotsSnap.length > 0) {
-        const pcts     = teamPilotsSnap.map(p => pilotPctMap.get(String(p._id)) ?? 0.5);
-        const pctAvg   = pcts.reduce((s, v) => s + v, 0) / pcts.length;
+        const pcts        = teamPilotsSnap.map(p => pilotPctMap.get(String(p._id)) ?? 0.5);
+        const pctAvg      = pcts.reduce((s, v) => s + v, 0) / pcts.length;
         const ptsExpected = Math.round(pctAvg * PTS_RACE_MAX);
-        const surperf  = pts - ptsExpected;
-        surperfBonus   = Math.round(Math.max(-12, Math.min(12, surperf / 3)));
+        const surperf     = pts - ptsExpected;
+        surperfBonus      = Math.round(clamp(surperf / 3, -10, 10));
       }
     } catch(e) { /* pas de surperfBonus si erreur */ }
 
-    const devGained = Math.round(pts * 1.5 + (team.budget / 100) * 3 + 3 + salEffect + surperfBonus);
+    const devGained = baseRD + bonusPts + surperfBonus;
 
-    // ── Bonus de développement — bonne chimie d'écurie ───────
-    // Si les deux coéquipiers s'entendent bien (affinité ≥ 40), les mécaniciens
-    // travaillent mieux ensemble → bonus de +3 devPts/course.
-    // Si l'affinité est très haute (≥ 70) → +5 devPts.
+    // ── Bonus chimie d'écurie ─────────────────────────────────────────────────
     let chemDevBonus = 0;
     try {
       const teamPilotsForDev = await Pilot.find({ teamId: team._id }).lean();
@@ -12036,15 +12081,23 @@ async function evolveCarStats(raceResults, teams) {
 
     const newDevPts = team.devPoints + Math.max(1, devGained + chemDevBonus);
 
-    // ── Seuil abaissé : 30 devPts = 1 point de stat ─────────
-    // Avant : 50 → le bas de grille ne progressait presque jamais
-    // Maintenant :
-    //   P1  (~35+ pts) → +60 devPts → 2 upgrades/course
-    //   P5  (~18 pts)  → +30 devPts → 1 upgrade/course
-    //   P10 (~1 pt)    → +8  devPts → 1 upgrade toutes les ~4 courses
-    //   Sans points    → +3  devPts → 1 upgrade toutes les ~10 courses (ne stagne plus)
-    const THRESHOLD = 40;
+    // ── THRESHOLD dynamique basé sur la masse salariale réelle ──────────────
+    // Même logique inversée que le baseRD : une équipe qui paie peu ses pilotes
+    // a une équipe technique plus agile → elle convertit ses devPts plus vite.
+    //
+    //   massePct = 0.0 (masse la plus basse) → THRESHOLD 24 (conversion rapide)
+    //   massePct = 0.5 (masse médiane)       → THRESHOLD 32
+    //   massePct = 1.0 (masse la plus haute) → THRESHOLD 42 (conversion lente)
+    //
+    // Résultat : une petite équipe bien gérée rattrape 60-70% de l'écart voiture
+    // sur une saison complète, sans jamais dépasser les tops si elle ne performe pas.
+    const THRESHOLD = Math.round(clamp(24 + massePct * 18, 24, 42));
+
     let gained    = Math.floor(newDevPts / THRESHOLD);
+    // Plafond anti-emballement : 2 upgrades/course max pour les grosses masses,
+    // 3 max pour les petites (elles peuvent avoir un bon GP de dev mais pas exploser).
+    const upgradesCap = massePct >= 0.6 ? 2 : 3;
+    gained        = Math.min(gained, upgradesCap);
     let remaining = newDevPts % THRESHOLD;
 
     if (gained > 0) {
