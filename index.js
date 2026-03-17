@@ -13986,13 +13986,13 @@ const commands = [
     .setDescription('Améliore une stat de ton pilote (coût variable selon le niveau, cumul possible)')
     .addStringOption(o => o.setName('stat').setDescription('Stat à améliorer').setRequired(true)
       .addChoices(
-        { name: 'Dépassement    — à partir de 120 🪙', value: 'depassement'  },
-        { name: 'Freinage       — à partir de 120 🪙', value: 'freinage'     },
-        { name: 'Défense        — à partir de 100 🪙', value: 'defense'      },
-        { name: 'Adaptabilité   — à partir de  90 🪙', value: 'adaptabilite' },
-        { name: 'Réactions      — à partir de  90 🪙', value: 'reactions'    },
-        { name: 'Contrôle       — à partir de 110 🪙', value: 'controle'     },
-        { name: 'Gestion Pneus  — à partir de  90 🪙', value: 'gestionPneus' },
+        { name: 'Dépassement    — à partir de 250 🪙', value: 'depassement'  },
+        { name: 'Freinage       — à partir de 250 🪙', value: 'freinage'     },
+        { name: 'Défense        — à partir de 220 🪙', value: 'defense'      },
+        { name: 'Adaptabilité   — à partir de 200 🪙', value: 'adaptabilite' },
+        { name: 'Réactions      — à partir de 200 🪙', value: 'reactions'    },
+        { name: 'Contrôle       — à partir de 230 🪙', value: 'controle'     },
+        { name: 'Gestion Pneus  — à partir de 200 🪙', value: 'gestionPneus' },
       ))
     .addIntegerOption(o => o.setName('quantite').setDescription('Nombre de points à ajouter (défaut: 1). Le coût est cumulatif !').setMinValue(1).setMaxValue(10))
     .addIntegerOption(o => o.setName('pilote').setDescription('Ton Pilote 1 ou Pilote 2 à améliorer (défaut: 1)').setMinValue(1).setMaxValue(2)),
@@ -14294,6 +14294,10 @@ const commands = [
   new SlashCommandBuilder().setName('season_recap')
     .setDescription('📊 Bilan de la saison en cours — classements, stats clés, narratif'),
 
+  new SlashCommandBuilder().setName('gp_recap')
+    .setDescription('⚡ Résumé compact des derniers GPs + news paddock — parfait si tu as raté des sessions')
+    .addIntegerOption(o => o.setName('gps').setDescription('Nombre de GPs à afficher (défaut: 2, max: 4)').setMinValue(1).setMaxValue(4)),
+
   new SlashCommandBuilder().setName('admin_news_force')
     .setDescription('[ADMIN] Force la publication d\'un article de news maintenant'),
 
@@ -14461,13 +14465,18 @@ const teamCount = await Team.countDocuments();
 //   P10 (80 coins)   → 1 upgrade toutes les 1-2 courses
 //   P20 (120 coins)  → 1 upgrade toutes les 1-2 courses
 const STAT_COST_BASE = {
-  depassement: 100, freinage: 100, defense: 85,
-  adaptabilite: 75, reactions: 75, controle: 90, gestionPneus: 75,
+  depassement: 250, freinage: 250, defense: 220,
+  adaptabilite: 200, reactions: 200, controle: 230, gestionPneus: 200,
 };
 
 function calcUpgradeCost(statKey, currentValue) {
-  const base = STAT_COST_BASE[statKey] || 85;
-  const multiplier = 1 + Math.max(0, (currentValue - 50)) / 50;
+  const base = STAT_COST_BASE[statKey] || 220;
+  // Paliers progressifs : 50→60 normal · 60→70 : +6%/pt · 70→80 : +8%/pt · 80+ : +5%/pt
+  let multiplier;
+  if (currentValue < 60)      multiplier = 1.0;
+  else if (currentValue < 70) multiplier = 1.0 + (currentValue - 60) * 0.06;   // ×1.0 → ×1.6
+  else if (currentValue < 80) multiplier = 1.6 + (currentValue - 70) * 0.08;   // ×1.6 → ×2.4
+  else                         multiplier = 2.4 + (currentValue - 80) * 0.05;   // ×2.4 → ×3.35 à 99
   return Math.round(base * multiplier);
 }
 
@@ -16948,7 +16957,9 @@ async function handleInteraction(interaction) {
         {
           name: '🗞️ News & Infos',
           value: [
-            '`/news [page]` — Derniers articles paddock (rumeurs, drama, rivalités)',
+            '`/gp_recap [gps:1-4]` — ⚡ **Résumé express** des derniers GPs + news + classement *(rattrapage rapide !)*',
+            '`/season_recap` — Bilan complet de la saison (classements, stats, narratif)',
+            '`/news [page]` — Tous les articles paddock (rumeurs, drama, rivalités)',
             '`/concept` — Présentation complète du jeu *(pour les nouveaux !)*',
             '`/f1` — Affiche ce panneau',
           ].join('\n'),
@@ -17638,6 +17649,143 @@ async function handleInteraction(interaction) {
     } catch(e) {
       console.error('[season_recap] Erreur :', e.message, e.stack);
       return interaction.editReply({ content: `❌ Erreur lors du chargement du bilan : ${e.message}`, ephemeral: true });
+    }
+  }
+
+  // ── /gp_recap ─────────────────────────────────────────────
+  if (commandName === 'gp_recap') {
+    try {
+      const nbGps   = Math.min(4, Math.max(1, interaction.options.getInteger('gps') || 2));
+      const season  = await getActiveSeason();
+      if (!season) return interaction.editReply({ content: '❌ Aucune saison active.', ephemeral: true });
+
+      // Récupère les N derniers GPs terminés
+      const lastRaces = await Race.find({ seasonId: season._id, status: 'done' })
+        .sort({ index: -1 }).limit(nbGps).lean();
+
+      if (!lastRaces.length)
+        return interaction.editReply({ content: '❌ Aucun GP terminé pour l\'instant cette saison.', ephemeral: true });
+
+      lastRaces.reverse(); // ordre chronologique
+
+      const allPilots = await Pilot.find().lean();
+      const allTeams  = await Team.find().lean();
+      const pilotMap  = new Map(allPilots.map(p => [String(p._id), p]));
+      const teamMap   = new Map(allTeams.map(t => [String(t._id), t]));
+
+      // ── Classement pilotes actuel ─────────────────────────
+      const standings = await Standing.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+      const totalRaces = await Race.countDocuments({ seasonId: season._id });
+      const doneRaces  = await Race.countDocuments({ seasonId: season._id, status: 'done' });
+      const nextRace   = await Race.findOne({
+        seasonId: season._id,
+        status: { $in: ['upcoming','practice_done','quali_done'] }
+      }).sort({ index: 1 }).lean();
+
+      // ── Bloc par GP ───────────────────────────────────────
+      const gpBlocks = [];
+      for (const race of lastRaces) {
+        const results = race.raceResults || [];
+        if (!results.length) continue;
+
+        // Podium
+        const podium = results.slice(0, 3).map((r, i) => {
+          const p = pilotMap.get(String(r.pilotId));
+          const t = p ? teamMap.get(String(p.teamId)) : null;
+          const medals = ['🥇','🥈','🥉'];
+          if (r.dnf) return `${medals[i]} DNF`;
+          return `${medals[i]} ${t?.emoji||''}**${p?.name||'?'}**`;
+        }).join(' · ');
+
+        // Pole
+        const gpRecs = await PilotGPRecord.find({ raceId: race._id, isPole: true }).lean();
+        const polePilot = gpRecs.length ? pilotMap.get(String(gpRecs[0].pilotId)) : null;
+        const poleT     = polePilot?.teamId ? teamMap.get(String(polePilot.teamId)) : null;
+        const poleLine  = polePilot ? `🏁 Pole : ${poleT?.emoji||''}**${polePilot.name}**` : '';
+
+        // Fastest lap & DOTD
+        const flRec   = results.find(r => r.fastestLap);
+        const flPilot = flRec ? pilotMap.get(String(flRec.pilotId)) : null;
+        const dotdRec  = await PilotGPRecord.findOne({ raceId: race._id, driverOfTheDay: true }).lean();
+        const dotdPilot = dotdRec ? pilotMap.get(String(dotdRec.pilotId)) : null;
+        const extrasLine = [
+          flPilot   ? `⚡ FL : **${flPilot.name}**`   : null,
+          dotdPilot ? `🌟 DOTD : **${dotdPilot.name}**` : null,
+        ].filter(Boolean).join(' · ');
+
+        // DNFs notables
+        const dnfs = results.filter(r => r.dnf);
+        const dnfLine = dnfs.length
+          ? `💀 DNF (${dnfs.length}) : ${dnfs.slice(0,3).map(r => pilotMap.get(String(r.pilotId))?.name || '?').join(', ')}${dnfs.length > 3 ? '…' : ''}`
+          : '';
+
+        const lines = [podium, poleLine, extrasLine, dnfLine].filter(Boolean).join('\n');
+        gpBlocks.push({ title: `${race.emoji || '🏁'} ${race.circuit} — GP ${race.index + 1}`, value: lines || '—' });
+      }
+
+      // ── Top 3 pilotes au championnat ──────────────────────
+      const top3Lines = standings.slice(0, 3).map((s, i) => {
+        const p = pilotMap.get(String(s.pilotId));
+        const t = p ? teamMap.get(String(p.teamId)) : null;
+        const medals = ['🥇','🥈','🥉'];
+        return `${medals[i]} ${t?.emoji||''}**${p?.name||'?'}** — ${s.points} pts`;
+      }).join('\n');
+
+      // ── Écart de titre ────────────────────────────────────
+      let gapLine = '';
+      if (standings.length >= 2) {
+        const gap = standings[0].points - standings[1].points;
+        const p1 = pilotMap.get(String(standings[0].pilotId));
+        const p2 = pilotMap.get(String(standings[1].pilotId));
+        const gpLeft = totalRaces - doneRaces;
+        if (p1 && p2) {
+          gapLine = gap <= 10
+            ? `🔥 **${gap} pts** entre **${p1.name}** et **${p2.name}** — tout ouvert !`
+            : `📊 **${p1.name}** mène de **${gap} pts** sur **${p2.name}** · ${gpLeft} GP${gpLeft>1?'s':''} restant${gpLeft>1?'s':''}`;
+        }
+      }
+
+      // ── 3 dernières news ──────────────────────────────────
+      const recentNews = await NewsArticle.find({ queued: false })
+        .sort({ publishedAt: -1 }).limit(3).lean();
+      const newsLines = recentNews.map(a => {
+        const typeEmojis = { rivalry:'⚔️', transfer_rumor:'🔄', drama:'💥', hype:'🚀',
+          form_crisis:'📉', teammate_duel:'👥', dev_vague:'⚙️', scandal:'💣',
+          title_fight:'🏆', driver_interview:'🎤', sponsoring:'💸', social_media:'📱' };
+        const emoji = typeEmojis[a.type] || '📰';
+        const date  = new Date(a.publishedAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'short' });
+        return `${emoji} **${a.headline}** *(${date})*`;
+      }).join('\n');
+
+      // ── Prochain GP ───────────────────────────────────────
+      const nextLine = nextRace
+        ? `➡️ **Prochain :** ${nextRace.emoji||'🏁'} **${nextRace.circuit}** · *${nextRace.gpStyle?.toUpperCase() || 'MIXTE'}*`
+        : '🏁 *Fin de saison.*';
+
+      // ── Construction embed ────────────────────────────────
+      const embed = new EmbedBuilder()
+        .setTitle(`⚡ Rattrapage Express — Saison ${season.year} (GP ${doneRaces}/${totalRaces})`)
+        .setColor('#FF1801')
+        .setDescription(
+          `> *${nbGps} dernier${nbGps > 1 ? 's' : ''} GP${nbGps > 1 ? 's' : ''} · classement · news · prochain GP*\n\n` +
+          `**🏆 Championnat**\n${top3Lines}\n${gapLine ? `\n${gapLine}` : ''}`
+        );
+
+      for (const blk of gpBlocks) {
+        embed.addFields({ name: blk.title, value: blk.value, inline: false });
+      }
+
+      if (newsLines) {
+        embed.addFields({ name: '🗞️ Dernières news', value: newsLines, inline: false });
+      }
+
+      embed.addFields({ name: '📅 Prochaine étape', value: nextLine, inline: false });
+      embed.setFooter({ text: `Saison ${season.year} · /season_recap pour le bilan complet · /news pour tous les articles` });
+
+      return interaction.editReply({ embeds: [embed] });
+    } catch(e) {
+      console.error('[gp_recap] Erreur :', e.message, e.stack);
+      return interaction.editReply({ content: `❌ Erreur : ${e.message}`, ephemeral: true });
     }
   }
 
