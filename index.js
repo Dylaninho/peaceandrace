@@ -941,49 +941,189 @@ function assignRandomPersonality() {
   };
 }
 
-function getRadioQuote(pilot, event) {
+function getRadioQuote(pilot, event, context = {}) {
   const tone = pilot?.personality?.tone;
+  const arch = pilot?.personality?.archetype;
+  const rivalryStyle = pilot?.personality?.rivalryStyle;
+  const ego = pilot?.personality?.ego || 50;
+  const rivalName = context.rivalName || null;
+  const rivalHeat = context.rivalHeat || 0;
+  const wasContact = context.wasContact || false;
+  const wasBorderline = context.wasBorderline || false;
+
   if (!tone) return null;
+
+  // ── Radios rivalité — déclenchées quand y'a un rival impliqué ────────────
+  // Plus trash selon le heat, le tone et si y'a eu contact
+  if (rivalName && (event === 'overtake_success' || event === 'defending' || event === 'contact')) {
+    const hotRival = rivalHeat >= 50;
+    const nuclear  = rivalHeat >= 75;
+
+    if (event === 'contact' || wasContact) {
+      const contactRadios = {
+        agressif: nuclear
+          ? [`C'EST QUOI CE BORDEL ?! IL M'A FOUTTU DEDANS !!! ${rivalName} VA M'ENTENDRE !!!`,
+             `PUTAIN DE ${rivalName.toUpperCase()} !!! REGARDEZ COMMENT IL CONDUIT CE MERDE !!!`,
+             `IL M'A DÉTRUIT LA VOITURE !!! JE VAIS LE TUER CE CON !!!`]
+          : [`${rivalName} m'a touché ! C'est VOLONTAIRE ça !!!`,
+             `Il m'a rentré dedans !!! C'est quoi cette conduite ???`,
+             `PENALTY !!! C'est une honte ce qu'il fait !!!`],
+        sarcastique: nuclear
+          ? [`Bravo ${rivalName}. Champion du monde de la malpropreté.`,
+             `Évidemment. Fallait que ce soit lui. Évidemment.`,
+             `"Pilote du dimanche" — c'est marqué sur son casque ou c'est juste une impression ?`]
+          : [`Ah. Il m'a touché. Surprise.`,
+             `${rivalName}... j'aurais dû m'y attendre.`,
+             `Contact. Comme d'habitude avec lui.`],
+        froid: nuclear
+          ? [`Dommages importants. ${rivalName} était clairement délibéré. Rapport FIA immédiat.`,
+             `Contact intentionnel. J'enregistre tout. On verra après la course.`]
+          : [`Contact avec ${rivalName}. Dommages ? Dites-moi.`,
+             `Il m'a touché. Faites remonter à la FIA.`],
+        humble: nuclear
+          ? [`C'est... c'est voulu ça ?! Il m'a vraiment fait ça ?!`,
+             `Je comprends pas... pourquoi il m'a mis dedans ???`]
+          : [`Aïe, contact avec ${rivalName}... voiture OK ?`,
+             `Il m'a touché... je pense pas que c'était intentionnel ?`],
+        diplomatique: nuclear
+          ? [`Ce n'est pas acceptable. ${rivalName} savait exactement ce qu'il faisait.`,
+             `J'espère que les commissaires ont vu. C'était clairement intentionnel.`]
+          : [`Contact avec ${rivalName}. On regardera les images ensemble.`,
+             `Ça arrive. On en parlera après la course.`],
+        ironique: nuclear
+          ? [`${rivalName} joue au billard apparemment. Ma voiture est la boule blanche.`,
+             `C'est beau l'amitié. Il m'embrasse avec son aileron.`]
+          : [`Ah tiens, ${rivalName} veut du contact. Original.`,
+             `Sympa la bise. Un peu brusque mais sympa.`],
+      };
+      const pool = contactRadios[tone] || contactRadios.froid;
+      return pick(pool);
+    }
+
+    if (event === 'overtake_success') {
+      const overRadios = {
+        agressif: hotRival
+          ? [`HA !!! DANS TA FACE ${rivalName.toUpperCase()} !!! C'EST MON TOUR MAINTENANT !!!`,
+             `OUIII !!! IL EST PASSÉ !!! IL PEUT PAS ME TENIR !!! JAMAIS !!!`,
+             `T'AS VU ${rivalName} ??? C'EST ÇA UN VRAI PILOTE !!!`]
+          : [`HA ! C'est MON tour ! Dans ta face !`,
+             `Il est passé ! Je le savais ! Je LE SAVAIS !`,
+             `${rivalName} peut aller se rhabiller.`],
+        sarcastique: hotRival
+          ? [`Oh pardon ${rivalName}, je t'ai gêné ? C'est ma position maintenant.`,
+             `Difficile à avaler hein ${rivalName}. Prends le temps qu'il faut.`,
+             `Je note pour le débrief : ${rivalName} se fait passer. Encore.`]
+          : [`Il est passé. Comme prévu.`,
+             `${rivalName}... trop facile franchement.`,
+             `Ah tiens, ça marche.`],
+        froid: hotRival
+          ? [`Dépassement confirmé sur ${rivalName}. Gap ?`,
+             `Position acquise. ${rivalName} neutralisé.`]
+          : [`Position sur ${rivalName}. Rythme ?`,
+             `Dépassement propre. On continue.`],
+        humble: hotRival
+          ? [`JE L'AI EU !!! J'AI PASSÉ ${rivalName.toUpperCase()} !!! OH MON DIEU !!!`,
+             `Incroyable !!! On peut tenir maintenant ?! Dites-moi qu'on peut tenir !!!`]
+          : [`Je l'ai eu ! Je l'ai eu !`,
+             `Trop bien !!! On peut tenir cette position ?`],
+        diplomatique: hotRival
+          ? [`Dépassement propre sur ${rivalName}. La meilleure réponse c'est sur la piste.`,
+             `C'est fait. Maintenant on gère.`]
+          : [`C'est fait. Propre.`,
+             `Bien joué aux mécanos. On gère la suite.`],
+        ironique: hotRival
+          ? [`${rivalName} fait de la place. Généreux de sa part.`,
+             `Après toutes ces années... c'est encore moi devant. Étrange non ?`,
+             `Je me demande si ${rivalName} réalise qu'il vient de se faire passer. Probablement pas.`]
+          : [`Et voilà.`,
+             `${rivalName} dans le rétro. C'est mieux comme ça.`],
+      };
+      const pool = overRadios[tone] || overRadios.froid;
+      return pick(pool);
+    }
+
+    if (event === 'defending') {
+      const defRadios = {
+        agressif: hotRival
+          ? [`IL NE PASSERA PAS !!! JAMAIS !!! ${rivalName} PEUT RÊVER !!!`,
+             `QU'IL ESSAIE !!! QU'IL ESSAIE JUSTE !!!`,
+             `JE LE BLOQUE JUSQU'AU DRAPEAU DAMIER S'IL LE FAUT !!!`]
+          : [`Il ne passera pas. Jamais.`,
+             `${rivalName} peut essayer tant qu'il veut.`,
+             `Je lui laisse pas un centimètre.`],
+        sarcastique: hotRival
+          ? [`${rivalName} croit qu'il va passer là ? Bonne chance mon grand.`,
+             `Il peut coller autant qu'il veut. La porte est fermée.`,
+             `Des années qu'il essaie. Des années qu'il rate.`]
+          : [`${rivalName} là ? Il peut attendre.`,
+             `Bonne chance.`],
+        froid: hotRival
+          ? [`${rivalName} en approche. Défense optimale. Je le contrôle.`,
+             `Gap stable. Il ne passera pas dans ces conditions.`]
+          : [`Défense en cours. Gap ?`,
+             `Je le contrôle.`],
+        humble: hotRival
+          ? [`Il est vraiment rapide là... je tiens encore combien de tours ?`,
+             `${rivalName} revient fort... je vais avoir du mal...`]
+          : [`Il est rapide hein... j'essaie de tenir.`,
+             `Je le bloque mais c'est chaud !`],
+        diplomatique: hotRival
+          ? [`${rivalName} en approche. Je défends ma position proprement.`,
+             `La bataille est là. Je maintiens.`]
+          : [`Position maintenue. On gère.`,
+             `Défense propre.`],
+        ironique: hotRival
+          ? [`${rivalName} colle. C'est quoi ce plan exactement ? Il va rester là tout le GP ?`,
+             `Il pense qu'il va passer ? Moi je suis là depuis 10 tours. Il commence à fatiguer ou pas ?`]
+          : [`Il peut attendre 3 tours. J'en ai connu de plus rapides.`,
+             `Je me repose. Il se fatigue.`],
+      };
+      const pool = defRadios[tone] || defRadios.froid;
+      return pick(pool);
+    }
+  }
+
+  // ── Radios standards (sans rival) ────────────────────────────────────────
   const Q = {
     overtake_success: {
-      agressif    : ['HA ! C\'est MON tour !','Rien a faire contre ca.','Je LE SAVAIS.'],
-      sarcastique  : ['Il est passe ou lui ?','Facile.','Ah. Sympa.'],
-      froid        : ['Position acquise. Gap ?','Depassement confirme.','Bien. Rythme ?'],
-      humble       : ['Incroyable ! On peut tenir ?','C\'etait chaud !','Je l\'ai eu !'],
-      diplomatique : ['Parfait. Je gere.','Bien joue.','Propre. Merci.'],
-      ironique     : ['Apres toutes ces annees...','Ca marche encore.','Je note ca.'],
+      agressif    : ['HA ! C\'est MON tour !', 'Rien à faire contre ça.', 'Je LE SAVAIS.', 'OUIII !!! IL EST PASSÉ !!!'],
+      sarcastique  : ['Il est passé ou lui ?', 'Facile.', 'Ah. Sympa.', 'Je l\'attendais là celui-là.'],
+      froid        : ['Position acquise. Gap ?', 'Dépassement confirmé.', 'Bien. Rythme ?'],
+      humble       : ['Incroyable ! On peut tenir ?', 'C\'était chaud !', 'Je l\'ai eu !', 'Oh mon dieu oui !!!'],
+      diplomatique : ['Parfait. Je gère.', 'Bien joué.', 'Propre. Merci.'],
+      ironique     : ['Après toutes ces années...', 'Ça marche encore.', 'Je note ça.', 'Il était là. Maintenant non.'],
     },
     dnf: {
-      agressif    : ['C\'EST QUOI CA ?! NON !','Je vais TOUT CASSER.','CA FAIT MAL !'],
-      sarcastique  : ['Parfait. Absolument parfait.','Je rentre. Bonne journee.'],
-      froid        : ['Abandon confirme.','Dommage. On analyse.','Panne. Fin de course.'],
-      humble       : ['Desole les gars, vraiment.','Je suis frustre pour l\'equipe.','On fera mieux.'],
-      diplomatique : ['C\'est decevant. On verra ca ensemble.','Restons soudes.'],
-      ironique     : ['C\'etait trop beau.','Je m\'y attendais.','La voiture a decide avant moi.'],
+      agressif    : ['C\'EST QUOI ÇA ?! NON !', 'Je vais TOUT CASSER.', 'ÇA FAIT MAL !', 'POURQUOI ENCORE ??!'],
+      sarcastique  : ['Parfait. Absolument parfait.', 'Je rentre. Bonne journée.', 'Super. Vraiment.'],
+      froid        : ['Abandon confirmé.', 'Dommage. On analyse.', 'Panne. Fin de course.'],
+      humble       : ['Désolé les gars, vraiment.', 'Je suis frustré pour l\'équipe.', 'On fera mieux.'],
+      diplomatique : ['C\'est décevant. On verra ça ensemble.', 'Restons soudés.'],
+      ironique     : ['C\'était trop beau.', 'Je m\'y attendais.', 'La voiture a décidé avant moi.'],
     },
     safety_car: {
-      agressif    : ['SC ! ON PITE MAINTENANT !','Ne me laissez pas dehors !'],
-      sarcastique  : ['SC. Comme prevu.','Quelle surprise.'],
-      froid        : ['Safety Car. Decision undercut ?','SC deploye. Analyse ?'],
-      humble       : ['SC ! On pit ?','Qu\'est-ce qu\'on fait ?'],
-      diplomatique : ['SC. Je suis a vos ordres.','Votre appel.'],
-      ironique     : ['SC. Qui a fait quoi cette fois ?','On refait la meme erreur ?'],
+      agressif    : ['SC ! ON PITE MAINTENANT !', 'Ne me laissez pas dehors !', 'C\'EST L\'OPPORTUNITÉ !!!'],
+      sarcastique  : ['SC. Comme prévu.', 'Quelle surprise.', 'SC encore. Classique.'],
+      froid        : ['Safety Car. Décision undercut ?', 'SC déployé. Analyse ?'],
+      humble       : ['SC ! On pit ?', 'Qu\'est-ce qu\'on fait ?', 'C\'est quoi le plan ?'],
+      diplomatique : ['SC. Je suis à vos ordres.', 'Votre appel.'],
+      ironique     : ['SC. Qui a fait quoi cette fois ?', 'On refait la même erreur ?'],
     },
     defending: {
-      agressif    : ['Il ne passera PAS.','Il peut essayer tant qu\'il veut.'],
-      sarcastique  : ['Il croit pouvoir passer la ?','Bonne chance.'],
-      froid        : ['Defense optimale. Gap stable.','Je le controle.'],
-      humble       : ['Il est rapide... je tiens ?','J\'essaie de le bloquer !'],
-      diplomatique : ['Position maintenue.','Defense propre.'],
-      ironique     : ['Il peut attendre 3 tours.','Je me repose.'],
+      agressif    : ['Il ne passera PAS.', 'Il peut essayer tant qu\'il veut.', 'JAMAIS.'],
+      sarcastique  : ['Il croit pouvoir passer là ?', 'Bonne chance.', 'J\'attends.'],
+      froid        : ['Défense optimale. Gap stable.', 'Je le contrôle.'],
+      humble       : ['Il est rapide... je tiens ?', 'J\'essaie de le bloquer !'],
+      diplomatique : ['Position maintenue.', 'Défense propre.'],
+      ironique     : ['Il peut attendre 3 tours.', 'Je me repose.'],
     },
     win: {
-      agressif    : ['C\'EST MOI !!! OUUUIIII !!!','INCROYABLE !!!'],
-      sarcastique  : ['Bien sur.','Logique.','Ce n\'etait pas complique.'],
-      froid        : ['Victoire. Merci a tous.','Course maitrisee.'],
-      humble       : ['Oh mon dieu... MERCI !!!','Je n\'y crois pas !!'],
-      diplomatique : ['Belle victoire d\'equipe. Merci.','Superbe travail collectif.'],
-      ironique     : ['...Ah. C\'est fait.','Une de plus.'],
+      agressif    : ['C\'EST MOI !!! OUUUIIII !!!', 'INCROYABLE !!!', 'PERSONNE NE M\'ARRÊTE !!!'],
+      sarcastique  : ['Bien sûr.', 'Logique.', 'Ce n\'était pas compliqué.', 'Comme prévu.'],
+      froid        : ['Victoire. Merci à tous.', 'Course maîtrisée.'],
+      humble       : ['Oh mon dieu... MERCI !!!', 'Je n\'y crois pas !!', 'C\'est incroyable !!!'],
+      diplomatique : ['Belle victoire d\'équipe. Merci.', 'Superbe travail collectif.'],
+      ironique     : ['...Ah. C\'est fait.', 'Une de plus.', 'La routine.'],
     },
   };
   const pool = Q[event]?.[tone];
@@ -1767,6 +1907,16 @@ function choosePitCompound(currentCompound, lapsRemaining, usedCompounds, driver
   const laps = lapsRemaining;
   const aggression = driver?.pilot ? Math.max(0, (60 - (driver.pilot.gestionPneus || 50)) / 60) : 0.3;
   const isSecondStop = (driver?.pitStops || 0) >= 1;
+  const currentWeather = driver?.weather || 'DRY'; // météo actuelle passée via driver.weather
+
+  // ── Règle météo : ne JAMAIS choisir un slick si il pleut encore ─────────
+  // Bug fix : avant ce fix, les pilotes qui pittaient sous pluie prenaient des HARD
+  // parce que la logique sèche ignorait la météo en cours.
+  if (currentWeather === 'WET')  return 'WET';
+  if (currentWeather === 'INTER') {
+    // Sous inter : si les WET sont disponibles on reste inter, sinon WET
+    return usedCompounds.includes('WET') ? 'INTER' : 'WET';
+  }
 
   // ── Règle F1 : obligation d'utiliser 2 compounds différents ──
   // Si on n'a utilisé que SOFT, choisir MEDIUM ou HARD
@@ -10048,6 +10198,24 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
             }
           }
           if (incidentText) events.push({ priority: 10, text: incidentText, gif: pickGif('crash_collision') });
+          // Radio post-contact — très enrichie si c'est un rival
+          if (driver.pilot?.personality && Math.random() < 0.70) {
+            const rq = getRadioQuote(driver.pilot, 'contact', {
+              rivalName: crashAreRivals ? nearest.pilot.name : null,
+              rivalHeat: crashRivalHeat,
+              wasContact: true,
+            });
+            if (rq) events.push({ priority: 4, text: `📻 *Radio ${driver.pilot.name} :* ***"${rq}"***` });
+          }
+          // Réaction de la victime aussi
+          if (nearest.pilot?.personality && Math.random() < 0.60) {
+            const rqV = getRadioQuote(nearest.pilot, 'contact', {
+              rivalName: crashAreRivals ? driver.pilot.name : null,
+              rivalHeat: crashRivalHeat,
+              wasContact: true,
+            });
+            if (rqV) events.push({ priority: 4, text: `📻 *Radio ${nearest.pilot.name} :* ***"${rqV}"***` });
+          }
         } else {
           // Crash solo
           driver.dnf       = true;
@@ -10156,9 +10324,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       if (aliveSC.length > 1) {
         const leaderTime = aliveSC[0].totalTime;
         if (scState.state === 'SC') {
-          // SC : tout le monde à ~1.5s max entre chaque voiture (réaliste)
+          // SC : resserrement progressif plafonné à 8s max total
+          // P2 = +1s, P3 = +2s... mais P8+ ne dépasse pas 8s derrière le leader
+          // (en F1 réel le SC ne fait pas +15s d'un coup)
           for (let i = 1; i < aliveSC.length; i++) {
-            const maxGap = i * 1500;
+            const maxGap = Math.min(i * 1000, 8000);
             aliveSC[i].totalTime = leaderTime + maxGap;
           }
         } else {
@@ -10258,13 +10428,14 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         }
 
         // ── Trafic post-pit ──
+        // Pénalité réduite : 400-800ms/tour max (était 1500-2500ms — trop violent)
+        // La durée est aussi limitée selon la position de sortie :
+        // sortir en fond de grille = trafic réel, mais un pit à P3 dans un trou = pas de trafic
         if ((driver.trafficLapsLeft || 0) > 0) {
-          lt += 1500 + randInt(0, 1000);
+          lt += 400 + randInt(0, 400);
           driver.trafficLapsLeft--;
-          // Max 1 message "se dégage du trafic" par tour — évite le spam multi-pilotes
           if (driver.trafficLapsLeft === 0 && !trafficEscapeAnnouncedThisLap) {
             trafficEscapeAnnouncedThisLap = true;
-            // "après son arrêt" seulement si le pilote a réellement pité récemment
             const hasPitted = (driver.pitStops || 0) > 0 && (driver.lastPitLap || 0) > 0
               && (lap - (driver.lastPitLap || 0)) <= 6;
             const trafficMsg = hasPitted
@@ -10272,7 +10443,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
               : `🚦 **T${lap}** — ${driver.team.emoji}**${driver.pilot.name}** sort du trafic dense et retrouve de l'air.`;
             events.push({ priority: 2, text: trafficMsg });
           }
-          }
+        }
 
         // ── Overcut : pousse plus fort pour justifier la stratégie ──────────
         // Sans ce bonus, l'overcut ne peut JAMAIS fonctionner : le pilote reste
@@ -10545,6 +10716,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
       if (doPit && driver.pitStops < 3 && lapsRemaining > 8) {
         const posIn      = driver.pos;
         const oldTire    = driver.tireCompound;
+        driver.weather = weather; // passer la météo actuelle à choosePitCompound
         const newCompound = choosePitCompound(oldTire, lapsRemaining, driver.usedCompounds, driver);
 
         // Pit de réparation : aileron = +12-20s, suspension = +8-14s
@@ -10585,21 +10757,16 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
         driver.overcutMode    = false;
         if (!driver.usedCompounds.includes(newCompound)) driver.usedCompounds.push(newCompound);
 
-        // Trafic à la sortie : si des voitures sont proches du pit exit
-        // Fenêtre élargie à 6s (était 4s) pour capturer le vrai peloton compact.
-        // Durée en fonction du nombre de voitures dans la fenêtre :
-        //   1 voiture  : 1-2 tours (trafic léger — peut se dégager vite)
-        //   2-3 voitures : 2-3 tours (peloton groupé — difficile de passer)
-        //   4+ voitures : 3-4 tours (embouteillage réaliste — plein dans le trafic)
-        // Undercut agressif dans trafic dense = avantage réduit (c'est le but)
+        // Trafic à la sortie : uniquement si des voitures sont vraiment proches du pit exit.
+        // Amplitude réduite (1-2 tours max) — le trafic est une gêne, pas une catastrophe.
         const carsNearPitExit = aliveNow.filter(d =>
           !d.pittedThisLap &&
           String(d.pilot._id) !== String(driver.pilot._id) &&
-          Math.abs(d.totalTime - driver.totalTime) < 6000
+          Math.abs(d.totalTime - driver.totalTime) < 4000
         ).length;
-        if (carsNearPitExit >= 4)      driver.trafficLapsLeft = randInt(3, 4);
-        else if (carsNearPitExit >= 2) driver.trafficLapsLeft = randInt(2, 3);
-        else if (carsNearPitExit === 1) driver.trafficLapsLeft = randInt(1, 2);
+        if (carsNearPitExit >= 3)      driver.trafficLapsLeft = 2;
+        else if (carsNearPitExit >= 1) driver.trafficLapsLeft = 1;
+        // Pas de trafic si pit exit dégagé (carsNearPitExit === 0)
 
         // Recalcul positions
         drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime).forEach((d,i) => d.pos = i+1);
@@ -10946,10 +11113,24 @@ const exitNeighborStr = neighborAhead && neighborBehind
           text: `${ovHeader}\n${howDesc}\n${posBlock}\n*Écart : ${gapStr}${gapLeader}*${rivalTag}${teammateTag}${earlyRaceTag}`,
           gif: pickGif(gifCat),
         });
-        // Radio quote dépasseur
-        if (driver.pilot?.personality && Math.random() < 0.28) {
-          const rq = getRadioQuote(driver.pilot, 'overtake_success');
-          if (rq) events.push({ priority: 2, text: `📻 *Radio ${driver.pilot.name} :* *"${rq}"*` });
+        // Radio quote dépasseur — contexte rival injecté si applicable
+        if (driver.pilot?.personality && Math.random() < 0.40) {
+          const rivalCtx = areRivals ? {
+            rivalName: passed.pilot.name,
+            rivalHeat: Math.max(driver.pilot.rivalHeat || 0, passed.pilot.rivalHeat || 0),
+            wasContact: false,
+          } : {};
+          const rq = getRadioQuote(driver.pilot, 'overtake_success', rivalCtx);
+          if (rq) events.push({ priority: 2, text: `📻 *Radio ${driver.pilot.name} :* ***"${rq}"***` });
+        }
+        // Radio du dépassé si c'est son rival qui vient de le passer
+        if (areRivals && passed.pilot?.personality && Math.random() < 0.35) {
+          const rivalCtx = {
+            rivalName: driver.pilot.name,
+            rivalHeat: Math.max(driver.pilot.rivalHeat || 0, passed.pilot.rivalHeat || 0),
+          };
+          const rq2 = getRadioQuote(passed.pilot, 'defending', rivalCtx);
+          if (rq2) events.push({ priority: 2, text: `📻 *Radio ${passed.pilot.name} :* ***"${rq2}"***` });
         }
         overtakeMentioned.add(String(driver.pilot._id));
         overtakeMentioned.add(String(passed.pilot._id));
@@ -11513,12 +11694,12 @@ const exitNeighborStr = neighborAhead && neighborBehind
         const alreadyPen = atk.totalPenalties || 0;
         const effectivePen = atk.dnf ? 0 : Math.min(penSec, Math.max(0, 10 - alreadyPen));
         if (!atk.dnf && effectivePen > 0) {
-          atk.totalTime += effectivePen * 1000;
+          // Pénalité stockée mais PAS appliquée à totalTime en live —
+          // évite le bug d'affichage (gap gonflé par la pénalité avant le prochain tri).
+          // Elle sera ajoutée à totalTime uniquement à la fin de la course.
           atk.totalPenalties = alreadyPen + effectivePen;
           livePenaltySec.set(inv.attackerId, (livePenaltySec.get(inv.attackerId) || 0) + effectivePen);
           racePenalties.push({ pilotId: inv.attackerId, seconds: effectivePen, reason: 'investigation_live', lap: inv.lap });
-          // Recalcul positions immédiat
-          drivers.filter(d => !d.dnf).sort((a, b) => a.totalTime - b.totalTime).forEach((d, i) => d.pos = i + 1);
         }
         resolvedInvestigations.push({ attackerId: inv.attackerId, victimId: inv.victimId, lap: inv.lap, penSec: effectivePen, absolved: false });
         const penEmbed = new EmbedBuilder()
@@ -11619,7 +11800,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
       const alreadyL = atkL.totalPenalties || 0;
       const effectiveL = atkL.dnf ? 0 : Math.min(penSecL, Math.max(0, 10 - alreadyL));
       if (!atkL.dnf && effectiveL > 0) {
-        atkL.totalTime += effectiveL * 1000;
+        // Même logique : pénalité stockée, appliquée au totalTime uniquement à la fin.
         atkL.totalPenalties = alreadyL + effectiveL;
         livePenaltySec.set(inv.attackerId, (livePenaltySec.get(inv.attackerId) || 0) + effectiveL);
         racePenalties.push({ pilotId: inv.attackerId, seconds: effectiveL, reason: 'investigation_live', lap: inv.lap });
@@ -11630,6 +11811,17 @@ const exitNeighborStr = neighborAhead && neighborBehind
   if (lateInvestigations.length > 0) {
     drivers.filter(d => !d.dnf).sort((a, b) => a.totalTime - b.totalTime).forEach((d, i) => d.pos = i + 1);
   }
+
+  // ── Application finale des pénalités au totalTime ────────────────────────
+  // Les pénalités sont stockées dans totalPenalties tout au long de la course
+  // sans toucher à totalTime (évite le bug d'affichage des gaps gonflés).
+  // On les applique ici une seule fois, avant le classement final.
+  for (const d of drivers) {
+    if (!d.dnf && d.totalPenalties > 0) {
+      d.totalTime += d.totalPenalties * 1000;
+    }
+  }
+  drivers.filter(d => !d.dnf).sort((a, b) => a.totalTime - b.totalTime).forEach((d, i) => d.pos = i + 1);
 
   // ── Récap FIA fin de GP — bilan de toutes les décisions rendues en course ────
   if (resolvedInvestigations.length > 0 && channel) {
@@ -17373,6 +17565,11 @@ async function handleInteraction(interaction) {
     const nextRace = await Race.findOne({ seasonId: season._id, status: { $in: ['upcoming','practice_done','quali_done'] } }).sort({ index: 1 }).lean();
     if (!nextRace) return interaction.editReply({ content: '❌ Aucun GP à venir.', ephemeral: true });
 
+    // Bloquer si la course est déjà en cours — plus possible de définir un objectif après le départ
+    if (global.activeRaces?.has(String(nextRace._id))) {
+      return interaction.editReply({ content: `⛔ La course **${nextRace.emoji} ${nextRace.circuit}** est déjà en cours — impossible de définir un objectif après le départ.`, ephemeral: true });
+    }
+
     const existingFocus = await FocusWeekend.findOne({ pilotId: pilot._id, raceId: nextRace._id });
     if (existingFocus) {
       return interaction.editReply({
@@ -19385,17 +19582,22 @@ async function handleInteraction(interaction) {
     const bar   = v => '█'.repeat(Math.round(v/10)) + '░'.repeat(10-Math.round(v/10));
     const embed = new EmbedBuilder().setTitle('🔧 Stats Voitures (état actuel)').setColor('#888888');
     for (const t of teams) {
-      // Calcul masse salariale pour info admin
       const teamCtracts = await Contract.find({ teamId: t._id, active: true }).lean();
       const totalSal = teamCtracts.reduce((sum, c) => sum + (c.salaireBase || 0), 0);
       const salEmoji = totalSal >= 400 ? '💸' : totalSal >= 200 ? '💰' : '🪙';
+      const stats = [t.vitesseMax, t.drs, t.refroidissement, t.dirtyAir, t.conservationPneus, t.vitesseMoyenne];
+      const avgStat = Math.round(stats.reduce((a, b) => a + b, 0) / stats.length);
+      const focusLabel = t.devFocus
+        ? { vitesseMax:'Vit.Max', drs:'DRS', refroidissement:'Refroid.', dirtyAir:'Dirty Air', conservationPneus:'Pneus', vitesseMoyenne:'Moy.' }[t.devFocus] || t.devFocus
+        : 'auto (stat la + faible)';
       embed.addFields({
-        name: `${t.emoji} ${t.name}  (dev: ${t.devPoints} pts)`,
+        name: `${t.emoji} ${t.name}  ·  moy. ${avgStat}  ·  dev: ${t.devPoints} pts`,
         value:
           `Vit. Max ${bar(t.vitesseMax)}${t.vitesseMax}  |  DRS ${bar(t.drs)}${t.drs}\n` +
           `Refroid. ${bar(t.refroidissement)}${t.refroidissement}  |  Dirty ${bar(t.dirtyAir)}${t.dirtyAir}\n` +
-          `Pneus ${bar(t.conservationPneus)}${t.conservationPneus}  |  Moy ${bar(t.vitesseMoyenne)}${t.vitesseMoyenne}\n` +
-          `${salEmoji} Masse salariale : **${totalSal} 🪙/course** *(effet relatif à la médiane grille)*`,
+          `Pneus ${bar(t.conservationPneus)}${t.conservationPneus}  |  Moy.Virages ${bar(t.vitesseMoyenne)}${t.vitesseMoyenne} *(poids ×1.3 technique)*\n` +
+          `🎯 Focus dev : *${focusLabel}*\n` +
+          `${salEmoji} Masse salariale : **${totalSal} 🪙/course**`,
         inline: false,
       });
     }
@@ -21428,30 +21630,28 @@ async function runRace(override, gpIndex = null) {
       await FocusWeekend.findByIdAndUpdate(focus._id, { achieved, checkedAt: new Date() });
 
       if (achieved) {
-        // Attribuer la récompense PLcoins (modulée selon écart overall pour beat_teammate)
         await Pilot.findByIdAndUpdate(focus.pilotId, { $inc: { plcoins: actualReward, totalEarned: actualReward } });
-        // Notif éphémère dans le channel — visible uniquement par le joueur concerné
-        // On passe par une interaction fake impossible ici (hors slash command), donc on poste
-        // un message mention avec le flag allowedMentions limité, le plus discret possible.
-        // Note : les messages channel normaux ne sont pas éphémères hors interaction slash.
-        // Solution : on envoie au channel race avec une mention @user + flag ephemeral simulé
-        // en supprimant le message après 30s pour ne pas polluer.
+        // Notif privée via DM — ne flood plus le channel course
+        let bonusCtx = '';
+        if (focus.objectiveId === 'beat_teammate' && actualReward !== focus.reward) {
+          bonusCtx = actualReward < focus.reward
+            ? ` *(récompense réduite — tu étais favori)*`
+            : ` *(bonus upside — belle perf contre plus fort !)*`;
+        }
         try {
-          if (ch) {
-            // Ligne contextuelle selon écart overall pour beat_teammate
-            let bonusCtx = '';
-            if (focus.objectiveId === 'beat_teammate' && actualReward !== focus.reward) {
-              bonusCtx = actualReward < focus.reward
-                ? ` *(récompense réduite — tu étais favori)*`
-                : ` *(bonus upside — belle perf contre plus fort !)*`;
-            }
-            const notifMsg = await ch.send({
-              content: `🎯 <@${focusPilot.discordId}> — **FOCUS WEEKEND ACCOMPLI !** **${focus.label}** ✅
-💰 **+${actualReward} PLcoins** crédités sur ton compte.${bonusCtx}`,
-              allowedMentions: { users: [focusPilot.discordId] },
+          const discordUser = await client.users.fetch(focusPilot.discordId).catch(() => null);
+          if (discordUser) {
+            await discordUser.send({
+              content: `🎯 **FOCUS WEEKEND ACCOMPLI !** **${focus.label}** ✅\n💰 **+${actualReward} PLcoins** crédités sur ton compte.${bonusCtx}\n*(${nextRace?.emoji || ''} ${race.circuit})*`,
+            }).catch(() => {
+              // DM échoué (DMs désactivés) → fallback mention channel auto-supprimée 30s
+              if (ch) {
+                ch.send({
+                  content: `🎯 <@${focusPilot.discordId}> **FOCUS WEEKEND ACCOMPLI !** **${focus.label}** ✅ — **+${actualReward} PLcoins**${bonusCtx}`,
+                  allowedMentions: { users: [focusPilot.discordId] },
+                }).then(m => setTimeout(() => m.delete().catch(() => {}), 30_000)).catch(() => {});
+              }
             });
-            // Auto-suppression après 60s pour garder le channel propre
-            setTimeout(() => notifMsg.delete().catch(() => {}), 60_000);
           }
         } catch(e) { console.error('[focus_weekend notif]', e.message); }
       }
