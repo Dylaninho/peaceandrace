@@ -14621,7 +14621,7 @@ const commands = [
     .addStringOption(o => o.setName('pilote2').setDescription('Nom exact du pilote 2 (numéro 2)').setRequired(true)),
 
   new SlashCommandBuilder().setName('admin_grid_economy')
-    .setDescription('[ADMIN] Distribution grille, coûts upgrades par pilote et équilibre économique'),
+    .setDescription('[ADMIN] Affiche la distribution grille (gridCtx), les coûts upgrades par pilote et l\'équilibre économique'),
 ];
 
 // ============================================================
@@ -14734,10 +14734,10 @@ const teamCount = await Team.countDocuments();
 //   1er de la grille (pct=1.0, stat 80) → ~250🪙/upgrade
 //   Médian  (pct=0.5, stat 70)          → ~155🪙/upgrade
 //   Dernier (pct=0.0, stat 60)          → ~105🪙/upgrade
-// STAT_COST_BASE — bases ×1.5 vs l'ancien système pour rééquilibrer
+// STAT_COST_BASE — calibré sur la grille réelle (base 250 moyenne pondérée)
 const STAT_COST_BASE = {
-  depassement: 150, freinage: 150, defense: 127,
-  adaptabilite: 112, reactions: 112, controle: 135, gestionPneus: 112,
+  depassement: 262, freinage: 262, defense: 222,
+  adaptabilite: 196, reactions: 196, controle: 236, gestionPneus: 196,
 };
 
 // Calcule le contexte de grille (min/max/médiane overall actifs) — une requête, avant chaque commande
@@ -14757,44 +14757,52 @@ async function buildGridContext() {
 }
 
 // ─── calcUpgradeCost — trois multiplicateurs combinés ────────
-// 1. statMult  : pente variable selon l'overall — plus le pilote est fort, plus la pente est raide
-//    ov >= 78 → diviseur 12  (top : très punitif, stats déjà hautes)
+// Calibré sur la grille réelle observée (ov 57-72, 18 pilotes actifs).
+//
+// 1. statMult  : pente variable selon l'overall
+//    ov >= 78 → diviseur 12  (top : très punitif)
 //    ov 65-77 → diviseur 18  (mid : modéré)
-//    ov <  65 → diviseur 25  (bas : doux, permet de rattraper)
+//    ov <  65 → diviseur 25  (bas : doux, rattrapage possible)
 //
 // 2. overallMult : percentile dans la distribution réelle de la grille
-//    1er (pct=1.0) → ×2.0 · Dernier (pct=0.0) → ×1.0 — se recalibre dynamiquement
+//    1er (pct=1.0) → ×2.0 · Dernier (pct=0.0) → ×1.0
+//    Se recalibre dynamiquement à chaque saison.
 //
-// 3. wealthMult : surtaxe richesse accumulée — punit les gros salaires sans upgrades
-//    plcoins ≤ 500 → ×1.0  ·  plcoins 1000 → ×1.5  ·  plcoins 2000 → ×2.5
+// 3. wealthMult : surtaxe richesse — plafonnée à ×1.5 (était sans cap → bloquant)
+//    Seuil : 800🪙 (était 500) · Pente : /3000 (était /1000)
+//    plcoins ≤  800 → ×1.00  (pas de surtaxe — solde normal)
+//    plcoins = 1300 → ×1.17
+//    plcoins = 2300 → ×1.50 (cap)
+//    plcoins = 3424 → ×1.50 (cap — ne bloque plus les gros soldes)
 //
-// Calibrage cible (grille 55-82, salary 100, solde ~500) :
-//   P1 régulier  (ov 82, pct 0.9) : ~690 coins/GP → cost ~1172🪙 → ~14 upg/saison
-//   P5           (ov 72, pct 0.5) : ~400 coins/GP → cost  ~663🪙 → ~14 upg/saison
-//   P12          (ov 60, pct 0.2) : ~230 coins/GP → cost  ~328🪙 → ~17 upg/saison
-//   Dernier      (ov 55, pct 0.0) : ~240 coins/GP → cost  ~240🪙 → ~24 upg/saison
-//   → Le bas rattrape ~+6 upg/saison — comble ~6 pts de stat en une saison
+// Calibrage cible (grille 57-72 observée) :
+//   P1 régulier (ov 72, pct 1.0) : ~760🪙/GP → cost ~1100🪙 → ~16 upg/saison
+//   P5          (ov 67, pct 0.7) : ~530🪙/GP → cost  ~810🪙 → ~15 upg/saison
+//   P10         (ov 63, pct 0.4) : ~350🪙/GP → cost  ~530🪙 → ~16 upg/saison
+//   Dernier     (ov 57, pct 0.0) : ~270🪙/GP → cost  ~480🪙 → ~13 upg/saison
+//   Gros solde  (ov 60, 3424🪙)  : ~200🪙/GP → cost  ~530🪙 →  ~9 upg/saison
+//   → Écart global : ~7 upg/saison entre le plus actif et le plus accumulateur
 function calcUpgradeCost(statKey, currentValue, pilot = null, gridCtx = null) {
-  const base = STAT_COST_BASE[statKey] || 128;
+  const base = STAT_COST_BASE[statKey] || 222;
   const ov   = pilot ? overallRating(pilot) : 65;
 
-  // 1. Pente stat — diviseur selon l'overall
+  // 1. Pente stat — diviseur variable selon l'overall
   const divisor  = ov >= 78 ? 12 : ov >= 65 ? 18 : 25;
   const statMult = 1 + Math.max(0, (currentValue - 50)) / divisor;
 
-  // 2. Percentile grille
+  // 2. Percentile grille réelle
   let overallMult = 1.0;
   if (gridCtx) {
     const range = Math.max(1, gridCtx.maxOv - gridCtx.minOv);
     const pct   = Math.max(0, Math.min(1, (ov - gridCtx.minOv) / range));
     overallMult = 1.0 + pct * 1.0;
   } else {
-    overallMult = 1 + Math.max(0, (ov - 55)) / 27; // fallback sans gridCtx
+    overallMult = 1 + Math.max(0, (ov - 55)) / 27;
   }
 
-  // 3. Surtaxe richesse
+  // 3. Surtaxe richesse — plafonnée à ×1.5, seuil relevé à 800🪙, pente douce /3000
   const plcoins    = pilot?.plcoins ?? 0;
-  const wealthMult = 1.0 + Math.max(0, plcoins - 500) / 1000;
+  const wealthMult = Math.min(1.5, 1.0 + Math.max(0, plcoins - 800) / 3000);
 
   return Math.round(base * statMult * overallMult * wealthMult);
 }
