@@ -14621,7 +14621,7 @@ const commands = [
     .addStringOption(o => o.setName('pilote2').setDescription('Nom exact du pilote 2 (numéro 2)').setRequired(true)),
 
   new SlashCommandBuilder().setName('admin_grid_economy')
-    .setDescription('[ADMIN] Affiche la distribution grille (gridCtx), les coûts upgrades par pilote et l\'équilibre économique'),
+    .setDescription('[ADMIN] Distribution grille, coûts upgrades par pilote et équilibre économique'),
 ];
 
 // ============================================================
