@@ -15027,13 +15027,16 @@ async function handleInteraction(interaction) {
       const teamRankPct  = teamRank / (constrSt.length || 10);
       const standing     = allStandings.find(s => String(s.pilotId) === pilotIdStr);
 
+      // ── Même logique coefRang que /focus_weekend display ─────────
+      const safeRankPctBtn = (totalPilots > 0 && pilotRank > 0) ? pilotRank / totalPilots : 0.5;
+      const coefRangBtn    = 0.25 + Math.pow(safeRankPctBtn, 0.6) * 2.55;
+
       const diffMap = {
         win           : Math.min(0.95, 0.15 + rankPct * 0.7  + teamRankPct * 0.15),
         podium        : Math.min(0.92, 0.05 + rankPct * 0.6  + teamRankPct * 0.25),
         top5          : Math.min(0.85, Math.max(0.03, rankPct * 0.5 + teamRankPct * 0.3)),
         top10         : Math.min(0.75, Math.max(0.02, rankPct * 0.4 + teamRankPct * 0.25 - 0.1)),
         beat_teammate : Math.min(0.65, Math.max(0.08, 0.3 + (pilot.teamStatus === 'numero2' ? 0.15 : pilot.teamStatus === 'numero1' ? -0.10 : 0))),
-        no_dnf        : Math.min(0.50, Math.max(0.05, (standing?.dnfs || 0) * 0.06 + teamRankPct * 0.15)),
         pole          : Math.min(0.97, 0.20 + rankPct * 0.65 + teamRankPct * 0.12),
       };
       const labelMap = {
@@ -15044,10 +15047,10 @@ async function handleInteraction(interaction) {
       };
 
       const diff   = diffMap[objectiveId] ?? 0.5;
-      // no_dnf : récompense fixe plafonnée (survivre = minimum attendu)
+      // no_dnf : récompense fixe × coefRang (même formule que le display)
       const reward = objectiveId === 'no_dnf'
-        ? Math.min(100, Math.max(30, Math.round(30 + (standing?.dnfs || 0) * 10)))
-        : Math.min(800, Math.max(50, Math.round(50 + Math.pow(diff, 0.65) * 750)));
+        ? Math.min(250, Math.max(15, Math.round(Math.max(18, 25 + (standing?.dnfs || 0) * 7) * coefRangBtn)))
+        : Math.min(1000, Math.max(25, Math.round((40 + Math.pow(diff, 0.65) * 550) * coefRangBtn)));
       const label  = labelMap[objectiveId] ?? objectiveId;
 
       await FocusWeekend.create({
@@ -17668,9 +17671,19 @@ async function handleInteraction(interaction) {
     const totalTeams   = constrSt.length || 10;
     const teamRankPct  = teamRank / totalTeams; // 0.1 = top team, 0.9 = bottom
 
+    // ── Coefficient de rang — favorise fortement les pilotes faibles ──────────
+    // Basé sur la grille réelle en cours de saison (standings pilotes).
+    // Courbe concave : P1 → ×0.25 (très peu)  |  Dernier → ×2.80 (beaucoup)
+    // safeRankPct : fallback 0.5 si pas encore de standings (début de saison)
+    const safeRankPct = (totalPilots > 0 && pilotRank > 0) ? pilotRank / totalPilots : 0.5;
+    const coefRang    = 0.25 + Math.pow(safeRankPct, 0.6) * 2.55;
+    //   P1  (rPct≈0.05) → coef ≈ 0.59   P5  (rPct≈0.25) → coef ≈ 1.26
+    //   P10 (rPct≈0.50) → coef ≈ 1.93   P15 (rPct≈0.75) → coef ≈ 2.40
+    //   P20 (rPct=1.00) → coef ≈ 2.80
+
     // ── Définir les objectifs et leur difficulté relative ─────
     // difficulty : 0 (trivial) → 1 (quasi impossible)
-    // reward     : proportionnel à la difficulté × 200 base
+    // reward     : base(difficulty) × coefRang — le rang amplifie/réduit très fortement
     // La difficulté est ajustée selon le rank du pilote et l'équipe :
     // Un top pilote finir P1 = difficulty 0.4 ; un bottom pilote finir P1 = difficulty 0.95
 
@@ -17706,12 +17719,15 @@ async function handleInteraction(interaction) {
         difficulty: Math.min(0.65, Math.max(0.08, 0.3 + (pilot.teamStatus === 'numero2' ? 0.15 : pilot.teamStatus === 'numero1' ? -0.10 : 0))),
       },
       // ── Finir sans DNF ──
-      // Plafonné à 100 PLcoins max — survivre une course c'est le minimum attendu
+      // Récompense de base faible (survivre est le minimum attendu), amplifiée par le rang.
+      // Un backmarker qui finit gagne bien plus qu'un leader.
       {
         id: 'no_dnf',
         label: 'Terminer la course sans abandon 🛡️',
         difficulty: 0, // difficulty=0 → reward fixe overridé ci-dessous
-        _fixedReward: Math.min(100, Math.max(30, Math.round(30 + (standing?.dnfs || 0) * 10))),
+        _fixedReward: Math.min(250, Math.max(15, Math.round(
+          Math.max(18, 25 + (standing?.dnfs || 0) * 7) * coefRang
+        ))),
       },
       // ── Pole position ──
       {
@@ -17721,16 +17737,18 @@ async function handleInteraction(interaction) {
       },
     ];
 
-    // Calculer la récompense : base 200 × difficulty^0.7 × 400
-    // Plus la difficulté est haute, plus la récompense est grande
-    // Min 50 PLcoins (objectif trivial), max 800 (quasi impossible)
+    // ── Calcul de la récompense finale ───────────────────────────────────────
+    // Formule : base(difficulty) × coefRang
+    //   base  : 40–590 PLcoins selon difficulté (courbe douce, pow 0.65)
+    //   coefRang : ×0.25 (P1) → ×2.80 (dernier) — TRÈS défavorable pour les top pilotes
+    //   plafond : 1000 PLcoins | plancher : 25 PLcoins
     for (const obj of objectives) {
       if (obj._fixedReward !== undefined) {
         obj.reward = obj._fixedReward;
         delete obj._fixedReward;
       } else {
-        const rawReward = Math.round(50 + Math.pow(obj.difficulty, 0.65) * 750);
-        obj.reward = Math.min(800, Math.max(50, rawReward));
+        const baseReward = Math.round(40 + Math.pow(obj.difficulty, 0.65) * 550);
+        obj.reward = Math.min(1000, Math.max(25, Math.round(baseReward * coefRang)));
       }
       // Label de difficulté lisible
       obj.diffLabel = obj.difficulty >= 0.85 ? '🔴 Très difficile'
@@ -17774,15 +17792,10 @@ async function handleInteraction(interaction) {
       .setTitle(`🎯 Focus Weekend — ${nextRace.emoji} ${nextRace.circuit}`)
       .setColor('#FF6600')
       .setDescription(
-        `**${pilot.name}** — P${pilotRank}/${totalPilots} au classement
-` +
-        `Écurie : ${team?.emoji || ''} **${team?.name || '?'}** (P${teamRank} constructeurs)
-
-` +
-        `Choisis ton objectif pour ce GP. Si atteint, tu remportes les PLcoins.
-` +
-        `*La récompense est inversement proportionnelle à ta facilité à l'atteindre.*
-​`
+        `**${pilot.name}** — P${pilotRank}/${totalPilots} au classement · Multiplicateur rang **×${coefRang.toFixed(2)}**\n` +
+        `Écurie : ${team?.emoji || ''} **${team?.name || '?'}** (P${teamRank} constructeurs)\n\n` +
+        `Choisis ton objectif pour ce GP. Si atteint, tu remportes les PLcoins.\n` +
+        `*Les récompenses favorisent fortement les pilotes en bas de grille.*\n​`
       )
       .addFields({ name: 'Objectifs disponibles', value: lines_disp.join("\n") })
       .setFooter({ text: 'Clique un bouton pour valider ton objectif — non modifiable après.' });
