@@ -163,6 +163,10 @@ const PilotSchema = new mongoose.Schema({
   lastUpgradeStat : { type: String, default: null },  // ex: 'freinage'
   upgradeStreak   : { type: Number, default: 0 },     // 1→2→3 = trigger
   specialization  : { type: String, default: null },  // ex: 'freinage' (unique par pilote)
+  // ── Auto-amélioration ───────────────────────────────────────
+  // Activée via /amelioration_auto : l'IA upgrade automatiquement les stats les plus basses
+  // après chaque course, si le pilote a assez de PLcoins
+  autoAmelioration : { type: Boolean, default: false },
   // ── Rivalités ───────────────────────────────────────────────
   rivalId          : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
   rivalContacts    : { type: Number, default: 0 },   // contacts en course cette saison vs rivalId
@@ -1084,46 +1088,205 @@ function getRadioQuote(pilot, event, context = {}) {
   }
 
   // ── Radios standards (sans rival) ────────────────────────────────────────
+  // Ton adapté à la personnalité, à l'humeur et à la situation
+  const pressureLvl = pilot?.personality?.pressureLevel || 0;
+  const egoPilot    = pilot?.personality?.ego || 50;
+  const highPressure = pressureLvl >= 60;
+  const highEgo      = egoPilot >= 70;
+
   const Q = {
     overtake_success: {
-      agressif    : ['HA ! C\'est MON tour !', 'Rien à faire contre ça.', 'Je LE SAVAIS.', 'OUIII !!! IL EST PASSÉ !!!'],
-      sarcastique  : ['Il est passé ou lui ?', 'Facile.', 'Ah. Sympa.', 'Je l\'attendais là celui-là.'],
-      froid        : ['Position acquise. Gap ?', 'Dépassement confirmé.', 'Bien. Rythme ?'],
-      humble       : ['Incroyable ! On peut tenir ?', 'C\'était chaud !', 'Je l\'ai eu !', 'Oh mon dieu oui !!!'],
-      diplomatique : ['Parfait. Je gère.', 'Bien joué.', 'Propre. Merci.'],
-      ironique     : ['Après toutes ces années...', 'Ça marche encore.', 'Je note ça.', 'Il était là. Maintenant non.'],
+      agressif    : [
+        'HA !!! C\'EST MON PUTAIN DE TOUR !!! DANS TA FACE !!!',
+        'OUIII !!! IL EST PASSÉ !!! JE LE SAVAIS !!! JE LE SAVAIS !!!',
+        'Rien à faire contre ça. RIEN. Prochaine cible ?',
+        ...(highEgo ? ['C\'est quoi le score maintenant ? Toujours moi devant, c\'est ça ?'] : []),
+        ...(highPressure ? ['ENFIIIIN !!! DONNEZ-MOI DU RYTHME MAINTENANT !!!'] : []),
+      ],
+      sarcastique  : [
+        'Ah tiens. Il était là. Maintenant il est... pas là.',
+        'J\'aurais pu faire ça depuis 8 tours. Mais bon.',
+        'Facile. Trop facile. Quelqu\'un peut lui dire comment ça marche ?',
+        ...(highEgo ? ['Je vais aller chercher le suivant. Histoire de pas m\'ennuyer.'] : []),
+        'Dépassement validé. Je note dans mon agenda.',
+      ],
+      froid        : [
+        'Position acquise. Gap sur le prochain ?',
+        'Dépassement confirmé. Données pneus ?',
+        'Bien. On continue. Rythme ?',
+        ...(highPressure ? ['Acquis. Mais ça ne suffit pas encore. Combien devant ?'] : []),
+      ],
+      humble       : [
+        'JE L\'AI EU !!! OH MON DIEU ON L\'A EU !!!',
+        'C\'était chaud... on peut tenir cette position ?!',
+        'Incroyable !!! Dites-moi qu\'on peut tenir !!!',
+        ...(highPressure ? ['J\'ai eu peur... j\'ai eu tellement peur. On tient ?'] : []),
+      ],
+      diplomatique : [
+        'C\'est fait. Propre. Merci pour la consigne.',
+        'Dépassement validé. On gère la suite ensemble.',
+        'Parfait. Je reste concentré.',
+      ],
+      ironique     : [
+        'Il était là. Maintenant il est dans mon rétro. Le monde est bien fait.',
+        'Après tout ce temps... ça marche encore.',
+        'Je note ce moment. Pour le savou— non je continue de piloter.',
+        ...(highEgo ? ['On peut aussi faire un classement de mes plus beaux dépassements ? Je demande pour un ami.'] : []),
+      ],
     },
     dnf: {
-      agressif    : ['C\'EST QUOI ÇA ?! NON !', 'Je vais TOUT CASSER.', 'ÇA FAIT MAL !', 'POURQUOI ENCORE ??!'],
-      sarcastique  : ['Parfait. Absolument parfait.', 'Je rentre. Bonne journée.', 'Super. Vraiment.'],
-      froid        : ['Abandon confirmé.', 'Dommage. On analyse.', 'Panne. Fin de course.'],
-      humble       : ['Désolé les gars, vraiment.', 'Je suis frustré pour l\'équipe.', 'On fera mieux.'],
-      diplomatique : ['C\'est décevant. On verra ça ensemble.', 'Restons soudés.'],
-      ironique     : ['C\'était trop beau.', 'Je m\'y attendais.', 'La voiture a décidé avant moi.'],
+      agressif    : [
+        'C\'EST QUOI CE M*RDE ?!! ENCORE ?! NON NON NON !!!',
+        'JE VAIS TOUT P*TER !!! LA VOITURE, LES PNEUS, TOUT !!!',
+        'ÇA FAIT TROP MAL !!! PAS AUJOURD\'HUI !!! POURQUOI AUJOURD\'HUI ?!!',
+        ...(highPressure ? ['J\'EN PEUX PLUS !!! C\'EST LA COMBIENTIÈME FOIS ?!! RÉPONDEZ-MOI !!!'] : []),
+        ...(highEgo ? ['C\'est un SCANDALE !!! Une voiture de cette qualité ne peut PAS lâcher comme ça !!!'] : []),
+      ],
+      sarcastique  : [
+        'Parfait. Absolument parfait. Bravo à tous.',
+        'Ah. On abandonne. Super journée.',
+        'Je rentre. Quelqu\'un peut me garder une assiette ?',
+        ...(highPressure ? ['Formidable. Vraiment. Vous pouvez pas savoir à quel point c\'est formidable.'] : []),
+        'La voiture a décidé avant moi. Comme d\'hab.',
+      ],
+      froid        : [
+        'Abandon confirmé. Cause probable ?',
+        'DNF. On analyse le boîtier en soirée.',
+        'C\'est terminé pour moi. Données télémétrie transmises.',
+        ...(highPressure ? ['Noté. Ce n\'est pas acceptable. On en parle lundi.'] : []),
+      ],
+      humble       : [
+        'Oh non... non... désolé les gars, vraiment désolé...',
+        'Je suis tellement désolé. Toute l\'équipe a bossé pour rien...',
+        'Je me sens vraiment mal là. C\'est nul de ma part.',
+        ...(highPressure ? ['C\'est ma faute ? C\'est ma faute non ? Dites-moi ce qui s\'est passé...'] : []),
+      ],
+      diplomatique : [
+        'C\'est très décevant. On va analyser ensemble et rebondir.',
+        'Pas de panique. On verra ça au débrief. Tête haute.',
+        'Ça arrive. On reste groupés.',
+      ],
+      ironique     : [
+        'C\'était trop beau. J\'aurais dû me méfier.',
+        'La voiture avait d\'autres plans. Je respecte.',
+        'Intéressant. J\'aurais misé sur 5 tours de plus mais bon.',
+        ...(highEgo ? ['Au moins j\'étais le plus rapide jusqu\'à... là.'] : []),
+      ],
     },
     safety_car: {
-      agressif    : ['SC ! ON PITE MAINTENANT !', 'Ne me laissez pas dehors !', 'C\'EST L\'OPPORTUNITÉ !!!'],
-      sarcastique  : ['SC. Comme prévu.', 'Quelle surprise.', 'SC encore. Classique.'],
-      froid        : ['Safety Car. Décision undercut ?', 'SC déployé. Analyse ?'],
-      humble       : ['SC ! On pit ?', 'Qu\'est-ce qu\'on fait ?', 'C\'est quoi le plan ?'],
-      diplomatique : ['SC. Je suis à vos ordres.', 'Votre appel.'],
-      ironique     : ['SC. Qui a fait quoi cette fois ?', 'On refait la même erreur ?'],
+      agressif    : [
+        'SC !!! ON PITE MAINTENANT !!! NE ME LAISSEZ PAS DEHORS !!!',
+        'C\'EST L\'OPPORTUNITÉ !!! OUVREZ LE GARAGE !!!',
+        'TOUT LE MONDE PITE ?! DITES-MOI !! VITE !!',
+        ...(highEgo ? ['SC en ma faveur. Logique. GAREZ-MOI !!!'] : []),
+        ...(highPressure ? ['SC !!! C\'est maintenant ou jamais !!! DÉCIDEZ !!!'] : []),
+      ],
+      sarcastique  : [
+        'SC. Évidemment. Qui a encore tout f*tu en l\'air ?',
+        'Ah. SC. Je m\'y attendais. Qu\'est-ce qu\'on fait de cette magnifique opportunité ?',
+        'Safety Car. Le ciel nous tend la main. On va sûrement rater ça.',
+        ...(highPressure ? ['SC... vous allez encore prendre la mauvaise décision, hein ?'] : []),
+      ],
+      froid        : [
+        'Safety Car déployé. Undercut ou overcut ? Données pneus svp.',
+        'SC. Analyse de la fenêtre de pit. Je peux rentrer ?',
+        'SC confirmé. Quelle est la stratégie optimale ?',
+      ],
+      humble       : [
+        'SC ! Qu\'est-ce qu\'on fait ?! On rentre ?!',
+        'SC ! C\'est bien pour nous ? Vous savez quoi faire, j\'écoute !',
+        'Safety Car ! Donnez-moi un plan, j\'exécute !',
+        ...(highPressure ? ['SC... c\'est positif pour nous là ? J\'ai besoin de savoir !'] : []),
+      ],
+      diplomatique : [
+        'SC déployé. Je suis à votre disposition pour la stratégie.',
+        'Safety Car. Votre décision, je m\'adapte.',
+        'SC. Quel est le plan ?',
+      ],
+      ironique     : [
+        'SC. Encore. Circuit de qualité, le nôtre.',
+        'La Safety Car fait son jogging dominical. Qu\'est-ce qu\'on fait ?',
+        'SC. Qui a fait quoi cette fois ? Non, finalement, peu importe. On pit ?',
+        ...(highEgo ? ['La SC ralentit tout le monde. Sauf moi mentalement, je reste focus.'] : []),
+      ],
     },
     defending: {
-      agressif    : ['Il ne passera PAS.', 'Il peut essayer tant qu\'il veut.', 'JAMAIS.'],
-      sarcastique  : ['Il croit pouvoir passer là ?', 'Bonne chance.', 'J\'attends.'],
-      froid        : ['Défense optimale. Gap stable.', 'Je le contrôle.'],
-      humble       : ['Il est rapide... je tiens ?', 'J\'essaie de le bloquer !'],
-      diplomatique : ['Position maintenue.', 'Défense propre.'],
-      ironique     : ['Il peut attendre 3 tours.', 'Je me repose.'],
+      agressif    : [
+        'IL NE PASSERA PAS !!! JAMAIS !!! JE BLOQUE TOUT !!!',
+        'Il peut rêver !!! Je lui laisse pas un centimètre !!!',
+        ...(highEgo ? ['Moi ? Me faire passer ? C\'est drôle. Non vraiment, c\'est drôle.'] : []),
+        ...(highPressure ? ['IL NE PASSERA PAS !!! PAS MAINTENANT !!! PAS MOI !!!'] : []),
+        'Il peut essayer. Vraiment. Essaie.',
+      ],
+      sarcastique  : [
+        'Il croit qu\'il va passer là. Charmante naïveté.',
+        'Bonne chance. Sérieusement. T\'en auras besoin.',
+        'J\'ouvre la porte ? Non. Je ferme. Je verrouille. Je soude.',
+        ...(highPressure ? ['Fascinant. Il continue d\'essayer. Fascinant.'] : []),
+      ],
+      froid        : [
+        'Pression derrière. Défense en cours. Gap stable.',
+        'Je le contrôle. Ligne défensive optimale.',
+        'Sous pression. Gestion.',
+        ...(highPressure ? ['Il est derrière. Je gère. Ne me distrayez pas.'] : []),
+      ],
+      humble       : [
+        'Il est vachement rapide là... je tiens encore combien de tours ?',
+        'J\'essaie de le bloquer ! C\'est chaud !',
+        ...(highPressure ? ['Il revient... il revient fort... dites-moi quoi faire !'] : []),
+        'Aidez-moi ! Comment je le bloque ?!',
+      ],
+      diplomatique : [
+        'Position maintenue. Défense propre et légale.',
+        'Je couvre. Tout reste correct.',
+        'Défense en cours. Je respecte les règles.',
+      ],
+      ironique     : [
+        'Il peut attendre. J\'ai 3 tours devant moi.',
+        'Je me repose. Il s\'agite. C\'est reposant.',
+        ...(highEgo ? ['Laissez-le tenter. Le spectacle en vaut la peine.'] : []),
+        'Il pense que je ne l\'ai pas vu. Je l\'ai vu depuis le tour 3.',
+      ],
     },
     win: {
-      agressif    : ['C\'EST MOI !!! OUUUIIII !!!', 'INCROYABLE !!!', 'PERSONNE NE M\'ARRÊTE !!!'],
-      sarcastique  : ['Bien sûr.', 'Logique.', 'Ce n\'était pas compliqué.', 'Comme prévu.'],
-      froid        : ['Victoire. Merci à tous.', 'Course maîtrisée.'],
-      humble       : ['Oh mon dieu... MERCI !!!', 'Je n\'y crois pas !!', 'C\'est incroyable !!!'],
-      diplomatique : ['Belle victoire d\'équipe. Merci.', 'Superbe travail collectif.'],
-      ironique     : ['...Ah. C\'est fait.', 'Une de plus.', 'La routine.'],
+      agressif    : [
+        'C\'EST MOI !!! OUUUIIII !!! INCROYABLE !!!',
+        'PERSONNE NE M\'ARRÊTE !!! JAMAIS !!! C\'EST MA VICTOIRE !!!',
+        ...(highEgo ? ['C\'ÉTAIT COURU D\'AVANCE MAIS ON VA QUAND MÊME FÊTER ÇA !!!'] : []),
+        ...(highPressure ? ['ENFIN !!! ENFIN ENFIN ENFIN !!! VOUS VOUS RENDEZ COMPTE ?!!!'] : []),
+        'OUIII !!! TOUT LE MONDE SE LÈVE !!! ON A GAGNÉ !!!',
+      ],
+      sarcastique  : [
+        'Bien sûr. Comme prévu. Quelqu\'un est surpris ?',
+        'C\'était pas compliqué. Enfin... pas pour moi.',
+        ...(highEgo ? ['Je gagnerais avec une voiture de karting si nécessaire. Prouvé.'] : []),
+        'Logique. La prochaine question ?',
+        'Ah. J\'ai gagné. C\'est bien.',
+      ],
+      froid        : [
+        'Victoire. Résultats conformes aux projections.',
+        'Course maîtrisée. Bravo à l\'équipe.',
+        ...(highPressure ? ['Victoire obtenue. Il était temps. Débrief ce soir.'] : []),
+        'P1. Merci. On analyse.',
+      ],
+      humble       : [
+        'OH MON DIEU... OH MON DIEU MERCI !!!',
+        'Je n\'y crois pas !!! C\'est pas possible !!! MERCI !!!',
+        'Pour l\'équipe !!! Pour tout le monde !!! C\'EST INCROYABLE !!!',
+        ...(highPressure ? ['Je... je suis soulagé. Tellement soulagé. Merci. Merci merci merci.'] : []),
+      ],
+      diplomatique : [
+        'Superbe travail d\'équipe. Cette victoire appartient à tout le monde.',
+        'Merci. Vraiment. Une belle journée pour l\'écurie.',
+        'Belle victoire collective. Chapeau à tous.',
+      ],
+      ironique     : [
+        '...Ah. C\'est fait. Pratique.',
+        'Une de plus. Quelqu\'un tient le compte ?',
+        ...(highEgo ? ['Je commençais à m\'ennuyer un peu. Heureusement c\'est terminé.'] : []),
+        'Victoire. La routine a du bon.',
+        'Je l\'ajoute à la liste. Elle est longue.',
+      ],
     },
   };
   const pool = Q[event]?.[tone];
@@ -1980,14 +2143,14 @@ function resolveSafetyCar(scState, lapIncidents) {
   const hasCrash = dangerousOnTrack.some(i => i.type === 'CRASH');
   if (hasCrash) {
     if (nDangerous >= 2) {
-      // Double incident : SC possible mais VSC plus fréquent (F1 moderne)
-      if (roll < 0.55) return { state: 'SC',  lapsLeft: randInt(3, 5) };
+      // Double incident : SC très probable (F1 réaliste — double crash = SC immédiat)
+      if (roll < 0.80) return { state: 'SC',  lapsLeft: randInt(4, 6) };
       return { state: 'VSC', lapsLeft: randInt(2, 4) };
     }
-    // Crash solo : VSC majoritairement
-    if (roll < 0.30) return { state: 'SC',  lapsLeft: randInt(2, 4) };
-    if (roll < 0.75) return { state: 'VSC', lapsLeft: randInt(2, 3) };
-    return { state: 'NONE', lapsLeft: 0 }; // crash qui se range proprement
+    // Crash solo : SC majoritaire (plus réaliste — un accident bloque souvent la piste)
+    if (roll < 0.55) return { state: 'SC',  lapsLeft: randInt(3, 5) };
+    if (roll < 0.85) return { state: 'VSC', lapsLeft: randInt(2, 3) };
+    return { state: 'NONE', lapsLeft: 0 }; // crash qui se range proprement (rare)
   } else {
     // Crevaison → VSC très probable
     if (roll < 0.55) return { state: 'VSC', lapsLeft: randInt(1, 3) };
@@ -2554,18 +2717,28 @@ function collisionDescription(attacker, victim, lap, attackerDnf, victimDnf, dam
   const rivalSuffix = areRivals ? (
     rivalHeat >= 60
       ? pick([
-          `\n  🔴 ***La rivalité s'embrase — encore eux, encore un contact. Le paddock n'en revient pas.***`,
-          `\n  💥 ***${attacker.pilot.name} vs ${victim.pilot.name} — la haine sur la piste. La FIA ne pourra plus ignorer ce dossier.***`,
-          `\n  🚨 ***Rivalité hors de contrôle — ce contact va faire des vagues bien au-delà de ce GP.***`,
+          `\n  🔴 ***La rivalité déraille — encore eux, encore un contact. Le paddock est sous le choc.***`,
+          `\n  💥 ***${attacker.pilot.name} vs ${victim.pilot.name} — la haine à 300km/h. La FIA ne peut plus ignorer ce dossier. Des sanctions lourdes attendues.***`,
+          `\n  🚨 ***Rivalité hors de contrôle — ce contact va faire des vagues bien au-delà de ce GP. Le paddock réclame des têtes.***`,
         ])
       : rivalHeat >= 30
         ? pick([
-            `\n  ⚔️ *Encore eux. ${attacker.pilot.name} et ${victim.pilot.name} se retrouvent — et ça frotte encore une fois.*`,
-            `\n  📌 *La FIA prend note : nouveau contact entre les deux rivaux. Le dossier s'alourdit.*`,
-            `\n  ⚔️ *Le compteur monte entre ${attacker.pilot.name} et ${victim.pilot.name}. Ce n'est pas fini.*`,
+            `\n  ⚔️ *Encore eux. ${attacker.pilot.name} et ${victim.pilot.name} — la troisième fois ce genre de contact. Ça commence à faire beaucoup.*`,
+            `\n  📌 *La FIA a tout vu. Nouveau contact entre les rivaux. Le dossier devient lourd.*`,
+            `\n  ⚔️ *Le compteur monte entre ${attacker.pilot.name} et ${victim.pilot.name}. Ce n'est plus un hasard.*`,
           ])
-        : `\n  ⚔️ *Contact entre rivaux — la tension entre ${attacker.pilot.name} et ${victim.pilot.name} monte d'un cran.*`
+        : `\n  ⚔️ *Contact entre rivaux — la tension entre ${attacker.pilot.name} et ${victim.pilot.name} monte encore d'un cran.*`
   ) : '';
+
+  // Suffix SC — rappel que ce crash va probablement déclencher une SC
+  const scHintSuffix = (attackerDnf || victimDnf) ? pick([
+    `\n  🚨 *La Safety Car devrait être déployée — débris sur la piste.*`,
+    `\n  🚨 *La voiture est immobilisée sur la trajectoire — la Safety Car est quasi certaine.*`,
+    `\n  🚨 *La direction de course étudie un déploiement SC.*`,
+  ]) : '';
+
+  // Suffix investigation — si l'initiateur (attacker) survit, enquête FIA systématique
+  const invSuffix = !attackerDnf ? `\n  ⚖️ *${attacker.pilot.name} sous investigation FIA — initiateur du contact.*` : '';
 
   const an = attacker.pilot.name;
   const vn = victim.pilot.name;
@@ -2580,44 +2753,54 @@ function collisionDescription(attacker, victim, lap, attackerDnf, victimDnf, dam
   if (isTop3) {
     if (attackerDnf && victimDnf) {
       return pick([
-        `***💥 DOUBLE CATASTROPHE !!! T${lap}***\n  › ***${ae}${an}*** et ***${ve}${vn}*** se PERCUTENT violemment — les deux voitures dans le mur !!! ***DOUBLE DNF !!! La course vient de perdre ses plus beaux acteurs.***`,
-        `***🔥 COLLISION MONUMENTALE !!! T${lap}***\n  › ***${ae}${an}*** (P${ap}) plonge sur ***${ve}${vn}*** (P${vp}) — CONTACT INÉVITABLE — ***LES DEUX ABANDONNENT !!! C'est un désastre absolu.***`,
+        `***💥 DOUBLE CATASTROPHE !!! T${lap}***\n  › ***${ae}${an}*** et ***${ve}${vn}*** se PERCUTENT violemment — les deux voitures dans le mur !!! ***DOUBLE DNF !!! La course vient de perdre ses acteurs principaux. Le podium est à réécrire complètement.***` + scHintSuffix + rivalSuffix,
+        `***🔥 COLLISION MONUMENTALE !!! T${lap}***\n  › ***${ae}${an}*** (P${ap}) plonge sur ***${ve}${vn}*** (P${vp}) — CONTACT INÉVITABLE — ***LES DEUX ABANDONNENT !!! C'est un désastre absolu. L'écurie et les fans sont dévastés.***` + scHintSuffix + rivalSuffix,
+        `***😱 INCROYABLE !!! T${lap} — DOUBLE DNF EN HAUT DU CLASSEMENT !!!***\n  › ${ae}${an} et ${ve}${vn} se touchent à pleine vitesse — les deux sont hors course d'un coup. ***Des points de championnat s'évaporent. Des semaines de travail réduites à néant.***` + scHintSuffix + rivalSuffix,
       ]);
     } else if (attackerDnf) {
       return pick([
-        `***💥 ACCROCHAGE EN HAUT DU CLASSEMENT !!! T${lap}***\n  › ***${ae}${an}*** prend trop de risques sur ${v} (P${vp}) — le contact est BRUTAL. ***${a} abandonne sur le champ.*** ❌\n  › ${v} repart endommagé — **+${(damage/1000).toFixed(1)}s** perdus.`,
+        `***💥 ACCROCHAGE EN HAUT DU CLASSEMENT !!! T${lap}***\n  › ***${ae}${an}*** prend trop de risques sur ${v} (P${vp}) — le contact est BRUTAL. ***${a} abandonne sur le champ.*** ❌\n  › ${v} repart endommagé — **+${(damage/1000).toFixed(1)}s** perdus. ***Une course gâchée par une manœuvre désespérée.***` + scHintSuffix + rivalSuffix,
       ]);
     } else {
       return pick([
-        `***⚠️ CONTACT DANS LE TOP !!! T${lap}***\n  › ${a} (P${ap}) accroche ***${ve}${vn}*** (P${vp}) — ***${v} EXPULSÉ DE LA COURSE !*** ❌ **DNF.**\n  › ${a} continue dans un état lamentable — **+${(damage/1000).toFixed(1)}s**.`,
+        `***⚠️ CONTACT DANS LE TOP !!! T${lap}***\n  › ${a} (P${ap}) accroche ***${ve}${vn}*** (P${vp}) — ***${v} EXPULSÉ DE LA COURSE !*** ❌ **DNF.**\n  › ${a} continue dans un état lamentable — **+${(damage/1000).toFixed(1)}s**. ***La FIA va trancher — et ça va faire du bruit.***` + invSuffix + scHintSuffix + rivalSuffix,
       ]);
     }
   }
 
-  // ── Drama modéré : top 8 ──────────────────────────────────
+  // ── Drama modéré : top 8 — positions importantes, story telling ──────────
   if (isTop8) {
+    const champContext = (ap <= 5 || vp <= 5)
+      ? pick([
+          ` ***Des points de championnat qui partent en fumée.***`,
+          ` ***C'est toute une saison qui peut basculer sur ce genre d'incident.***`,
+          ` ***L'impact au championnat pourrait être énorme.***`,
+        ])
+      : '';
     const intro = pick([
-      `🚨 **T${lap} — ACCROCHAGE !** ${a} (P${ap}) et ${v} (P${vp}) se touchent — les pièces volent !`,
-      `💥 **T${lap} — CONTACT !** ${a} plonge sur ${v} — impact violent pour les deux.`,
+      `🚨 **T${lap} — ACCROCHAGE !** ${a} (P${ap}) et ${v} (P${vp}) se touchent — les pièces volent !${champContext}`,
+      `💥 **T${lap} — CONTACT !** ${a} plonge sur ${v} — impact violent pour les deux.${champContext}`,
+      `🔥 **T${lap} — INCIDENT SÉRIEUX !** ${a} (P${ap}) touche ${v} (P${vp}) dans les rues du circuit.${champContext}`,
     ]);
     let consequence = '\n';
-    if (attackerDnf && victimDnf) consequence += `  ❌ **Double DNF.** Les deux hors course.`;
+    if (attackerDnf && victimDnf) consequence += `  ❌ **Double DNF.** Les deux hors course — la Safety Car quasi inévitable.`;
     else if (attackerDnf)         consequence += `  ❌ ${a} abandonne (DNF).\n  ⚠️ ${v} repart abîmé — **+${(damage/1000).toFixed(1)}s**.`;
-    else if (victimDnf)           consequence += `  ❌ ${v} hors course (DNF).\n  ⚠️ ${a} continue endommagé.`;
-    else                          consequence += `  ⚠️ Les deux continuent avec des dégâts.`;
-    return intro + consequence + rivalSuffix;
+    else if (victimDnf)           consequence += `  ❌ ${v} hors course (DNF).\n  ⚠️ ${a} continue endommagé.` + invSuffix;
+    else                          consequence += `  ⚠️ Les deux continuent avec des dégâts — la FIA va regarder ça.` + invSuffix;
+    return intro + consequence + scHintSuffix + rivalSuffix;
   }
 
-  // ── Sobre : fond de grille ────────────────────────────────
+  // ── Sob (fond de grille) — mais toujours drama sur les DNF ────────────────
   const intros = [
     `💥 **T${lap} — CONTACT !** ${a} (P${ap}) plonge sur ${v} (P${vp}) — les deux se touchent.`,
     `🚨 **T${lap}** — ${a} (P${ap}) accroche l'arrière de ${v} (P${vp}).`,
+    `💢 **T${lap}** — Incident entre ${a} (P${ap}) et ${v} (P${vp}) — les commissaires vont regarder ça.`,
   ];
   let consequence = '\n';
-  if (attackerDnf && victimDnf) consequence += `  ❌ **Double DNF.**`;
+  if (attackerDnf && victimDnf) consequence += `  ❌ **Double DNF.**` + scHintSuffix;
   else if (attackerDnf)         consequence += `  ❌ ${a} abandonne (DNF). ⚠️ ${v} continue abîmé — **+${(damage/1000).toFixed(1)}s**.`;
-  else if (victimDnf)           consequence += `  ❌ ${v} hors course (DNF). ⚠️ ${a} continue endommagé.`;
-  else                          consequence += `  ⚠️ Les deux continuent — les commissaires prennent note.`;
+  else if (victimDnf)           consequence += `  ❌ ${v} hors course (DNF). ⚠️ ${a} continue endommagé.` + invSuffix;
+  else                          consequence += `  ⚠️ Les deux continuent — les commissaires prennent note.` + invSuffix;
   return pick(intros) + consequence + rivalSuffix;
 }
 
@@ -7179,19 +7362,37 @@ async function generateDriverOfTheDay(race, finalResults, drivers, channel) {
     { $set: { driverOfTheDay: true } }
   );
 
-  // ── Bonus PLcoins DOTD ───────────────────────────────────
-  const DOTD_REWARD = 150; // PLcoins pour le Driver of the Day
+  // ── Bonus PLcoins DOTD — dynamique selon position au classement ─────────
+  // Base 150, bonus selon position au championnat et performance en course
+  const winnerStanding = await Standing.findOne({ seasonId: race.seasonId, pilotId: winner.pilot._id }).lean();
+  const allStandingsDotd = await Standing.find({ seasonId: race.seasonId }).sort({ points: -1 }).lean();
+  const champRankDotd = allStandingsDotd.findIndex(s => String(s.pilotId) === String(winner.pilot._id));
+  const totalPilotsDotd = allStandingsDotd.length || 1;
+  // Plus le pilote est bas au classement, plus la récompense DOTD est symboliquement grosse (underdog prime)
+  // Top 3 au champ : +0 bonus classement | Dernier : +200 bonus
+  const champRankBonus = champRankDotd >= 0
+    ? Math.round(((champRankDotd) / (totalPilotsDotd - 1)) * 200)
+    : 0;
+  // Bonus remontée : +25 par place gagnée (max 10 places = +250)
+  const remonteeBonus = Math.min(250, Math.max(0, winner.placesGained) * 25);
+  // Bonus underdog voiture : si petite écurie (carScore < 68), +100
+  const underdogCarBonus = carScore(winner.team, gpStyle) < 68 ? 100 : 0;
+  // Base 150, plus bonus
+  const DOTD_REWARD = 150 + champRankBonus + remonteeBonus + underdogCarBonus;
   await Pilot.findByIdAndUpdate(winner.pilot._id, { $inc: { plcoins: DOTD_REWARD, totalEarned: DOTD_REWARD } });
   // Notif DM au joueur
   try {
     const discordUser = await client.users.fetch(winner.pilot.discordId).catch(() => null);
     if (discordUser) {
+      const bonusDetails = [];
+      if (champRankBonus > 0) bonusDetails.push(`+${champRankBonus}🪙 (classement #${champRankDotd + 1})`);
+      if (remonteeBonus > 0) bonusDetails.push(`+${remonteeBonus}🪙 (remontée +${winner.placesGained} places)`);
+      if (underdogCarBonus > 0) bonusDetails.push(`+${underdogCarBonus}🪙 (bonus underdog)`);
+      const bonusLine = bonusDetails.length ? `\n*Détail : 150 base ${bonusDetails.join(' · ')}*` : '';
       await discordUser.send(
-        `🏆 **DRIVER OF THE DAY !**
-` +
-        `**${winner.pilot.name}** a été élu Driver of the Day au ${race.emoji} ${race.circuit} !
-` +
-        `💰 **+${DOTD_REWARD} PLcoins** crédités sur ton compte.`
+        `🏆 **DRIVER OF THE DAY !**\n` +
+        `**${winner.pilot.name}** a été élu Driver of the Day au ${race.emoji} ${race.circuit} !\n` +
+        `💰 **+${DOTD_REWARD} PLcoins** crédités sur ton compte.${bonusLine}`
       ).catch(() => {});
     }
   } catch(e) { console.error('[DOTD PLcoins]', e.message); }
@@ -10401,7 +10602,9 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
           driver.setupBonusMs || 0         // bonus setup E3 — constant tout le race
         );
 
-        // ── DRS réaliste : bonus si < 1.2s du pilote devant ──
+        // ── DRS réaliste : bonus fort si < 1.2s du pilote devant ──
+        // Sous 1.0s : DRS très efficace, permet de rester au contact même contre un pilote plus fort
+        // Sous 0.5s : DRS maximal — la voiture derrière colle vraiment et peut menacer sérieusement
         if (scCooldown === 0 && (driver.pos || 1) > 1 && lap >= 3) { // DRS activé seulement à partir du tour 3
           const drsCircuit = gpStyle === 'rapide' || gpStyle === 'mixte';
           if (drsCircuit) {
@@ -10411,7 +10614,16 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
               const aheadPreTime = preLapTimes.get(String(pilotAheadObj.pilot._id)) ?? pilotAheadObj.totalTime;
               const realGapMs    = Math.max(0, myPreTime - aheadPreTime);
               if (realGapMs < 1200) {
-                const drsBonus = Math.round((driver.team.drs / 100) * 600 * (1 - realGapMs / 1200));
+                // Bonus de base — proportionnel à la stat DRS de la voiture
+                const baseDrs = (driver.team.drs / 100) * 800; // augmenté de 600 → 800
+                // Multiplicateur de gap : plus le gap est faible, plus le DRS aide
+                // < 500ms : ×1.8 (DRS + slipstream maximal — la voiture derrière est vraiment dans la zone)
+                // 500-1000ms : ×1.3 (DRS bien actif)
+                // 1000-1200ms : ×0.7 (DRS marginal)
+                const gapMult = realGapMs < 500 ? 1.8
+                              : realGapMs < 1000 ? 1.3
+                              : (1 - realGapMs / 1200) * 0.7;
+                const drsBonus = Math.round(baseDrs * gapMult);
                 lt -= drsBonus;
                 driver.drsActive = true;
               } else { driver.drsActive = false; }
@@ -11338,21 +11550,21 @@ const exitNeighborStr = neighborAhead && neighborBehind
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), type: 'light' });
             if (triggerInvestigation) pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light', resolveAtLap: lap + 3 + Math.floor(Math.random() * 4) });
             const lightContactText = lightAreRivals ? pick([
-              `⚔️ **T${lap} — CONTACT ENTRE RIVAUX !** ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}** — *encore eux.* Sous investigation FIA.${lightRivalHeat >= 40 ? ` Le paddock commence à s'inquiéter.` : ''}`,
-              `⚠️ **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** touche ${victim.team.emoji}**${victim.pilot.name}** — les deux rivaux encore en contact. *La FIA surveille.*`,
+              `⚔️ **T${lap} — ACCROCHAGE ENTRE RIVAUX !** ${attacker.team.emoji}**${attacker.pilot.name}** percute ${victim.team.emoji}**${victim.pilot.name}** — *encore ces deux-là.* Sous investigation FIA.${lightRivalHeat >= 40 ? ` Le paddock commence à saturer.` : ''}`,
+              `💥 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** tape ${victim.team.emoji}**${victim.pilot.name}** — les rivaux au contact, encore. *Enquête FIA en cours.*`,
             ]) : pick([
-              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}** — *sous investigation FIA.*`,
-              `⚠️ **T${lap}** — Contact ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Les commissaires vont étudier les images.*`,
+              `⚠️ **T${lap} — CONTACT !** ${attacker.team.emoji}**${attacker.pilot.name}** percute ${victim.team.emoji}**${victim.pilot.name}** — *la FIA ouvre une investigation.*`,
+              `💥 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** tape l'arrière de ${victim.team.emoji}**${victim.pilot.name}**. *Les commissaires examinent l'incident.*`,
             ]);
             events.push({ priority: lightAreRivals ? 7 : 5, text: lightContactText });
           } else {
             raceCollisions.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), type: 'light' });
             if (triggerInvestigation) pendingInvestigations.push({ attackerId: String(attacker.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'light', resolveAtLap: lap + 3 + Math.floor(Math.random() * 4) });
             const lightContact2Text = lightAreRivals ? pick([
-              `⚔️ **T${lap}** — Contact discutable entre les rivaux ${attacker.team.emoji}**${attacker.pilot.name}** et ${victim.team.emoji}**${victim.pilot.name}**. *Enquête FIA — mais la rivalité, elle, ne s'arrête pas là.*`,
+              `⚔️ **T${lap}** — Contact entre rivaux : ${attacker.team.emoji}**${attacker.pilot.name}** et ${victim.team.emoji}**${victim.pilot.name}** se touchent. *Enquête FIA — la rivalité ne s'arrête pas là.*`,
             ]) : pick([
-              `🔍 **T${lap}** — Contact discutable ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Sous investigation FIA.*`,
-              `🔍 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** frôle ${victim.team.emoji}**${victim.pilot.name}**. *La FIA regarde les images.*`,
+              `🔍 **T${lap}** — ${attacker.team.emoji}**${attacker.pilot.name}** accroche ${victim.team.emoji}**${victim.pilot.name}**. *Les commissaires étudient l'incident.*`,
+              `💥 **T${lap}** — Contact ${attacker.team.emoji}**${attacker.pilot.name}** / ${victim.team.emoji}**${victim.pilot.name}**. *Sous investigation.*`,
             ]);
             events.push({ priority: lightAreRivals ? 6 : 3, text: lightContact2Text });
           }
@@ -11440,16 +11652,20 @@ const exitNeighborStr = neighborAhead && neighborBehind
                     ? `*${fautif.pilot.name} impliqué — il perd le contrôle en attaquant.*`
                     : `*${fautif.team.emoji}**${fautif.pilot.name}** initiateur du contact — ${victim.team.emoji}**${victim.pilot.name}** paie les pots cassés.*`;
                   const crashTexts = battleAreRivals ? [
-                    `***💥 T${lap} — CRASH ! LA RIVALITÉ VIENT DE TOUT EMPORTER !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) et ${other.team.emoji}**${other.pilot.name}** (P${opos}) — ${accDesc}. ***${victim.pilot.name} sort de la piste, voiture détruite. ABANDON.*** ${faultStr} La rivalité vient de coûter une course entière.`,
-                    `🔴 ***T${lap} — RIVAL HORS COURSE !***\nAprès ${battle.lapsClose} tours de duel, ${victim.team.emoji}**${victim.pilot.name}** abandonne suite au contact avec ${other.team.emoji}**${other.pilot.name}**. ${accDesc}. ${faultStr} ${battleRivalHeat >= 50 ? `***Cette rivalité ne connaît plus de limite.***` : `*Le duel tourne à la catastrophe.*`}`,
+                    `***💥 T${lap} — CRASH ! LA RIVALITÉ VIENT DE TOUT EMPORTER !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) et ${other.team.emoji}**${other.pilot.name}** (P${opos}) — ${accDesc}. ***${victim.pilot.name} sort de la piste, voiture détruite. ABANDON.*** ${faultStr}\n  🚨 *La Safety Car est quasi certaine. La rivalité vient de coûter une course entière.*`,
+                    `🔴 ***T${lap} — RIVAL HORS COURSE !***\nAprès ${battle.lapsClose} tours de duel, ${victim.team.emoji}**${victim.pilot.name}** abandonne suite au contact avec ${other.team.emoji}**${other.pilot.name}**. ${accDesc}. ${faultStr} ${battleRivalHeat >= 50 ? `***Cette rivalité ne connaît plus de limite. La FIA va devoir sévir.***` : `*Le duel tourne à la catastrophe.*`}`,
                   ] : isP1P2 ? [
-                    `***💥 T${lap} — CATASTROPHE EN TÊTE DE COURSE !!!***\nP${vpos} vs P${opos} — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent : ${accDesc}. ***${victim.pilot.name} dans le mur, ABANDON.*** ${faultStr}`,
-                    `🚨 ***T${lap} — LE CRASH QUI CHANGE TOUT !***\n${victim.team.emoji}**${victim.pilot.name}** perd le contrôle après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}**. ***FIN DE COURSE.*** ${faultStr}`,
+                    `***💥 T${lap} — CATASTROPHE EN TÊTE DE COURSE !!!***\nP${vpos} vs P${opos} — ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** se percutent : ${accDesc}. ***${victim.pilot.name} dans le mur, ABANDON.*** ${faultStr}\n  🚨 *Safety Car attendue — des points de championnat viennent de disparaître.*`,
+                    `🚨 ***T${lap} — LE CRASH QUI CHANGE TOUT !***\n${victim.team.emoji}**${victim.pilot.name}** perd le contrôle après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}**. ***FIN DE COURSE.*** ${faultStr}\n  🚨 *La direction de course déploie la Safety Car.*`,
                   ] : [
-                    `***💥 T${lap} — CRASH !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) sort violemment après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}** (P${opos}). ***ABANDON.*** ${faultStr}`,
-                    `🚨 ***T${lap} — INCIDENT GRAVE !***\n${victim.team.emoji}**${victim.pilot.name}** perd le contrôle en défendant face à ${other.team.emoji}**${other.pilot.name}** — ${accDesc}. ***DNF.*** ${faultStr}`,
+                    `***💥 T${lap} — CRASH !***\n${victim.team.emoji}**${victim.pilot.name}** (P${vpos}) sort violemment après ${accDesc} avec ${other.team.emoji}**${other.pilot.name}** (P${opos}). ***ABANDON.*** ${faultStr}${victim !== aggr ? `\n  ⚖️ *${aggr.team.emoji}**${aggr.pilot.name}** sous investigation FIA — initiateur du contact.*` : ''}`,
+                    `🚨 ***T${lap} — INCIDENT GRAVE !***\n${victim.team.emoji}**${victim.pilot.name}** perd le contrôle en défendant face à ${other.team.emoji}**${other.pilot.name}** — ${accDesc}. ***DNF.*** ${faultStr}${victim !== aggr ? `\n  ⚖️ *${aggr.pilot.name} sous enquête FIA.*` : ''}`,
                     `💥 ***T${lap}*** — La bataille P${vpos}/P${opos} entre ${victim.team.emoji}**${victim.pilot.name}** et ${other.team.emoji}**${other.pilot.name}** finit mal : ${accDesc}, voiture dans les barrières. ***ABANDON.*** ${faultStr}`,
                   ];
+                  // Ajouter investigation FIA systématique si l'initiateur (aggr) survit
+                  if (!aggr.dnf && victim !== aggr) {
+                    pendingInvestigations.push({ attackerId: String(aggr.pilot._id), victimId: String(victim.pilot._id), lap, severity: 'medium', resolveAtLap: lap + 2 + Math.floor(Math.random() * 3) });
+                  }
                   const crashGif = isP1P2 ? pickGif('crash_collision') : pick([pickGif('crash_collision'), pickGif('crash_solo')]);
                   events.push({ priority: battleAreRivals ? 10 : isP1P2 ? 10 : 9, text: pick(crashTexts), gif: crashGif });
                 }
@@ -12381,6 +12597,70 @@ async function getAllPilotsWithTeams() {
   return { pilots, teams };
 }
 
+// ─── Auto-amélioration — upgrade automatique post-course ──────────────────
+// Pour chaque pilote ayant activé autoAmelioration, achète 1 upgrade de la stat
+// la plus basse (en priorité), tant que le pilote a assez de PLcoins.
+// Notifie le joueur en DM.
+async function runAutoAmelioration(raceResults, raceDoc, channel = null) {
+  const gridCtx = await buildGridContext();
+  const STATS_KEYS = ['depassement','freinage','defense','adaptabilite','reactions','controle','gestionPneus'];
+  const STATS_LABELS = {
+    depassement:'Dépassement', freinage:'Freinage', defense:'Défense',
+    adaptabilite:'Adaptabilité', reactions:'Réactions', controle:'Contrôle', gestionPneus:'Gestion Pneus',
+  };
+  const MAX_STAT = 99;
+
+  for (const r of raceResults) {
+    try {
+      const pilot = await Pilot.findById(r.pilotId).lean();
+      if (!pilot || !pilot.autoAmelioration) continue;
+
+      // Trouver la stat la plus basse (hors stats déjà à MAX)
+      const statsSorted = STATS_KEYS
+        .filter(k => (pilot[k] ?? 50) < MAX_STAT)
+        .sort((a, b) => (pilot[a] ?? 50) - (pilot[b] ?? 50));
+
+      if (!statsSorted.length) continue; // toutes les stats sont à MAX
+
+      const targetStat  = statsSorted[0]; // stat la plus basse
+      const currentVal  = pilot[targetStat] ?? 50;
+      const cost        = calcUpgradeCost(targetStat, currentVal, pilot, gridCtx);
+
+      if (pilot.plcoins < cost) continue; // pas assez de coins
+
+      // Appliquer l'upgrade
+      const newVal  = currentVal + 1;
+      const isSame  = pilot.lastUpgradeStat === targetStat;
+      const newStreak = isSame ? (pilot.upgradeStreak || 0) + 1 : 1;
+      const unlockSpec = newStreak >= 3 && !pilot.specialization;
+
+      await Pilot.findByIdAndUpdate(pilot._id, {
+        $inc: { [`${targetStat}`]: 1, plcoins: -cost },
+        $set: {
+          lastUpgradeStat: targetStat,
+          upgradeStreak:   unlockSpec ? 0 : newStreak,
+          ...(unlockSpec ? { specialization: targetStat } : {}),
+        },
+      });
+
+      // Notif DM au joueur
+      try {
+        const discordUser = await client.users.fetch(pilot.discordId).catch(() => null);
+        if (discordUser) {
+          const specLine = unlockSpec
+            ? `\n🏅 **Spécialisation débloquée : ${SPECIALIZATION_META[targetStat]?.label || targetStat} !**`
+            : (newStreak >= 2 ? `\n🔥 Streak spécialisation : ${newStreak}/3 sur ${STATS_LABELS[targetStat]}` : '');
+          await discordUser.send(
+            `🤖 **Auto-amélioration** — ${pilot.name}\n` +
+            `└ **${STATS_LABELS[targetStat]}** : ${currentVal} → **${newVal}** (−${cost} 🪙)${specLine}\n` +
+            `*Solde restant : ${pilot.plcoins - cost} 🪙. Désactive avec \`/amelioration_auto\`.*`
+          ).catch(() => {});
+        }
+      } catch(_) {}
+    } catch(e) { console.error('[autoAmelioration pilot]', e.message); }
+  }
+}
+
 async function applyRaceResults(raceResults, raceId, season, collisions = [], channel = null) {
   const teams = await Team.find();
   console.log(`[applyRaceResults] Début — ${raceResults.length} résultats, seasonId=${season._id}, raceId=${raceId}`);
@@ -12619,6 +12899,12 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
 
   // Évolution voitures après la course
   await evolveCarStats(raceResults, teams);
+
+  // ── Auto-amélioration : upgrade automatique des stats les plus basses ─────
+  // Déclenché pour tous les pilotes qui ont activé autoAmelioration = true
+  try {
+    await runAutoAmelioration(raceResults, raceDoc, channel);
+  } catch(e) { console.error('[autoAmelioration]', e.message); }
 
   // ── Récapitulatif de fin de saison ───────────────────────
   // Si c'était le dernier GP de la saison et qu'un channel est fourni,
@@ -14264,6 +14550,10 @@ const commands = [
     .setDescription('Voir le profil complet de ton pilote avec les coûts d\'upgrade de chaque stat')
     .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
 
+  new SlashCommandBuilder().setName('amelioration_auto')
+    .setDescription('Active/désactive l\'amélioration automatique des stats (l\'IA upgrade les stats les plus basses)')
+    .addIntegerOption(o => o.setName('pilote').setDescription('Pilote 1 ou 2 (défaut: 1)').setMinValue(1).setMaxValue(2)),
+
 
 
   new SlashCommandBuilder().setName('ecurie')
@@ -15166,7 +15456,7 @@ async function handleInteraction(interaction) {
   const NO_DEFER = ['admin_force_practice', 'admin_force_quali', 'admin_force_race',
     'admin_news_force', 'admin_new_season', 'admin_transfer', 'admin_second_wave', 'admin_apply_last_race', 'admin_skip_gp', 'admin_set_race_results', 'admin_inject_results', 'admin_fix_slots', 'admin_stop_race', 'reveal_grille', 'valeur_marche',
     'fia_reaction', 'h2h', 'admin_scheduler_pause', 'admin_scheduler_resume'];
-  const isEphemeral = ['create_pilot','profil','ameliorer','amelioration','mon_contrat','offres',
+  const isEphemeral = ['create_pilot','profil','ameliorer','amelioration','amelioration_auto','mon_contrat','offres',
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
@@ -15698,7 +15988,44 @@ async function handleInteraction(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }
 
-  // ── /ameliorer ────────────────────────────────────────────
+  // ── /amelioration_auto ────────────────────────────────────────────────────
+  // Active/désactive l'amélioration automatique des stats pour un pilote.
+  // Quand activé : après chaque course, l'IA upgrage la stat la plus basse si le joueur
+  // a assez de PLcoins. Désactivé par défaut.
+  if (commandName === 'amelioration_auto') {
+    const pilotIndex = interaction.options.getInteger('pilote') || 1;
+    const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
+    if (!pilot) {
+      const allP = await getAllPilotsForUser(interaction.user.id);
+      if (!allP.length) return interaction.editReply({ content: '❌ Crée d\'abord ton pilote avec `/create_pilot`.', ephemeral: true });
+      return interaction.editReply({ content: `❌ Tu n'as pas de Pilote ${pilotIndex}.`, ephemeral: true });
+    }
+
+    const newState = !pilot.autoAmelioration;
+    await Pilot.findByIdAndUpdate(pilot._id, { $set: { autoAmelioration: newState } });
+
+    const statusEmoji = newState ? '✅' : '❌';
+    const statusLabel = newState ? '**ACTIVÉE**' : '**DÉSACTIVÉE**';
+    const desc = newState
+      ? `🤖 L'IA va maintenant gérer les améliorations de **${pilot.name}** automatiquement.\n\n` +
+        `**Comment ça marche :**\n` +
+        `› Après chaque course, la stat la plus basse est upgradée en priorité\n` +
+        `› Si plusieurs stats sont à égalité, la plus utile au circuit actuel est choisie\n` +
+        `› Aucune amélioration si le solde est insuffisant\n` +
+        `› Tu peux toujours utiliser \`/ameliorer\` manuellement en parallèle\n\n` +
+        `💡 *Désactive avec \`/amelioration_auto pilote:${pilotIndex}\` à tout moment.*`
+      : `🛑 L'amélioration automatique de **${pilot.name}** est maintenant désactivée.\n\n` +
+        `Tu gères maintenant les upgrades manuellement avec \`/ameliorer\`.\n\n` +
+        `💡 *Réactive avec \`/amelioration_auto pilote:${pilotIndex}\` quand tu veux.*`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${statusEmoji} Auto-amélioration ${statusLabel} — ${pilot.name}`)
+      .setColor(newState ? '#22c55e' : '#ef4444')
+      .setDescription(desc);
+
+    if (pilot.photoUrl) embed.setThumbnail(pilot.photoUrl);
+    return interaction.editReply({ embeds: [embed] });
+  }  // ── /ameliorer ────────────────────────────────────────────
   if (commandName === 'ameliorer') {
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
@@ -17232,6 +17559,7 @@ async function handleInteraction(interaction) {
             '`/create_pilot` — Crée un pilote *(nationalité, numéro, stats — 2 max)*',
             '`/profil [joueur:@u] [pilote:1|2]` — Stats, note, contrat et classement',
             '`/ameliorer [pilote:1|2]` — Améliore une stat (coût croissant selon le niveau)',
+            '`/amelioration_auto [pilote:1|2]` — Active/désactive l\'IA pour gérer tes upgrades automatiquement',
             '`/performances [pilote:1|2] [vue]` — Historique GPs : récents / records / écuries / saison',
             '`/historique [pilote:1|2]` — Carrière complète multi-saisons',
           ].join('\n'),
