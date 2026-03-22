@@ -12598,9 +12598,9 @@ async function getAllPilotsWithTeams() {
 }
 
 // ─── Auto-amélioration — upgrade automatique post-course ──────────────────
-// Pour chaque pilote ayant activé autoAmelioration, achète 1 upgrade de la stat
-// la plus basse (en priorité), tant que le pilote a assez de PLcoins.
-// Notifie le joueur en DM.
+// Pour chaque pilote ayant activé autoAmelioration, dépense TOUT le solde
+// disponible en achetant des upgrades sur la stat la plus basse en boucle.
+// Notifie le joueur en DM avec le récapitulatif complet.
 async function runAutoAmelioration(raceResults, raceDoc, channel = null) {
   const gridCtx = await buildGridContext();
   const STATS_KEYS = ['depassement','freinage','defense','adaptabilite','reactions','controle','gestionPneus'];
@@ -12612,48 +12612,92 @@ async function runAutoAmelioration(raceResults, raceDoc, channel = null) {
 
   for (const r of raceResults) {
     try {
-      const pilot = await Pilot.findById(r.pilotId).lean();
+      let pilot = await Pilot.findById(r.pilotId).lean();
       if (!pilot || !pilot.autoAmelioration) continue;
 
-      // Trouver la stat la plus basse (hors stats déjà à MAX)
-      const statsSorted = STATS_KEYS
-        .filter(k => (pilot[k] ?? 50) < MAX_STAT)
-        .sort((a, b) => (pilot[a] ?? 50) - (pilot[b] ?? 50));
+      // ── Boucle : dépense tout le solde disponible ───────────
+      const upgradeLog = []; // { stat, from, to, cost }
+      let totalSpent   = 0;
+      let loopGuard    = 0;  // sécurité anti-boucle infinie
 
-      if (!statsSorted.length) continue; // toutes les stats sont à MAX
+      while (loopGuard++ < 1000) {
+        // Trouver la stat la plus basse (hors stats déjà à MAX)
+        const statsSorted = STATS_KEYS
+          .filter(k => (pilot[k] ?? 50) < MAX_STAT)
+          .sort((a, b) => (pilot[a] ?? 50) - (pilot[b] ?? 50));
 
-      const targetStat  = statsSorted[0]; // stat la plus basse
-      const currentVal  = pilot[targetStat] ?? 50;
-      const cost        = calcUpgradeCost(targetStat, currentVal, pilot, gridCtx);
+        if (!statsSorted.length) break; // toutes les stats sont à MAX
 
-      if (pilot.plcoins < cost) continue; // pas assez de coins
+        const targetStat = statsSorted[0];
+        const currentVal = pilot[targetStat] ?? 50;
+        const cost       = calcUpgradeCost(targetStat, currentVal, pilot, gridCtx);
 
-      // Appliquer l'upgrade
-      const newVal  = currentVal + 1;
-      const isSame  = pilot.lastUpgradeStat === targetStat;
-      const newStreak = isSame ? (pilot.upgradeStreak || 0) + 1 : 1;
-      const unlockSpec = newStreak >= 3 && !pilot.specialization;
+        if (pilot.plcoins < cost) break; // plus assez de coins — on arrête
 
-      await Pilot.findByIdAndUpdate(pilot._id, {
-        $inc: { [`${targetStat}`]: 1, plcoins: -cost },
-        $set: {
-          lastUpgradeStat: targetStat,
-          upgradeStreak:   unlockSpec ? 0 : newStreak,
+        // Calculer la spécialisation
+        const isSame     = pilot.lastUpgradeStat === targetStat;
+        const newStreak  = isSame ? (pilot.upgradeStreak || 0) + 1 : 1;
+        const unlockSpec = newStreak >= 3 && !pilot.specialization;
+
+        // Mettre à jour l'objet local (simulation) avant la prochaine itération
+        pilot = {
+          ...pilot,
+          [targetStat]     : currentVal + 1,
+          plcoins          : pilot.plcoins - cost,
+          lastUpgradeStat  : targetStat,
+          upgradeStreak    : unlockSpec ? 0 : newStreak,
           ...(unlockSpec ? { specialization: targetStat } : {}),
-        },
-      });
+        };
 
-      // Notif DM au joueur
+        upgradeLog.push({ stat: targetStat, from: currentVal, to: currentVal + 1, cost, unlockSpec });
+        totalSpent += cost;
+      }
+
+      if (!upgradeLog.length) continue; // rien acheté (solde insuffisant dès le départ)
+
+      // ── Appliquer tous les upgrades en base d'un coup ──────
+      // On reconstruit le diff complet depuis le pilote d'origine
+      const pilotOriginal = await Pilot.findById(r.pilotId).lean();
+      const setFields = {
+        lastUpgradeStat : pilot.lastUpgradeStat,
+        upgradeStreak   : pilot.upgradeStreak,
+        ...(pilot.specialization && !pilotOriginal.specialization ? { specialization: pilot.specialization } : {}),
+      };
+      const incFields = { plcoins: -totalSpent };
+      for (const key of STATS_KEYS) {
+        const diff = (pilot[key] ?? 50) - (pilotOriginal[key] ?? 50);
+        if (diff > 0) incFields[key] = diff;
+      }
+
+      await Pilot.findByIdAndUpdate(r.pilotId, { $inc: incFields, $set: setFields });
+
+      // ── Notif DM récapitulatif ───────────────────────────────
       try {
         const discordUser = await client.users.fetch(pilot.discordId).catch(() => null);
         if (discordUser) {
-          const specLine = unlockSpec
-            ? `\n🏅 **Spécialisation débloquée : ${SPECIALIZATION_META[targetStat]?.label || targetStat} !**`
-            : (newStreak >= 2 ? `\n🔥 Streak spécialisation : ${newStreak}/3 sur ${STATS_LABELS[targetStat]}` : '');
+          // Regrouper les upgrades par stat pour un résumé lisible
+          const statSummary = {};
+          for (const u of upgradeLog) {
+            if (!statSummary[u.stat]) statSummary[u.stat] = { from: u.from, to: u.from, spent: 0, unlockSpec: false };
+            statSummary[u.stat].to      = u.to;
+            statSummary[u.stat].spent  += u.cost;
+            if (u.unlockSpec) statSummary[u.stat].unlockSpec = true;
+          }
+          const lines = Object.entries(statSummary).map(([stat, s]) =>
+            `└ **${STATS_LABELS[stat]}** : ${s.from} → **${s.to}** (−${s.spent} 🪙)` +
+            (s.unlockSpec ? ` 🏅 **Spécialisation débloquée !**` : '')
+          ).join('\n');
+
+          const specUnlocked = upgradeLog.some(u => u.unlockSpec);
+          const streakLine   = !specUnlocked && pilot.upgradeStreak >= 2
+            ? `\n🔥 Streak spécialisation : ${pilot.upgradeStreak}/3 sur ${STATS_LABELS[pilot.lastUpgradeStat]}`
+            : '';
+
           await discordUser.send(
             `🤖 **Auto-amélioration** — ${pilot.name}\n` +
-            `└ **${STATS_LABELS[targetStat]}** : ${currentVal} → **${newVal}** (−${cost} 🪙)${specLine}\n` +
-            `*Solde restant : ${pilot.plcoins - cost} 🪙. Désactive avec \`/amelioration_auto\`.*`
+            `${lines}${streakLine}\n` +
+            `**Total dépensé : ${totalSpent} 🪙 · Solde restant : ${pilot.plcoins} 🪙**\n` +
+            `*Désactive avec \`/amelioration_auto\`.*`
           ).catch(() => {});
         }
       } catch(_) {}
