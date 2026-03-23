@@ -503,6 +503,15 @@ const TransferOfferSchema = new mongoose.Schema({
   // Statut proposé dans le contrat : 'numero1' = pilote leader, 'numero2' = second pilote
   // Le salaire proposé tient déjà compte de ce statut (numero1 ≈ +20%)
   driverStatus     : { type: String, enum: ['numero1', 'numero2', null], default: null },
+  // ── Type d'offre ──
+  // 'free_agent' : pilote sans contrat actif (comportement historique)
+  // 'poaching'   : pilote sous contrat actif — transfert avec compensation financière versée à l'écurie actuelle
+  offerType        : { type: String, enum: ['free_agent', 'poaching'], default: 'free_agent' },
+  // Indemnité de transfert (en PLcoins) versée à l'ancienne écurie si poaching accepté
+  compensationAmount : { type: Number, default: 0 },
+  // Pilote que l'équipe recrutante libère pour faire de la place (poaching uniquement, si équipe déjà pleine)
+  // Ce pilote sera libéré de son contrat si l'offre est acceptée et que l'équipe est pleine.
+  replacedPilotId  : { type: mongoose.Schema.Types.ObjectId, ref: 'Pilot', default: null },
   // ── Workflow délibération ──
   // pending        : offre envoyée, pilote n'a pas encore répondu
   // under_review   : pilote a accepté, l'équipe délibère (fenêtre 24h)
@@ -13545,6 +13554,216 @@ async function generatePreseasonPressConf(season, channel) {
   await channel.send({ embeds: [embed] });
 }
 
+// ── Annonce publique + cascade domino après un transfert de poaching ──────────
+// Appelée chaque fois qu'un pilote est libéré suite à un poaching accepté.
+// 1. Annonce dans le channel de course que le pilote est agent libre.
+// 2. Génère immédiatement des offres des équipes qui pourraient l'accueillir.
+//    Ces équipes peuvent elles-mêmes être complètes → elles choisissent alors
+//    quel pilote libérer (le moins performant), déclenchant un nouvel effet domino.
+// maxDepth empêche une boucle infinie (max 4 niveaux de domino).
+async function announcePoachingRipple(releasedPilot, oldTeam, newPilotJoining, recruitingTeam, season, depth = 0) {
+  const MAX_DEPTH = 4;
+  try {
+    const ch = RACE_CHANNEL ? await client.channels.fetch(RACE_CHANNEL).catch(() => null) : null;
+    const ov = overallRating(releasedPilot);
+    const tier = ratingTier(ov);
+
+    // ── Annonce publique : agent libre ───────────────────────
+    if (ch) {
+      const msgs = [
+        `🔓 **Agent libre** — Suite au transfert de **${newPilotJoining.name}** chez ${recruitingTeam.emoji} **${recruitingTeam.name}**, **${releasedPilot.name}** est libéré de son contrat avec ${oldTeam.emoji} **${oldTeam.name}**.\n${tier.badge} *(${ov} overall)* — Son nom va circuler dans les paddocks.`,
+        `📋 **Contrat rompu** — ${oldTeam.emoji} **${oldTeam.name}** libère **${releasedPilot.name}** pour accueillir le transfert de **${newPilotJoining.name}**.\n${tier.badge} **${releasedPilot.name}** est désormais libre — les offres vont affluer.`,
+        `🏎️ **Mercato en mouvement** — Le départ de **${newPilotJoining.name}** vers ${recruitingTeam.emoji} **${recruitingTeam.name}** libère un siège chez ${oldTeam.emoji} **${oldTeam.name}**. **${releasedPilot.name}** est agent libre.\n${tier.badge} Le paddock s'agite.`,
+      ];
+      await ch.send(msgs[Math.floor(Math.random() * msgs.length)]).catch(() => {});
+    }
+
+    // DM au pilote libéré
+    try {
+      if (releasedPilot.discordId) {
+        const du = await client.users.fetch(releasedPilot.discordId).catch(() => null);
+        const dmCh = du ? await du.createDM().catch(() => null) : null;
+        if (dmCh) await dmCh.send(
+          `📋 **Ton contrat a été rompu.**\n\n` +
+          `Suite au transfert de **${newPilotJoining.name}** chez ${recruitingTeam.emoji} **${recruitingTeam.name}**, ` +
+          `**${oldTeam.emoji} ${oldTeam.name}** a libéré **${releasedPilot.name}** de son contrat.\n\n` +
+          `Tu es désormais **agent libre** — des offres vont arriver. Utilise \`/offres\` pour les consulter.`
+        );
+      }
+    } catch(_) {}
+
+    if (depth >= MAX_DEPTH) return;
+
+    // ── Cascade : générer des offres pour le pilote libéré ───
+    await sleep(2000); // petit délai pour que la DB soit cohérente
+
+    const allTeamsNow = await Team.find().lean();
+    const allStandingsNow = season ? await Standing.find({ seasonId: season._id }).lean() : [];
+    const constrStandingsNow = season ? await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean() : [];
+    const teamRankMapNow = new Map(constrStandingsNow.map((s, i) => [String(s.teamId), i + 1]));
+    const totalTeamsNow  = allTeamsNow.length;
+    const relOv = overallRating(releasedPilot);
+
+    // Trier les équipes : celles à 1 pilote passent EN PREMIER (urgence) puis les complètes
+    const teamsForRipple = [...allTeamsNow].sort((a, b) => {
+      // On récupérera le count dans la boucle ; ici on pre-classe juste par budget desc
+      // comme proxy (les équipes urgentes seront filtrées prioritairement en premier)
+      return b.budget - a.budget;
+    });
+
+    // Pré-calculer le nombre de pilotes par équipe pour trier correctement
+    const pilotCountByTeam = new Map();
+    for (const t of teamsForRipple) {
+      const cnt = await Pilot.countDocuments({ teamId: t._id });
+      pilotCountByTeam.set(String(t._id), cnt);
+    }
+    // Tri final : équipes à 1 pilote d'abord, puis équipes à 0, puis équipes complètes (domino)
+    teamsForRipple.sort((a, b) => {
+      const ca = pilotCountByTeam.get(String(a._id)) ?? 2;
+      const cb = pilotCountByTeam.get(String(b._id)) ?? 2;
+      // Priorité absolue : équipes incomplètes (0 ou 1 pilote)
+      const aUrgent = ca < 2 ? 0 : 1;
+      const bUrgent = cb < 2 ? 0 : 1;
+      if (aUrgent !== bUrgent) return aUrgent - bUrgent;
+      // Parmi les incomplètes : 1 pilote avant 0 (il peut se permettre d'être sélectif)
+      if (aUrgent === 0) return ca - cb; // 0 pilote < 1 pilote → 0 en premier
+      return b.budget - a.budget;
+    });
+
+    for (const t of teamsForRipple) {
+      // Ne pas proposer à l'ancienne équipe du pilote libéré ni à la nouvelle qui vient de le recruter
+      if (String(t._id) === String(oldTeam._id)) continue;
+      if (String(t._id) === String(recruitingTeam._id)) continue;
+
+      const pilotsInTeam = pilotCountByTeam.get(String(t._id)) ?? 2;
+      const pilotsInTeamDocs = await Pilot.find({ teamId: t._id }).lean();
+      const tRank = teamRankMapNow.get(String(t._id)) || Math.ceil(totalTeamsNow / 2);
+      const isTopTeamNow = tRank <= Math.ceil(totalTeamsNow / 3);
+      const budgetRatio  = t.budget / 100;
+
+      // ── Équipe avec UN seul pilote : urgence de recrutement ──────────────────
+      // Elle DOIT remplir son slot pour la saison à venir. Offre prioritaire et généreuse.
+      const isUrgentNeed = pilotsInTeam < 2;
+
+      // Probabilité d'intérêt : urgente = quasi-certaine, normale = sélective
+      let interestProb;
+      if (isUrgentNeed) {
+        // Équipe incomplète : elle fait une offre dans tous les cas si le pilote est acceptable
+        interestProb = pilotsInTeam === 0
+          ? 1.0  // 0 pilote = offre systématique
+          : (relOv >= 75 ? 0.97 : relOv >= 65 ? 0.92 : 0.85); // 1 pilote = très probable
+      } else {
+        // Équipe complète : sélective, ne propose que si gain net réel
+        interestProb = isTopTeamNow
+          ? (relOv >= 78 ? 0.70 : relOv >= 70 ? 0.40 : 0.15)
+          : (relOv >= 78 ? 0.50 : relOv >= 68 ? 0.55 : 0.40);
+      }
+      if (Math.random() > interestProb) continue;
+
+      // Éviter doublons
+      const already = await TransferOffer.exists({ teamId: t._id, pilotId: releasedPilot._id, status: { $in: ['pending', 'under_review'] } });
+      if (already) continue;
+
+      let replacedId   = null;
+      let worstPilotDoc = null;
+
+      if (!isUrgentNeed) {
+        // Équipe complète — elle peut tenter un domino si le pilote libéré est nettement meilleur
+        if (depth >= MAX_DEPTH - 1) continue; // stopper l'escalade trop profonde
+        worstPilotDoc = [...pilotsInTeamDocs].sort((a, b) => overallRating(a) - overallRating(b))[0];
+        const worstOv = overallRating(worstPilotDoc);
+        if (relOv < worstOv + 5) continue; // pas de downgrade ou gain marginal → skip
+        if (Math.random() > (isTopTeamNow ? 0.45 : 0.30)) continue;
+        replacedId = worstPilotDoc._id;
+      }
+
+      // ── Calcul du contrat ────────────────────────────────────────────────────
+      const budgetCapPer = (t.budget / 100) * 150;
+      const ovAttr  = Math.pow(relOv / 75, 1.5);
+      const presBonus = 1 + ((t.prestige ?? 50) - 50) / 50 * 0.15;
+
+      // Bonus urgence : équipe à 1 pilote paie +20-35% de plus pour être compétitive face aux autres offres
+      // Équipe à 0 pilote : +30-50% (situation critique, elle doit absolument attirer quelqu'un)
+      const urgenceBonus = pilotsInTeam === 0 ? rand(1.30, 1.50)
+        : pilotsInTeam === 1 ? rand(1.20, 1.35)
+        : 1.0;
+
+      const salaireBase = Math.round(clamp(budgetCapPer * ovAttr * presBonus * urgenceBonus * rand(0.92, 1.10), 40, 480));
+
+      // Durée du contrat : équipe urgente propose plus long pour rassurer
+      const seasons = isUrgentNeed
+        ? (relOv >= 80 ? 2 : relOv >= 70 ? 2 : 1)
+        : 1;
+
+      const existingInT = pilotsInTeamDocs.filter(p => !replacedId || String(p._id) !== String(replacedId));
+      const offStatus = existingInT.length === 0 ? 'numero1'
+        : relOv >= overallRating(existingInT[0]) ? 'numero1' : 'numero2';
+      const statusMul = offStatus === 'numero1' ? 1.20 : 1.0;
+
+      // Multiplicateur coins : urgente = plus généreux
+      const coinMulBase = budgetRatio * rand(0.9, 1.45);
+      const coinMul = parseFloat(clamp(isUrgentNeed ? coinMulBase * rand(1.05, 1.20) : coinMulBase, 0.65, 2.3).toFixed(2));
+
+      // Primes : urgente = primes majorées aussi
+      const primeVMax = Math.round((t.budget / 100) * (isUrgentNeed ? 200 : 165));
+      const primeVBase = clamp((190 - tRank * 12) * rand(0.7, 1.1) * budgetRatio, 0, primeVMax);
+      const primeV = Math.round(isUrgentNeed ? primeVBase * rand(1.10, 1.30) : primeVBase);
+
+      // Expiration : équipe urgente donne moins de temps (elle doit savoir vite)
+      const expiresInMs = isUrgentNeed
+        ? 3 * 24 * 60 * 60 * 1000   // 3 jours — urgence
+        : 5 * 24 * 60 * 60 * 1000;  // 5 jours — normale
+
+      await TransferOffer.create({
+        teamId           : t._id,
+        pilotId          : releasedPilot._id,
+        status           : 'pending',
+        offerType        : replacedId ? 'poaching' : 'free_agent',
+        compensationAmount : 0,
+        replacedPilotId  : replacedId || null,
+        salaireBase      : Math.max(40, Math.round(salaireBase * statusMul)),
+        seasons,
+        coinMultiplier   : coinMul,
+        primeVictoire    : Math.max(0, primeV),
+        primePodium      : Math.round(primeV * rand(0.22, 0.42)),
+        driverStatus     : offStatus,
+        expiresAt        : new Date(Date.now() + expiresInMs),
+      });
+
+      const urgLabel = pilotsInTeam === 0 ? '🚨 URGENCE 0P' : pilotsInTeam === 1 ? '⚡ URGENCE 1P' : '🔁 DOMINO';
+      console.log(`[MERCATO] ${urgLabel} (depth=${depth}) — ${t.emoji||''}${t.name} → ${releasedPilot.name}${replacedId ? ` (libère ${worstPilotDoc?.name || replacedId})` : ''} | ${Math.round(salaireBase * statusMul)}🪙 ×${coinMul} × ${seasons}S`);
+
+      // DM au pilote libéré
+      try {
+        if (releasedPilot.discordId) {
+          const du = await client.users.fetch(releasedPilot.discordId).catch(() => null);
+          const dmCh = du ? await du.createDM().catch(() => null) : null;
+          if (dmCh) {
+            const urgLine = isUrgentNeed
+              ? `\n🚨 Cette équipe a **besoin urgent** d'un pilote — l'offre est particulièrement avantageuse.`
+              : '';
+            const replLine = replacedId
+              ? `\n⚠️ Si tu acceptes, **${t.emoji} ${t.name}** libèrerait **${worstPilotDoc?.name || 'un de ses pilotes'}** pour te faire de la place.`
+              : '';
+            await dmCh.send(
+              `📬 **Offre reçue !** ${t.emoji} **${t.name}** te propose un contrat.${urgLine}${replLine}\nUtilise \`/offres\` pour consulter la proposition. *(Expire dans ${isUrgentNeed ? '3 jours' : '5 jours'})*`
+            );
+          }
+        }
+      } catch(_) {}
+    }
+
+    // ── Annonce dans le channel que des offres ont été générées ─
+    if (ch) {
+      const hasPending = await TransferOffer.exists({ pilotId: releasedPilot._id, status: 'pending' });
+      if (hasPending) {
+        await ch.send(`📬 **${releasedPilot.name}** a reçu des propositions de contrat suite à sa libération. Le mercato s'emballe…`).catch(() => {});
+      }
+    }
+
+  } catch(e) { console.error('[announcePoachingRipple]', e.message); }
+}
+
 async function publishSigningRumors(realPilot, realTeam, offer) {
   const season = await getActiveSeason();
   if (!season) return;
@@ -13569,10 +13788,16 @@ async function publishSigningRumors(realPilot, realTeam, offer) {
         const ov   = overallRating(realPilot);
         const tier = ratingTier(ov);
         const source = Math.random() < 0.5 ? '🗞️ **PL Racing News**' : '📡 **Pitlane Insider**';
+        // Pour les poachings, mentionner le pilote libéré si disponible
+        let poachSuffix = '';
+        if (offer.offerType === 'poaching' && offer.replacedPilotId) {
+          const replacedP = await Pilot.findById(offer.replacedPilotId).lean().catch(() => null);
+          if (replacedP) poachSuffix = `\n🔓 **${replacedP.name}** est libéré de son contrat et devient agent libre.`;
+        }
         const msgs = [
-          `${source} — **OFFICIEL : ${realPilot.name} signe chez ${realTeam.emoji} ${realTeam.name} !**\n${tier.badge} Le transfert est confirmé. Contrat de **${offer.seasons}** saison(s).`,
-          `${source} — C'est officiel. **${realPilot.name}** rejoint **${realTeam.emoji} ${realTeam.name}** pour la prochaine saison.\n${tier.badge} *(${ov} overall)*`,
-          `🖊️ **Signature confirmée** — ${realTeam.emoji} **${realTeam.name}** annonce l'arrivée de **${realPilot.name}**. Durée : ${offer.seasons} saison(s).`,
+          `${source} — **OFFICIEL : ${realPilot.name} signe chez ${realTeam.emoji} ${realTeam.name} !**\n${tier.badge} Le transfert est confirmé. Contrat de **${offer.seasons}** saison(s).${poachSuffix}`,
+          `${source} — C'est officiel. **${realPilot.name}** rejoint **${realTeam.emoji} ${realTeam.name}** pour la prochaine saison.\n${tier.badge} *(${ov} overall)*${poachSuffix}`,
+          `🖊️ **Signature confirmée** — ${realTeam.emoji} **${realTeam.name}** annonce l'arrivée de **${realPilot.name}**. Durée : ${offer.seasons} saison(s).${poachSuffix}`,
         ];
         await ch.send(msgs[Math.floor(Math.random() * msgs.length)]);
       } catch(e) { console.error('Signing announce error:', e.message); }
@@ -13970,6 +14195,165 @@ async function startTransferPeriod() {
     }
   }
 
+  // ── POACHING : offres de transfert pour pilotes encore sous contrat ──────
+  // Logique : certaines écuries (surtout top) peuvent tenter de débaucher
+  // un pilote sous contrat actif en proposant une compensation à son écurie.
+  // Conditions : seasonsRemaining >= 1, le pilote a de la valeur (ov >= 68),
+  // l'écurie recrutante doit pouvoir payer la compensation ET le salaire.
+  // Nombre de tentatives de poaching : 1-3 selon le nombre d'écuries dans le top tiers.
+  try {
+    const allPilotsUnderContract = await Pilot.find({ teamId: { $ne: null } });
+    // Récupérer contrats actifs avec au moins 1 saison restante
+    const allActiveContracts = await Contract.find({ active: true, seasonsRemaining: { $gte: 1 } }).lean();
+    const contractByPilot = new Map(allActiveContracts.map(c => [String(c.pilotId), c]));
+
+    // Reconstruire classement constructeurs pour le contexte poaching
+    const pConstrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const pTeamRankMap = new Map(pConstrStandings.map((s, i) => [String(s.teamId), i + 1]));
+    const pTotalTeams  = allTeams.length;
+    const pAllStandings = allStandings; // déjà chargé plus haut
+
+    for (const recruitingTeam of allTeams) {
+      const recruitingRank = pTeamRankMap.get(String(recruitingTeam._id)) || Math.ceil(pTotalTeams / 2);
+      const isTopRecruiting = recruitingRank <= Math.ceil(pTotalTeams / 3);
+      const isMidRecruiting = recruitingRank <= Math.ceil(pTotalTeams * 2 / 3);
+
+      // Seules les équipes top et milieu de grille tentent le poaching
+      // Les petites équipes n'ont pas le budget pour les indemnités
+      if (!isTopRecruiting && !isMidRecruiting) continue;
+
+      const slotsInRecruiting = 2 - await Pilot.countDocuments({ teamId: recruitingTeam._id });
+      // L'équipe doit avoir un slot OU être prête à libérer son pilote le plus faible
+      // (poaching = l'écurie est souvent pleine, elle libère quelqu'un pour accueillir une star)
+      const pilotsInRecruitingTeam = await Pilot.find({ teamId: recruitingTeam._id }).lean();
+
+      // Nombre max de tentatives de poaching selon la position
+      const maxPoachAttempts = isTopRecruiting ? 2 : 1;
+      let poachCount = 0;
+
+      // Trier les pilotes sous contrat par attractivité pour cette écurie
+      const poachCandidates = [];
+      for (const p of allPilotsUnderContract) {
+        if (String(p.teamId) === String(recruitingTeam._id)) continue; // pas ses propres pilotes
+        const contract = contractByPilot.get(String(p._id));
+        if (!contract) continue;
+
+        const pOv = overallRating(p);
+        if (pOv < 68) continue; // seuil minimum de qualité
+
+        // L'écurie cible ne cherche pas à débaucher un pilote de niveau inférieur à son line-up actuel
+        const existingPilotsOv = pilotsInRecruitingTeam.map(ep => overallRating(ep));
+        const avgExistingOv = existingPilotsOv.length ? existingPilotsOv.reduce((a, b) => a + b, 0) / existingPilotsOv.length : 0;
+        if (pOv < avgExistingOv - 5) continue; // pas de downgrade notable
+
+        // Identifier le pilote à libérer si l'équipe est pleine (2/2)
+        // → le pilote le moins performant du line-up actuel, uniquement si le candidat est nettement meilleur
+        let replacedPilotForOffer = null;
+        if (pilotsInRecruitingTeam.length >= 2) {
+          const worstExisting = [...pilotsInRecruitingTeam].sort((a, b) => overallRating(a) - overallRating(b))[0];
+          const worstOv = overallRating(worstExisting);
+          // Libère quelqu'un seulement si gain net >= 4 OV
+          if (pOv < worstOv + 4) continue;
+          replacedPilotForOffer = worstExisting;
+        }
+
+        // Vérifier que l'équipe actuelle du pilote est moins forte (raison de partir)
+        const pilotCurrentTeamRank = pTeamRankMap.get(String(p.teamId)) || Math.ceil(pTotalTeams / 2);
+        const isMoveUpgrade = recruitingRank < pilotCurrentTeamRank; // meilleure équipe = rang plus bas
+
+        // Un pilote dans une top team ne part pas sauf si incitatif financier très fort
+        const pilotInTopTeam = pilotCurrentTeamRank <= Math.ceil(pTotalTeams / 3);
+        if (pilotInTopTeam && !isTopRecruiting) continue; // milieu ne débauche pas top team
+        if (pilotInTopTeam && isTopRecruiting && Math.random() > 0.2) continue; // rarissime inter-top
+
+        // Score d'attractivité pour ce poaching
+        const pStanding = pAllStandings.find(s => String(s.pilotId) === String(p._id));
+        const champRankP = pStanding ? [...pAllStandings].sort((a, b) => b.points - a.points).findIndex(s => String(s.pilotId) === String(p._id)) + 1 : 99;
+        const poachScore = pOv * 1.2
+          + (isMoveUpgrade ? 20 : -10)
+          + (champRankP <= 3 ? 15 : champRankP <= 8 ? 8 : 0)
+          + (contract.seasonsRemaining === 1 ? 15 : contract.seasonsRemaining === 2 ? 5 : -10); // plus facile à libérer
+
+        poachCandidates.push({ pilot: p, contract, poachScore, pilotCurrentTeamRank, champRankP });
+      }
+
+      poachCandidates.sort((a, b) => b.poachScore - a.poachScore);
+
+      for (const { pilot, contract, pilotCurrentTeamRank } of poachCandidates) {
+        if (poachCount >= maxPoachAttempts) break;
+
+        const pOv = overallRating(pilot);
+        const budgetRatioR = recruitingTeam.budget / 100;
+
+        // Calcul de l'indemnité de transfert : proportionnelle à la valeur du pilote
+        // et au nombre de saisons restantes (plus il reste de temps, plus c'est cher)
+        const baseCompensation = Math.round(
+          pOv * contract.seasonsRemaining * (recruitingTeam.budget / 100) * rand(8, 18)
+        );
+        const compensation = Math.round(clamp(baseCompensation, 50, 800));
+
+        // L'écurie doit pouvoir se permettre la compensation + le salaire
+        // Seuil : compensation <= budget * 0.35 (dépense ponctuelle acceptable)
+        if (compensation > recruitingTeam.budget * 0.35) continue;
+
+        // Probabilité d'envoyer l'offre selon le ratio upgrade + budget
+        const poachProbability = isTopRecruiting
+          ? (pilotCurrentTeamRank > Math.ceil(pTotalTeams / 2) ? 0.65 : 0.40)
+          : (pilotCurrentTeamRank > Math.ceil(pTotalTeams * 2 / 3) ? 0.50 : 0.25);
+        if (Math.random() > poachProbability) continue;
+
+        // Éviter les doublons
+        const alreadyPoach = await TransferOffer.findOne({
+          teamId: recruitingTeam._id, pilotId: pilot._id,
+          status: { $in: ['pending', 'under_review'] },
+        });
+        if (alreadyPoach) continue;
+
+        // Calcul du contrat proposé (identique à la logique free_agent)
+        const teamRankForSalary = pTeamRankMap.get(String(recruitingTeam._id)) || Math.ceil(pTotalTeams / 2);
+        const budgetCapPerPilotP = (recruitingTeam.budget / 100) * 150;
+        const ovAttractivenessP  = Math.pow(pOv / 75, 1.5);
+        const prestigeBonusP     = 1 + ((recruitingTeam.prestige ?? 50) - 50) / 50 * 0.15;
+        const salaireBaseP = Math.round(clamp(budgetCapPerPilotP * ovAttractivenessP * prestigeBonusP * rand(0.90, 1.20), 50, 450));
+        const coinMultiplierP = parseFloat(clamp(budgetRatioR * rand(0.9, 1.5), 0.7, 2.2).toFixed(2));
+        const primeVictoireMaxP = Math.round((recruitingTeam.budget / 100) * 180);
+        const primeVictoireP    = Math.round(clamp((200 - teamRankForSalary * 12) * rand(0.7, 1.2) * budgetRatioR, 0, primeVictoireMaxP));
+        const primePodiumP      = Math.round(primeVictoireP * rand(0.25, 0.45));
+        const seasonsP = pOv >= 80 ? 1 : contract.seasonsRemaining === 1 ? 2 : 1;
+
+        // Prime de statut : poaching = toujours minimum N°2, N°1 si nettement meilleur
+        // Si un pilote est libéré, le line-up effectif post-transfert = pilotes restants
+        const remainingPilots = pilotsInRecruitingTeam.filter(
+          ep => !replacedPilotForOffer || String(ep._id) !== String(replacedPilotForOffer._id)
+        );
+        const offeredStatusP = remainingPilots.length === 0 ? 'numero1'
+          : pOv >= overallRating(remainingPilots[0]) + 3 ? 'numero1' : 'numero2';
+        const statusMultP = offeredStatusP === 'numero1' ? 1.20 : 1.0;
+        const finalSalaireP = Math.round(salaireBaseP * statusMultP);
+
+        await TransferOffer.create({
+          teamId             : recruitingTeam._id,
+          pilotId            : pilot._id,
+          status             : 'pending',
+          offerType          : 'poaching',
+          compensationAmount : compensation,
+          replacedPilotId    : replacedPilotForOffer ? replacedPilotForOffer._id : null,
+          salaireBase        : Math.max(50, finalSalaireP),
+          seasons            : seasonsP,
+          coinMultiplier     : coinMultiplierP,
+          primeVictoire      : Math.max(0, primeVictoireP),
+          primePodium        : Math.max(0, primePodiumP),
+          driverStatus       : offeredStatusP,
+          expiresAt          : new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        });
+
+        const replLog = replacedPilotForOffer ? ` | libère: ${replacedPilotForOffer.name}` : '';
+        console.log(`[MERCATO] 🎯 POACHING — ${recruitingTeam.emoji||''}${recruitingTeam.name} → ${pilot.name} (contrat: ${contract.seasonsRemaining} saison(s) restante(s)) | indemnité: ${compensation}🪙 | salaire: ${Math.max(50, finalSalaireP)}🪙 × ${seasonsP} saison(s)${replLog}`);
+        poachCount++;
+      }
+    }
+  } catch(e) { console.error('[poaching IA]', e.message); }
+
   // ── ENCHÈRES : surenchère automatique sur les top pilotes convoités ──
   // Après la génération des offres, si plusieurs écuries ont ciblé le même
   // pilote top (ov ≥ 75), elles surenchérissent automatiquement l'une l'autre.
@@ -14040,8 +14424,11 @@ async function startTransferPeriod() {
       const currentTeamId = pilot.teamId ? String(pilot.teamId) : null;
       const hasRenewal  = pilotOffers.some(o => String(o.teamId) === currentTeamId);
       const hasFreeOffers = pilotOffers.some(o => String(o.teamId) !== currentTeamId);
+      const hasPoaching   = pilotOffers.some(o => o.offerType === 'poaching');
       const dmIntro = hasRenewal && !hasFreeOffers
         ? `🔄 **Renouvellement de contrat !** **${pilot.name}** a reçu une proposition de prolongation :`
+        : hasPoaching
+        ? `📬 **Mercato ouvert !** **${pilot.name}** a reçu **${pilotOffers.length}** offre(s) dont une **offre de transfert** 🎯 (compensation financière incluse) :`
         : hasRenewal
         ? `📬 **Mercato ouvert !** **${pilot.name}** a reçu **${pilotOffers.length}** offre(s) (dont un renouvellement) :`
         : `📬 **Mercato ouvert !** **${pilot.name}** a reçu **${pilotOffers.length}** offre(s) de contrat :`;
@@ -14155,7 +14542,11 @@ async function resolveTeamDeliberations() {
       // Scorer chaque candidat — exclure déjà signés dans ce round ou ailleurs
       const scored = (await Promise.all(candidates.map(async o => {
         const p = await Pilot.findById(o.pilotId).lean();
-        if (!p || p.teamId || signedThisRound.has(String(p._id))) return null; // déjà pris
+        // Un pilote poaché peut encore avoir un teamId à ce stade (sera libéré lors de la signature)
+        const isPoachOffer = o.offerType === 'poaching';
+        if (!p) return null;
+        if (!isPoachOffer && p.teamId) return null; // free_agent doit être libre
+        if (signedThisRound.has(String(p._id))) return null; // déjà signé ce round
         return { offer: o, pilot: p, score: computeTeamScore(p, team, allStandings) };
       }))).filter(Boolean).sort((a, b) => b.score - a.score);
 
@@ -14165,14 +14556,40 @@ async function resolveTeamDeliberations() {
       // ── Signer les élus ──────────────────────────────────────
       for (const { offer, pilot } of chosen) {
         const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
-        const isRenewal = activeContract && String(activeContract.teamId) === String(teamId);
-        if (activeContract && !isRenewal) {
-          // Contrat actif avec une autre équipe apparu entre-temps → rejeter
+        const isRenewal  = activeContract && String(activeContract.teamId) === String(teamId);
+        const isPoachingDelibr = offer.offerType === 'poaching';
+        if (activeContract && !isRenewal && !isPoachingDelibr) {
+          // Contrat actif avec une autre équipe, non-poaching apparu entre-temps → rejeter
           await TransferOffer.findByIdAndUpdate(offer._id, { status: 'review_rejected' });
           continue;
         }
         if (isRenewal && activeContract) {
           await Contract.findByIdAndUpdate(activeContract._id, { active: false });
+        }
+        // Poaching : verser compensation et rompre l'ancien contrat
+        if (isPoachingDelibr && activeContract && !isRenewal) {
+          const oldTeamPoach = await Team.findById(activeContract.teamId);
+          const compensation = offer.compensationAmount || 0;
+          if (oldTeamPoach && compensation > 0) {
+            await Team.findByIdAndUpdate(oldTeamPoach._id, { $inc: { budget: compensation } });
+            console.log(`[MERCATO] 💸 COMPENSATION (délibération) — ${team.emoji||''}${team.name} verse ${compensation}🪙 à ${oldTeamPoach.emoji||''}${oldTeamPoach.name} pour ${pilot.name}`);
+          }
+          await Contract.findByIdAndUpdate(activeContract._id, { active: false });
+          await Pilot.findByIdAndUpdate(pilot._id, { teamId: null });
+
+          // Libérer le pilote remplacé + déclencher la cascade domino
+          if (offer.replacedPilotId) {
+            const replacedPilot = await Pilot.findById(offer.replacedPilotId);
+            if (replacedPilot && String(replacedPilot.teamId) === String(teamId)) {
+              const replacedContract = await Contract.findOne({ pilotId: replacedPilot._id, active: true });
+              if (replacedContract) await Contract.findByIdAndUpdate(replacedContract._id, { active: false });
+              await Pilot.findByIdAndUpdate(replacedPilot._id, { teamId: null });
+              await TransferOffer.updateMany({ pilotId: replacedPilot._id, status: { $in: ['pending', 'under_review'] } }, { status: 'expired' });
+              signedThisRound.add(String(replacedPilot._id)); // empêche qu'on le re-signe dans ce même round
+              const freshReplaced = await Pilot.findById(replacedPilot._id).lean();
+              announcePoachingRipple(freshReplaced, team, pilot, team, season, 0).catch(e => console.error('[ripple deliberation]', e.message));
+            }
+          }
         }
 
         const existingTeamPilots = await Pilot.find({ teamId: team._id }).lean();
@@ -14217,11 +14634,17 @@ async function resolveTeamDeliberations() {
           if (pilot.discordId) {
             const du = await client.users.fetch(pilot.discordId).catch(() => null);
             const dmCh = du ? await du.createDM().catch(() => null) : null;
-            if (dmCh) await dmCh.send(
-              `🎉 **${team.emoji} ${team.name} t'a choisi !**\n\n` +
-              `**${pilot.name}** signe officiellement avec **${team.name}** !\n` +
-              `Salaire : **${offer.salaireBase} 🪙**/course × **${offer.seasons}** saison(s) · Prime V : **${offer.primeVictoire} 🪙**`
-            );
+            if (dmCh) {
+              const poachLine = offer.offerType === 'poaching' && offer.compensationAmount > 0
+                ? `\n💸 Indemnité versée à ton ancienne écurie : **${offer.compensationAmount} 🪙**`
+                : '';
+              await dmCh.send(
+                `🎉 **${team.emoji} ${team.name} t'a choisi !**\n\n` +
+                `**${pilot.name}** signe officiellement avec **${team.name}** !\n` +
+                `Salaire : **${offer.salaireBase} 🪙**/course × **${offer.seasons}** saison(s) · Prime V : **${offer.primeVictoire} 🪙**` +
+                poachLine
+              );
+            }
           }
         } catch(_) {}
 
@@ -15427,8 +15850,9 @@ async function handleInteraction(interaction) {
 
     // Accepter
     const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
-    const isRenewal = activeContract && String(activeContract.teamId) === String(offer.teamId);
-    if (activeContract && !isRenewal) {
+    const isRenewal  = activeContract && String(activeContract.teamId) === String(offer.teamId);
+    const isPoaching = offer.offerType === 'poaching';
+    if (activeContract && !isRenewal && !isPoaching) {
       return interaction.reply({
         content: `❌ Contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin pour changer d'écurie.`,
         ephemeral: true,
@@ -15437,7 +15861,7 @@ async function handleInteraction(interaction) {
 
     const team   = await Team.findById(offer.teamId);
     const inTeam = await Pilot.countDocuments({ teamId: team._id });
-    // Pour un renouvellement, le pilote compte déjà dans l'équipe → seuil toléré à 2 (pas 1)
+    // Pour un renouvellement ou poaching, le pilote compte déjà ou est dans une autre équipe → seuil à 2
     if (!isRenewal && inTeam >= 2) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
 
     // ── Renouvellement : signature directe (pas de concurrence interne) ──
@@ -15462,7 +15886,37 @@ async function handleInteraction(interaction) {
       return interaction.update({ content: '', embeds: [new EmbedBuilder().setTitle('✅ Renouvellement signé !').setColor(team.color).setDescription(`**${pilot.name}** prolonge avec **${team.emoji} ${team.name}** !`)], components: [] });
     }
 
-    // ── Candidature normale : passer en under_review ─────────
+    // ── Poaching : rupture de contrat avec compensation ────────────
+    if (isPoaching && activeContract) {
+      const oldTeamForPoach = await Team.findById(activeContract.teamId);
+      const compensation    = offer.compensationAmount || 0;
+      // Verser l'indemnité à l'ancienne écurie
+      if (oldTeamForPoach && compensation > 0) {
+        await Team.findByIdAndUpdate(oldTeamForPoach._id, { $inc: { budget: compensation } });
+        console.log(`[MERCATO] 💸 COMPENSATION — ${team.emoji||''}${team.name} verse ${compensation}🪙 à ${oldTeamForPoach.emoji||''}${oldTeamForPoach.name} pour le transfert de ${pilot.name}`);
+      }
+      // Rompre l'ancien contrat et libérer le pilote
+      await Contract.findByIdAndUpdate(activeContract._id, { active: false });
+      await Pilot.findByIdAndUpdate(pilot._id, { teamId: null });
+
+      // Libérer le pilote remplacé si l'équipe recrutante est pleine
+      if (offer.replacedPilotId) {
+        const replacedPilot = await Pilot.findById(offer.replacedPilotId);
+        if (replacedPilot && String(replacedPilot.teamId) === String(team._id)) {
+          const replacedContract = await Contract.findOne({ pilotId: replacedPilot._id, active: true });
+          if (replacedContract) await Contract.findByIdAndUpdate(replacedContract._id, { active: false });
+          await Pilot.findByIdAndUpdate(replacedPilot._id, { teamId: null });
+          // Expirer toutes les offres pending de ce pilote (elles seront recréées par la cascade)
+          await TransferOffer.updateMany({ pilotId: replacedPilot._id, status: { $in: ['pending', 'under_review'] } }, { status: 'expired' });
+          // Déclencher la cascade domino en arrière-plan
+          const sForRipple = await getActiveSeason();
+          const freshReplacedPilot = await Pilot.findById(replacedPilot._id).lean();
+          announcePoachingRipple(freshReplacedPilot, team, pilot, team, sForRipple, 0).catch(e => console.error('[ripple btn]', e.message));
+        }
+      }
+    }
+
+    // ── Candidature normale (free_agent) ou poaching : passer en under_review ─────────
     // Fixer la reviewDeadline à 24h — ou prolonger si déjà en cours pour cette équipe
     const existingReview = await TransferOffer.findOne({ teamId: team._id, status: 'under_review' }).sort({ reviewDeadline: 1 });
     const reviewDeadline = existingReview?.reviewDeadline
@@ -16821,6 +17275,17 @@ async function handleInteraction(interaction) {
         const statusStr = o.driverStatus === 'numero1'
           ? '\n🔴 **Statut proposé : Pilote N°1**'
           : o.driverStatus === 'numero2' ? '\n🔵 **Statut proposé : Pilote N°2**' : '';
+        const poachStr = o.offerType === 'poaching'
+          ? await (async () => {
+              let replLine = '';
+              if (o.replacedPilotId) {
+                const rp = await Pilot.findById(o.replacedPilotId).lean();
+                // Le pilote remplacé appartient à l'équipe RECRUTANTE (team = o.teamId), pas à l'équipe actuelle du joueur
+                if (rp) replLine = `\n🔄 **${rp.name}** (actuellement chez ${team.emoji} **${team.name}**) serait libéré de son contrat pour te faire de la place.`;
+              }
+              return `\n\n🎯 **OFFRE DE TRANSFERT** — Tu es actuellement sous contrat.\n💸 Indemnité versée à ton écurie actuelle : **${o.compensationAmount ?? 0} 🪙** (ton contrat actuel serait rompu)${replLine}`;
+            })()
+          : '';
 
         const ctx         = offerCtx[String(o._id)] || {};
         const slotsLeft   = ctx.slotsLeft ?? 1;
@@ -16831,16 +17296,19 @@ async function handleInteraction(interaction) {
 
         // Contexte slots / concurrence
         let slotStr = '';
-        if (slotsLeft === 0) {
+        if (slotsLeft === 0 && o.offerType === 'poaching') {
+          // Poaching d'une équipe complète : le slot sera créé en libérant un pilote
+          slotStr = '\n🎯 Cette équipe est **complète** mais libèrerait un pilote pour t\'accueillir.';
+        } else if (slotsLeft === 0) {
           slotStr = '\n⚠️ Cette équipe semble **complète** — vérifie avant d\'accepter.';
         } else if (slotsLeft === 1 && competitors >= 2) {
           slotStr = `\n🔥 **${competitors} autres pilotes** postulent pour le **seul slot restant** chez ${team.name}. Concurrence élevée.`;
         } else if (slotsLeft === 1 && competitors === 1) {
           slotStr = `\n⚔️ **1 autre pilote** est aussi en lice pour le slot restant chez ${team.name}.`;
         } else if (slotsLeft === 1 && competitors === 0) {
-          slotStr = `\n✅ **1 slot disponible** — tu es seul(e) à postuler chez ${team.name} pour l'instant.`;
+          slotStr = `\n🚨 **${team.name} n'a qu'un seul pilote** — ils ont besoin de toi pour compléter leur line-up. Offre prioritaire.`;
         } else if (slotsLeft === 2 && competitors === 0) {
-          slotStr = `\n🟢 ${team.name} cherche encore **2 pilotes** — aucun concurrent en vue.`;
+          slotStr = `\n🚨 **${team.name} cherche 2 pilotes** — l'équipe doit absolument se remplir. Offre avantageuse.`;
         } else if (slotsLeft === 2 && competitors >= 1) {
           slotStr = `\n🟡 **2 slots libres** chez ${team.name}, mais **${competitors} autre(s) pilote(s)** ont déjà postulé.`;
         }
@@ -16851,19 +17319,20 @@ async function handleInteraction(interaction) {
           : '';
 
         const embed = new EmbedBuilder()
-          .setTitle(`${team.emoji} ${team.name} — Offre de contrat`)
-          .setColor(isLast ? '#FF4444' : team.color)
+          .setTitle(`${o.offerType === 'poaching' ? '🎯 ' : ''}${team.emoji} ${team.name} — ${o.offerType === 'poaching' ? 'Offre de transfert' : 'Offre de contrat'}`)
+          .setColor(isLast ? '#FF4444' : o.offerType === 'poaching' ? '#FF8C00' : team.color)
           .setDescription(
             `×**${o.coinMultiplier}** coins | **${o.seasons}** saison(s)\n` +
             `💰 Salaire : **${o.salaireBase} 🪙**/course\n` +
             `🏆 Prime V : **${o.primeVictoire} 🪙** | 🥉 Prime P : **${o.primePodium} 🪙**` +
             statusStr +
+            poachStr +
             (expiresIn !== null ? `\n⏳ Expire dans ~${expiresIn}h` : '') +
             slotStr +
             urgenceStr +
             `\n\n*Si tu acceptes, l'équipe a 24h pour délibérer — elle peut préférer un autre candidat.*`
           )
-          .setFooter({ text: `Offre ${idx + 1}/${offers.length}${isLast ? ' · ⚠️ Dernière offre' : ''} · ID : ${o._id}` });
+          .setFooter({ text: `Offre ${idx + 1}/${offers.length}${isLast ? ' · ⚠️ Dernière offre' : ''}${o.offerType === 'poaching' ? ' · 🎯 Poaching' : ''} · ID : ${o._id}` });
 
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`offer_accept_${o._id}`).setLabel(`✅ Rejoindre ${team.name}`).setStyle(ButtonStyle.Success),
@@ -16966,7 +17435,8 @@ async function handleInteraction(interaction) {
 
     const activeContract = await Contract.findOne({ pilotId: pilot._id, active: true });
     const isRenewal = activeContract && String(activeContract.teamId) === String(offer.teamId);
-    if (activeContract && !isRenewal) return interaction.editReply({
+    const isPoachingCmd = offer.offerType === 'poaching';
+    if (activeContract && !isRenewal && !isPoachingCmd) return interaction.editReply({
       content: `❌ **${pilot.name}** (Pilote ${pilot.pilotIndex}) a un contrat actif (${activeContract.seasonsRemaining} saison(s) restante(s)). Attends la fin pour changer d\'écurie.`,
       ephemeral: true,
     });
@@ -16995,7 +17465,33 @@ async function handleInteraction(interaction) {
       return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('✅ Renouvellement signé !').setColor(team.color).setDescription(`**${pilot.name}** prolonge avec **${team.emoji} ${team.name}** !`)], ephemeral: true });
     }
 
-    // ── Candidature normale : passer en under_review ─────────
+    // ── Poaching (cmd) : rupture de contrat avec compensation ─
+    if (isPoachingCmd && activeContract) {
+      const oldTeamForPoach = await Team.findById(activeContract.teamId);
+      const compensation    = offer.compensationAmount || 0;
+      if (oldTeamForPoach && compensation > 0) {
+        await Team.findByIdAndUpdate(oldTeamForPoach._id, { $inc: { budget: compensation } });
+        console.log(`[MERCATO] 💸 COMPENSATION (cmd) — ${team.emoji||''}${team.name} verse ${compensation}🪙 à ${oldTeamForPoach.emoji||''}${oldTeamForPoach.name} pour ${pilot.name}`);
+      }
+      await Contract.findByIdAndUpdate(activeContract._id, { active: false });
+      await Pilot.findByIdAndUpdate(pilot._id, { teamId: null });
+
+      // Libérer le pilote remplacé si l'équipe recrutante est pleine
+      if (offer.replacedPilotId) {
+        const replacedPilot = await Pilot.findById(offer.replacedPilotId);
+        if (replacedPilot && String(replacedPilot.teamId) === String(team._id)) {
+          const replacedContract = await Contract.findOne({ pilotId: replacedPilot._id, active: true });
+          if (replacedContract) await Contract.findByIdAndUpdate(replacedContract._id, { active: false });
+          await Pilot.findByIdAndUpdate(replacedPilot._id, { teamId: null });
+          await TransferOffer.updateMany({ pilotId: replacedPilot._id, status: { $in: ['pending', 'under_review'] } }, { status: 'expired' });
+          const sForRipple = await getActiveSeason();
+          const freshReplacedPilot = await Pilot.findById(replacedPilot._id).lean();
+          announcePoachingRipple(freshReplacedPilot, team, pilot, team, sForRipple, 0).catch(e => console.error('[ripple cmd]', e.message));
+        }
+      }
+    }
+
+    // ── Candidature normale ou poaching : passer en under_review ──
     const existingReview2 = await TransferOffer.findOne({ teamId: team._id, status: 'under_review' }).sort({ reviewDeadline: 1 });
     const reviewDeadline2 = existingReview2?.reviewDeadline
       ? new Date(Math.max(existingReview2.reviewDeadline.getTime(), Date.now() + 24 * 60 * 60 * 1000))
@@ -18699,6 +19195,30 @@ async function handleInteraction(interaction) {
       return interaction.reply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
     await interaction.deferReply();
     try {
+      // ── Guard : vérifier que la grille est complète avant de lancer la saison ──
+      const allTeamsCheck  = await Team.find().lean();
+      const freePilotsCheck = await Pilot.find({ teamId: null }).lean();
+      const incompleteTeams = [];
+      for (const t of allTeamsCheck) {
+        const cnt = await Pilot.countDocuments({ teamId: t._id });
+        if (cnt !== 2) incompleteTeams.push(`${t.emoji || '🏎️'} **${t.name}** (${cnt}/2 pilote(s))`);
+      }
+
+      if (freePilotsCheck.length > 0 || incompleteTeams.length > 0) {
+        const freeList = freePilotsCheck.map(p => `• ${p.name}`).join('\n');
+        const teamList = incompleteTeams.join('\n');
+        const warnLines = [];
+        if (freeList) warnLines.push(`**Pilotes sans équipe :**\n${freeList}`);
+        if (teamList) warnLines.push(`**Équipes incomplètes :**\n${teamList}`);
+        return interaction.editReply(
+          `⚠️ **La grille n'est pas complète.** Impossible de lancer la saison.\n\n` +
+          warnLines.join('\n\n') +
+          `\n\nRègle : chaque équipe doit avoir exactement **2 pilotes**. ` +
+          `Utilise \`/admin_assigner_pilotes\`, \`/admin_mercato_repair\` ou attend que les offres en cours soient acceptées.\n` +
+          `*(Utilise \`/admin_grille_next\` pour voir l'état complet de la grille)*`
+        );
+      }
+
       const season = await createNewSeason();
       // Masquer /pilotes maintenant que le mercato est fermé
       registerCommands(false).catch(e => console.error('[registerCommands] new season:', e.message));
@@ -19695,7 +20215,8 @@ async function handleInteraction(interaction) {
       const p = pilotMap.get(String(o.pilotId));
       const se = statusEmoji[o.status] || '❓';
       const date = o.createdAt ? new Date(o.createdAt).toLocaleDateString('fr-FR', { day:'2-digit', month:'2-digit' }) : '??';
-      return `${se} **${p?.name || '?'}** ← ${t?.emoji||''}${t?.name||'?'} · ${o.salaireBase}🪙 ×${o.seasons}S · *${date}*`;
+      const typeTag = o.offerType === 'poaching' ? ` 🎯*(poaching ${o.compensationAmount ?? 0}🪙)*` : '';
+      return `${se} **${p?.name || '?'}** ← ${t?.emoji||''}${t?.name||'?'} · ${o.salaireBase}🪙 ×${o.seasons}S · *${date}*${typeTag}`;
     });
 
     // Stats globales
