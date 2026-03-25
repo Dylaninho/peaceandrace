@@ -14175,6 +14175,10 @@ async function runPoachingIA(season) {
         `🎯 **Offre de transfert exclusive !**\n\n` +
         `**${pilot.name}**, ${recruitingTeam.emoji} **${recruitingTeam.name}** te propose un contrat de poaching.\n` +
         `💸 Indemnité versée à ton écurie actuelle : **${offer.compensationAmount ?? 0} 🪙**${replLine}\n\n` +
+        `📋 **Détails du contrat proposé :**\n` +
+        `💰 Salaire : **${offer.salaireBase ?? 0} 🪙**/course\n` +
+        `🏆 Prime Victoire : **${offer.primeVictoire ?? 0} 🪙** | 🥉 Prime Podium : **${offer.primePodium ?? 0} 🪙**\n` +
+        `📅 Durée : **${offer.seasons ?? 1}** saison(s) · Multiplicateur : ×**${offer.coinMultiplier ?? 1}**\n\n` +
         `⚠️ *C'est une offre ciblée — si tu acceptes, le transfert est **immédiatement officiel**.*\n` +
         `⚠️ *Si ça ne t'intéresse pas, **refuse l'offre** avec le bouton Refuser — ne la laisse pas expirer.*\n\n` +
         `Utilise \`/offres\` pour consulter et répondre.`
@@ -16004,7 +16008,10 @@ async function handleInteraction(interaction) {
     const team   = await Team.findById(offer.teamId);
     const inTeam = await Pilot.countDocuments({ teamId: team._id });
     // Pour un renouvellement ou poaching, le pilote compte déjà ou est dans une autre équipe → seuil à 2
-    if (!isRenewal && inTeam >= 2) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
+    // Pour un poaching d'une équipe pleine, le slot sera libéré via replacedPilotId — on ne bloque pas ici
+    if (!isRenewal && !isPoaching && inTeam >= 2) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max).', ephemeral: true });
+    // Poaching sans replacedPilotId sur une équipe pleine = incohérence de données
+    if (isPoaching && inTeam >= 2 && !offer.replacedPilotId) return interaction.reply({ content: '❌ Écurie complète (2 pilotes max) et aucun pilote prévu à libérer.', ephemeral: true });
 
     // ── Renouvellement : signature directe (pas de concurrence interne) ──
     if (isRenewal) {
