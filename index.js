@@ -20439,9 +20439,16 @@ async function handleInteraction(interaction) {
       return interaction.editReply({ content: `⚠️ La saison est en statut **${season.status}** — le poaching forcé ne fonctionne que pendant la période de transfert (\`status: transfer\`).`, ephemeral: true });
 
     // Compter les offres de poaching existantes pour info
-    const existingPoachCount = await TransferOffer.countDocuments({ offerType: 'poaching', status: { $in: ['pending', 'under_review'] } });
+    let existingPoachCount = 0;
+    try {
+      existingPoachCount = await TransferOffer.countDocuments({ offerType: 'poaching', status: { $in: ['pending', 'under_review'] } });
+    } catch (_) { /* ignore, non-bloquant */ }
 
-    const count = await runPoachingIA(season).catch(e => {
+    // Timeout de sécurité : si runPoachingIA ne répond pas sous 30s → on sort proprement
+    const poachTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('timeout')), 30_000)
+    );
+    const count = await Promise.race([runPoachingIA(season), poachTimeout]).catch(e => {
       console.error('[admin_force_poaching]', e.message);
       return 0;
     });
