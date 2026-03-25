@@ -4482,20 +4482,24 @@ async function recordTeamHistory(pilotId, oldTeamId, newTeam, seasonYear) {
       h => String(h.teamId) === String(newTeam._id) && h.seasonEnd == null
     );
     if (!alreadyOpen) {
+      // Clôturer d'abord l'ancienne entrée ($set), puis ouvrir la nouvelle ($push)
+      // — les deux ops ne peuvent pas être combinées (conflit de path MongoDB)
+      if (Object.keys(updates).length > 0) {
+        await Pilot.findByIdAndUpdate(pilotId, { $set: updates });
+      }
       await Pilot.findByIdAndUpdate(pilotId, {
-        ...updates,
         $push: {
           teamHistory: {
-            teamId    : newTeam._id,
-            teamName  : newTeam.name,
-            teamEmoji : newTeam.emoji || '',
+            teamId      : newTeam._id,
+            teamName    : newTeam.name,
+            teamEmoji   : newTeam.emoji || '',
             seasonStart : seasonYear ?? null,
             seasonEnd   : null,
           },
         },
       });
     } else if (Object.keys(updates).length > 0) {
-      await Pilot.findByIdAndUpdate(pilotId, updates);
+      await Pilot.findByIdAndUpdate(pilotId, { $set: updates });
     }
   } catch(e) {
     console.error('[recordTeamHistory] erreur:', e.message);
@@ -13653,10 +13657,11 @@ async function announcePoachingRipple(releasedPilot, oldTeam, newPilotJoining, r
           ? 1.0  // 0 pilote = offre systématique
           : (relOv >= 75 ? 0.97 : relOv >= 65 ? 0.92 : 0.85); // 1 pilote = très probable
       } else {
-        // Équipe complète : sélective, ne propose que si gain net réel
+        // Équipe complète : intérêt renforcé pour un free agent récent (mercato actif)
+        // Pas besoin de compensation comme un poaching → seuil plus bas
         interestProb = isTopTeamNow
-          ? (relOv >= 78 ? 0.70 : relOv >= 70 ? 0.40 : 0.15)
-          : (relOv >= 78 ? 0.50 : relOv >= 68 ? 0.55 : 0.40);
+          ? (relOv >= 78 ? 0.80 : relOv >= 70 ? 0.60 : 0.30)
+          : (relOv >= 78 ? 0.65 : relOv >= 68 ? 0.70 : 0.55);
       }
       if (Math.random() > interestProb) continue;
 
@@ -13672,7 +13677,7 @@ async function announcePoachingRipple(releasedPilot, oldTeam, newPilotJoining, r
         if (depth >= MAX_DEPTH - 1) continue; // stopper l'escalade trop profonde
         worstPilotDoc = [...pilotsInTeamDocs].sort((a, b) => overallRating(a) - overallRating(b))[0];
         const worstOv = overallRating(worstPilotDoc);
-        if (relOv < worstOv + 5) continue; // pas de downgrade ou gain marginal → skip
+        if (relOv < worstOv + 2) continue; // free agent : seuil abaissé (pas de compensation, moins de friction)
         if (Math.random() > (isTopTeamNow ? 0.45 : 0.30)) continue;
         replacedId = worstPilotDoc._id;
       }
@@ -15347,7 +15352,9 @@ const commands = [
   new SlashCommandBuilder().setName('admin_mercato_repair')
     .setDescription('[ADMIN] Génère des offres pour les pilotes libres sans offre en cours (mercato actif)')
     .addBooleanOption(o => o.setName('force')
-      .setDescription('Si true : génère aussi pour les pilotes qui ont déjà des offres (recalcul complet)')),
+      .setDescription('Si true : génère aussi pour les pilotes qui ont déjà des offres (recalcul complet)'))
+    .addStringOption(o => o.setName('pilote')
+      .setDescription('Cibler un pilote précis par nom — relance le ripple sans dupliquer les offres existantes')),
 
   new SlashCommandBuilder().setName('pilotes_libres')
     .setDescription('Liste les pilotes sans équipe pendant le mercato'),
@@ -20253,6 +20260,108 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_mercato_repair') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    // ── Mode pilote ciblé : relance le ripple pour un pilote précis ───────────
+    const piloteQuery = interaction.options.getString('pilote');
+    if (piloteQuery) {
+      const season = await Season.findOne({ status: { $in: ['transfer', 'active', 'finished'] } }).sort({ year: -1 });
+      if (!season) return interaction.editReply({ content: '❌ Aucune saison trouvée.', ephemeral: true });
+
+      const fp = await Pilot.findOne({ name: { $regex: piloteQuery, $options: 'i' } });
+      if (!fp) return interaction.editReply({ content: `❌ Pilote introuvable : \`${piloteQuery}\``, ephemeral: true });
+
+      const allTeams = await Team.find().lean();
+      const constrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+      const teamRankMap = new Map(constrStandings.map((s, i) => [String(s.teamId), i + 1]));
+      const totalTeams = allTeams.length;
+      const relOv = overallRating(fp);
+
+      const pilotCountByTeam = new Map();
+      for (const t of allTeams) {
+        pilotCountByTeam.set(String(t._id), await Pilot.countDocuments({ teamId: t._id }));
+      }
+
+      let created = 0;
+      const lines = [];
+
+      for (const t of allTeams) {
+        // Skip si offre déjà pending/under_review pour ce pilote dans cette équipe
+        const already = await TransferOffer.exists({ teamId: t._id, pilotId: fp._id, status: { $in: ['pending', 'under_review'] } });
+        if (already) { lines.push(`⏭️ **${t.emoji||''}${t.name}** — offre déjà en cours`); continue; }
+
+        const pilotsInTeam = pilotCountByTeam.get(String(t._id)) ?? 2;
+        const isUrgentNeed = pilotsInTeam < 2;
+        const tRank = teamRankMap.get(String(t._id)) || Math.ceil(totalTeams / 2);
+        const isTopTeam = tRank <= Math.ceil(totalTeams / 3);
+        const budgetRatio = t.budget / 100;
+
+        // Même logique de proba que le ripple (avec les nouvelles valeurs boostées)
+        let interestProb;
+        if (isUrgentNeed) {
+          interestProb = pilotsInTeam === 0 ? 1.0 : (relOv >= 75 ? 0.97 : relOv >= 65 ? 0.92 : 0.85);
+        } else {
+          interestProb = isTopTeam
+            ? (relOv >= 78 ? 0.80 : relOv >= 70 ? 0.60 : 0.30)
+            : (relOv >= 78 ? 0.65 : relOv >= 68 ? 0.70 : 0.55);
+        }
+        if (Math.random() > interestProb) { lines.push(`⚪ **${t.emoji||''}${t.name}** — pas intéressée`); continue; }
+
+        // Équipe complète : vérifier upgrade minimal
+        let replacedId = null;
+        if (!isUrgentNeed) {
+          const pilotsInTeamDocs = await Pilot.find({ teamId: t._id }).lean();
+          const worstDoc = [...pilotsInTeamDocs].sort((a, b) => overallRating(a) - overallRating(b))[0];
+          if (!worstDoc || relOv < overallRating(worstDoc) + 2) { lines.push(`⚪ **${t.emoji||''}${t.name}** — pas assez de gain`); continue; }
+          if (Math.random() > (isTopTeam ? 0.45 : 0.30)) { lines.push(`⚪ **${t.emoji||''}${t.name}** — domino refusé`); continue; }
+          replacedId = worstDoc._id;
+        }
+
+        const ovAttr = Math.pow(relOv / 75, 1.5);
+        const urgenceBonus = pilotsInTeam === 0 ? rand(1.30, 1.50) : pilotsInTeam === 1 ? rand(1.20, 1.35) : 1.0;
+        const salaireBase = Math.round(clamp((t.budget / 100) * 150 * ovAttr * (1 + ((t.prestige ?? 50) - 50) / 50 * 0.15) * urgenceBonus * rand(0.92, 1.10), 40, 480));
+        const existingInT = await Pilot.find({ teamId: t._id, _id: { $ne: replacedId } }).lean();
+        const offStatus = existingInT.length === 0 ? 'numero1' : relOv >= overallRating(existingInT[0]) ? 'numero1' : 'numero2';
+        const statusMul = offStatus === 'numero1' ? 1.20 : 1.0;
+        const coinMul = parseFloat(clamp(budgetRatio * rand(0.9, 1.45) * (isUrgentNeed ? rand(1.05, 1.20) : 1), 0.65, 2.3).toFixed(2));
+        const primeVMax = Math.round((t.budget / 100) * (isUrgentNeed ? 200 : 165));
+        const primeV = Math.round(clamp((190 - tRank * 12) * rand(0.7, 1.1) * budgetRatio, 0, primeVMax) * (isUrgentNeed ? rand(1.10, 1.30) : 1));
+        const seasons = isUrgentNeed ? (relOv >= 80 ? 2 : 1) : 1;
+        const expiresInMs = isUrgentNeed ? 3 * 24 * 60 * 60 * 1000 : 5 * 24 * 60 * 60 * 1000;
+
+        await TransferOffer.create({
+          teamId: t._id, pilotId: fp._id,
+          status: 'pending',
+          offerType: replacedId ? 'poaching' : 'free_agent',
+          compensationAmount: 0,
+          replacedPilotId: replacedId || null,
+          salaireBase: Math.max(40, Math.round(salaireBase * statusMul)),
+          seasons, coinMultiplier: coinMul,
+          primeVictoire: Math.max(0, primeV),
+          primePodium: Math.round(primeV * rand(0.22, 0.42)),
+          driverStatus: offStatus,
+          expiresAt: new Date(Date.now() + expiresInMs),
+        });
+        created++;
+        lines.push(`✅ **${t.emoji||''}${t.name}** — offre générée (${Math.round(salaireBase * statusMul)}🪙 × ${seasons}S, ${offStatus}${replacedId ? ', domino' : ''})`);
+
+        // DM pilote
+        try {
+          if (fp.discordId) {
+            const du = await client.users.fetch(fp.discordId).catch(() => null);
+            const dmCh = du ? await du.createDM().catch(() => null) : null;
+            if (dmCh) await dmCh.send(`📬 **${t.emoji||''}${t.name}** s'intéresse à toi ! Nouvelle offre reçue — utilise \`/offres\` pour la consulter.`).catch(() => {});
+          }
+        } catch(_) {}
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle(`🔧 Ripple ciblé — ${fp.name}`)
+        .setColor('#FF6600')
+        .setDescription(`**${created}** offre(s) générée(s) pour **${fp.name}** *(ov ${relOv})*\n\n` + lines.join('\n'))
+        .setFooter({ text: 'Les offres déjà existantes n\'ont pas été dupliquées.' });
+      return interaction.editReply({ embeds: [embed], ephemeral: true });
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // getActiveSeason() ne cherche que status:'active' — ici on cherche aussi 'transfer' et 'finished'
     const season = await Season.findOne({ status: { $in: ['transfer', 'active', 'finished'] } }).sort({ year: -1 });
