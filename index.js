@@ -13924,6 +13924,18 @@ async function runPoachingIA(season) {
   const pDriverRankMap = new Map(pDriverStandingsSorted.map((s, i) => [String(s.pilotId), i + 1]));
   const pTotalDrivers  = pDriverStandingsSorted.length || 1;
 
+  // ── Percentiles OV grille — seuils relatifs au niveau réel des pilotes ──────
+  // Remplace les seuils absolus (72/68) pour s'adapter à n'importe quelle grille.
+  const gridOvs = allPilotsUnderContract.map(p => overallRating(p)).sort((a, b) => a - b);
+  const percentile = (pct) => {
+    if (!gridOvs.length) return 50;
+    const idx = Math.floor(gridOvs.length * pct);
+    return gridOvs[Math.min(idx, gridOvs.length - 1)];
+  };
+  // aggressive : top ~33% (p67) · value_hunter/overperf : top ~55% (p45)
+  const OV_THRESHOLD_AGGRESSIVE = percentile(0.67);
+  const OV_THRESHOLD_DEFAULT    = percentile(0.45);
+
   // delta perf vs voiture : positif = surperforme, négatif = sous-performe
   const getPerfDeltaVsCar = (pilot) => {
     const constructorRank   = pTeamRankMap.get(String(pilot.teamId)) || Math.ceil(pTotalTeams / 2);
@@ -13933,9 +13945,10 @@ async function runPoachingIA(season) {
   };
 
   // ── Cap global : 2-4 poachings selon la taille du plateau ─────────────
-  // Plus généreux que avant (was 1-3) pour garantir de l'activité inter-saison
   const MAX_GLOBAL_POACHINGS = Math.max(2, Math.min(4, Math.round(pTotalTeams / 3)));
   let globalPoachCount = 0;
+
+  console.log(`[MERCATO][poaching] Grille : ${allPilotsUnderContract.length} pilotes sous contrat | OV médian: ${percentile(0.5)} | seuil aggressive: ${OV_THRESHOLD_AGGRESSIVE} | seuil default: ${OV_THRESHOLD_DEFAULT} | cap global: ${MAX_GLOBAL_POACHINGS}`);
 
   // ── Profil stratégique — 3 profils, pas de no_action ──────────────────
   // Si une équipe ne trouve pas de candidat intéressant, elle ne fait rien
@@ -13992,9 +14005,9 @@ async function runPoachingIA(season) {
       if (!contract) continue;
 
       const pOv = overallRating(p);
-      // Seuil OV : aggressive exige plus (72+), les autres acceptent dès 68
-      if (poachProfile === 'aggressive' && pOv < 72) continue;
-      if (poachProfile !== 'aggressive' && pOv < 68) continue;
+      // Seuil OV relatif à la grille : aggressive vise le top 33%, les autres le top 55%
+      if (poachProfile === 'aggressive' && pOv < OV_THRESHOLD_AGGRESSIVE) continue;
+      if (poachProfile !== 'aggressive' && pOv < OV_THRESHOLD_DEFAULT) continue;
 
       const overperfDelta = getPerfDeltaVsCar(p);
       // aggressive : pas besoin de surperf, il vise l'OV brut
@@ -14072,18 +14085,20 @@ async function runPoachingIA(season) {
       const baseCompensation = Math.round(
         pOv * contract.seasonsRemaining * (recruitingTeam.budget / 100) * rand(8, 18)
       );
-      const compensation = Math.round(clamp(baseCompensation, 50, 800));
+      // Compensation plafonnée à 50% du budget, et au maximum 800 — s'adapte aux petits budgets
+      const maxComp = Math.max(50, recruitingTeam.budget * 0.50);
+      const compensation = Math.round(clamp(baseCompensation, 50, Math.min(800, maxComp)));
 
-      // Budget check : indemnité <= 35% du budget de l'écurie
-      if (compensation > recruitingTeam.budget * 0.35) continue;
+      // Budget check : indemnité <= 50% du budget de l'écurie
+      if (compensation > recruitingTeam.budget * 0.50) continue;
 
       // Probabilité d'envoyer l'offre (filtre final de décision)
-      const deltaBonus = Math.min(0.20, delta * 0.03);
+      const deltaBonus = Math.min(0.25, delta * 0.04);
       const poachProbability = isTopRecruiting
-        ? (pilotCurrentTeamRank > Math.ceil(pTotalTeams / 2) ? 0.55 + deltaBonus : 0.35 + deltaBonus)
+        ? (pilotCurrentTeamRank > Math.ceil(pTotalTeams / 2) ? 0.70 + deltaBonus : 0.50 + deltaBonus)
         : isMidRecruiting
-        ? (pilotCurrentTeamRank > Math.ceil(pTotalTeams * 2 / 3) ? 0.40 + deltaBonus : 0.22 + deltaBonus)
-        : 0.20 + deltaBonus; // bas de tableau : plus prudent
+        ? (pilotCurrentTeamRank > Math.ceil(pTotalTeams * 2 / 3) ? 0.55 + deltaBonus : 0.38 + deltaBonus)
+        : 0.35 + deltaBonus; // bas de tableau : plus prudent
       if (Math.random() > poachProbability) continue;
 
       // Pas de doublon
