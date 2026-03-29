@@ -751,23 +751,28 @@ const TIRE = {
 // Chaque style amplifie certaines stats voiture et pilote
 const GP_STYLE_WEIGHTS = {
   urbain: {
-    car:   { vitesseMoyenne: 1.0, drs: 0.4, refroidissement: 0.8, dirtyAir: 1.2, conservationPneus: 1.1, vitesseMax: 0.5 },
+    // vitesseMoyenne réduit (était 1.0) — les circuits urbains valorisent davantage le freinage/contrôle/dirty air
+    car:   { vitesseMoyenne: 0.70, drs: 0.4, refroidissement: 0.8, dirtyAir: 1.2, conservationPneus: 1.1, vitesseMax: 0.5 },
     pilot: { depassement: 0.7, freinage: 1.4, defense: 1.3, adaptabilite: 1.0, reactions: 1.2, controle: 1.4, gestionPneus: 1.0 },
   },
   rapide: {
-    car:   { vitesseMoyenne: 0.8, drs: 1.4, refroidissement: 1.0, dirtyAir: 0.9, conservationPneus: 0.8, vitesseMax: 1.5 },
+    // vitesseMoyenne réduit (était 0.8) — circuits rapides = vitesseMax/DRS dominent vraiment
+    car:   { vitesseMoyenne: 0.60, drs: 1.4, refroidissement: 1.0, dirtyAir: 0.9, conservationPneus: 0.8, vitesseMax: 1.5 },
     pilot: { depassement: 1.3, freinage: 0.8, defense: 0.9, adaptabilite: 0.9, reactions: 1.1, controle: 0.9, gestionPneus: 0.8 },
   },
   technique: {
-    car:   { vitesseMoyenne: 1.3, drs: 0.7, refroidissement: 0.9, dirtyAir: 1.0, conservationPneus: 1.2, vitesseMax: 0.7 },
+    // vitesseMoyenne réduit (était 1.3) — gardé dominant mais atténué pour laisser place aux stats pilote
+    car:   { vitesseMoyenne: 1.00, drs: 0.7, refroidissement: 0.9, dirtyAir: 1.0, conservationPneus: 1.2, vitesseMax: 0.7 },
     pilot: { depassement: 0.8, freinage: 1.3, defense: 1.0, adaptabilite: 1.1, reactions: 0.9, controle: 1.5, gestionPneus: 1.1 },
   },
   mixte: {
-    car:   { vitesseMoyenne: 1.0, drs: 1.0, refroidissement: 1.0, dirtyAir: 1.0, conservationPneus: 1.0, vitesseMax: 1.0 },
+    // vitesseMoyenne réduit (était 1.0) — référence équilibrée, légèrement en retrait
+    car:   { vitesseMoyenne: 0.80, drs: 1.0, refroidissement: 1.0, dirtyAir: 1.0, conservationPneus: 1.0, vitesseMax: 1.0 },
     pilot: { depassement: 1.0, freinage: 1.0, defense: 1.0, adaptabilite: 1.0, reactions: 1.0, controle: 1.0, gestionPneus: 1.0 },
   },
   endurance: {
-    car:   { vitesseMoyenne: 0.9, drs: 0.9, refroidissement: 1.4, dirtyAir: 0.9, conservationPneus: 1.5, vitesseMax: 0.9 },
+    // vitesseMoyenne réduit (était 0.9) — l'endurance, c'est la gestion pneus/refroid avant tout
+    car:   { vitesseMoyenne: 0.70, drs: 0.9, refroidissement: 1.4, dirtyAir: 0.9, conservationPneus: 1.5, vitesseMax: 0.9 },
     pilot: { depassement: 0.8, freinage: 0.9, defense: 1.0, adaptabilite: 1.2, reactions: 0.8, controle: 1.0, gestionPneus: 1.5 },
   },
 };
@@ -6671,7 +6676,7 @@ function genEliminationArticles(allStandings, pilotMap, teamMap, gpsLeft, season
 
 // ── A. Articles Post-Qualifications ──────────────────────
 // Angle : pole surprise, favoris éliminés, contextualisation champ, rivalités
-function genPostQualiArticles(qualiData, allPilots, allTeams, standings, race, season, constrStandings) {
+function genPostQualiArticles(qualiData, allPilots, allTeams, standings, race, season, constrStandings, doneRaces = 99) {
   const { grid, q1Eliminated, q2Eliminated, q3State, weather } = qualiData;
   const pilotMap   = new Map(allPilots.map(p => [String(p._id), p]));
   const teamMap    = new Map(allTeams.map(t => [String(t._id), t]));
@@ -6722,7 +6727,9 @@ function genPostQualiArticles(qualiData, allPilots, allTeams, standings, race, s
       : [`Pole de ${polemanTeam.emoji}${polemanPilot.name} à ${race.circuit}`,
          `${polemanPilot.name} ouvre le weekend en tête — pole en ${weather === 'WET' ? 'conditions humides' : race.gpStyle}`];
 
-    const champCtx = isChampLeader
+    // Contexte championnat en quali — désactivé les 4 premiers GPs (rien d'établi)
+    const champCtx = doneRaces <= 4 ? ''
+      : isChampLeader
       ? `\n\n**Leader du championnat en pole.** Le message est clair — ${polemanPilot.name} veut dominer de bout en bout.`
       : champPos <= 3
       ? `\n\nEn P${champPos} au championnat, ${polemanPilot.name} envoie un signal fort à ses rivaux — l'écart de points peut bouger dès demain.`
@@ -7193,10 +7200,15 @@ function genTitleFightArticle(leader, challenger, leaderTeam, challengerTeam, ga
     : isMid && prevChampName && prevChampName !== leader.name && prevChampName !== challenger.name
     ? `\n\n*Ironiquement, **${prevChampName}**, champion en titre, observe ce duel pour le moment de loin.*`
     : isEarly
-    ? `\n\n*Ces premiers échanges au classement sont souvent révélateurs de la tendance sur toute la saison.*`
+    ? `\n\n*La saison s'ouvre à peine — ce classement précoce reste fragile et peut encore tout changer.*`
     : '';
 
-  const headlines = [
+  // Titres adaptés à la phase — en early season, pas de "tout est encore possible" (trop tôt)
+  const headlines = isEarly ? [
+    `${leader.name} prend les devants — mais la saison commence à peine`,
+    `Premiers points, premiers écarts — ${leader.name} devant ${challenger.name}`,
+    `${leader.name} vs ${challenger.name} : les premiers signes d'un duel à venir`,
+  ] : [
     `${gap} points — le titre se joue maintenant`,
     `${leader.name} vs ${challenger.name} : le duel pour l'histoire`,
     `${gpLeft} GP(s) restants — tout est encore possible`,
@@ -7693,9 +7705,12 @@ ${team.emoji} **${pilot.name}** au ${race.emoji} ${race.circuit} — la course q
     }
 
     // 50e ou 100e course disputée
+    // Seuils relevés (50/100 → 100/200/300) pour éviter le spam en début de saison :
+    // tous les pilotes débutent au même moment donc ils atteignent 50 GPs ensemble.
     const gpRecs = await PilotGPRecord.countDocuments({ pilotId: pilot._id, finishPos: { $gt: 0 } });
-    const raceMilestones = [50, 100, 150, 200];
-    if (raceMilestones.includes(gpRecs)) {
+    const raceMilestones = [100, 200, 300]; // 50 retiré — trop de spam day-1
+    const gpMilestoneAlreadyAdded = articles.some(a => a.type === 'milestone' && a.headline?.includes('GP'));
+    if (!gpMilestoneAlreadyAdded && raceMilestones.includes(gpRecs)) {
       const alreadyPosted2 = await NewsArticle.findOne({
         seasonYear: season.year, type: 'milestone',
         pilotIds: pilot._id,
@@ -7936,8 +7951,9 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
   }
 
   // 2. TITLE FIGHT — seulement mi-saison+ et PAS le dernier GP
+  // Bloqué aussi sur les 4 premiers GPs : le classement n'est pas représentatif
   const titleChance = isEarly ? 0 : isMid ? 0.3 : isLate ? 0.7 : 1.0;
-  if (!isSeasonFinal && standings.length >= 2 && gpLeft > 1 && Math.random() < titleChance) {
+  if (!isSeasonFinal && doneRaces > 4 && standings.length >= 2 && gpLeft > 1 && Math.random() < titleChance) {
     const s1 = standings[0], s2 = standings[1];
     const gap = s1.points - s2.points;
     const maxGap = isFinale ? 50 : isLate ? 35 : 25;
@@ -7950,8 +7966,8 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     }
   }
 
-  // 2-bis. SCÉNARIOS TITRE — seulement si <= 5 GPs restants ET pas le dernier GP
-  if (!isSeasonFinal && gpLeft <= 5 && gpLeft > 0 && Math.random() < 0.80) {
+  // 2-bis. SCÉNARIOS TITRE — seulement si <= 5 GPs restants ET pas le dernier GP ET hors early
+  if (!isSeasonFinal && doneRaces > 4 && gpLeft <= 5 && gpLeft > 0 && Math.random() < 0.80) {
     try {
       const titleScenarios = genTitleScenariosArticles(standings, pilotMap, teamMap, gpLeft, season.year);
       if (titleScenarios.length > 0) articlesToPost.push(titleScenarios[0]);
@@ -7999,8 +8015,8 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     } catch(e) { console.error('[season finale article]', e.message); }
   }
 
-  // 3. HYPE — surtout début/milieu
-  const hypeChance = isEarly ? 0.6 : isMid ? 0.45 : isLate ? 0.25 : 0.15;
+  // 3. HYPE — surtout début/milieu, mais très rare sur les 4 premiers GPs (trop tôt)
+  const hypeChance = (isEarly && doneRaces <= 4) ? 0.15 : isEarly ? 0.6 : isMid ? 0.45 : isLate ? 0.25 : 0.15;
   for (let i = 0; i < Math.min(standings.length, 5); i++) {
     const s = standings[i];
     const pilot = pilotMap.get(String(s.pilotId));
@@ -8017,8 +8033,8 @@ async function generatePostRaceNews(race, finalResults, season, channel) {
     }
   }
 
-  // 4. CRISE DE FORME
-const crisisChance = isEarly ? 0.2 : isMid ? 0.35 : isLate ? 0.45 : 0.5;
+  // 4. CRISE DE FORME — très rare sur les 4 premiers GPs (pas assez de données)
+const crisisChance = (isEarly && doneRaces <= 4) ? 0.08 : isEarly ? 0.2 : isMid ? 0.35 : isLate ? 0.45 : 0.5;
 for (const s of standings.slice(Math.floor(standings.length / 2))) {
   const pilot = pilotMap.get(String(s.pilotId));
   const team  = pilot ? teamMap.get(String(pilot.teamId)) : null;
@@ -8244,7 +8260,7 @@ for (const s of standings.slice(Math.floor(standings.length / 2))) {
     const teamMap3   = new Map(allTeams3.map(t => [String(t._id), t]));
     // Chercher les paires d'équipes avec forte rivalité
     const hotRivals  = await TeamRelation.find({ rivalry: { $gte: 45 } }).sort({ rivalry: -1 }).limit(3).lean();
-    const rivalChanceT = isEarly ? 0.15 : isMid ? 0.30 : isLate ? 0.50 : 0.65;
+    const rivalChanceT = (isEarly && doneRaces <= 4) ? 0 : isEarly ? 0.15 : isMid ? 0.30 : isLate ? 0.50 : 0.65;
     for (const rel of hotRivals) {
       if (Math.random() > rivalChanceT) continue;
       const tA = teamMap3.get(String(rel.teamA));
@@ -8360,7 +8376,8 @@ ${isUnder ? `Avec ${t.emoji}${t.name}, ce n'était pas la voiture la plus rapide
     }
   } catch(e) { console.error('[dotd article]', e.message); }
 
-  const toPost = articlesToPost.slice(0, 4); // +1 slot pour inclure l'histoire du jour
+  // Limité à 3 articles post-GP (était 4) — réduit le flood avec les autres systèmes (confs, milestones, rival_reaction...)
+  const toPost = articlesToPost.slice(0, 3);
   for (const articleData of toPost) {
     // Marquer pendingReply sur les articles rivalry/drama pour la réaction en chaîne
     if (['rivalry','drama'].includes(articleData.type) && articleData.pilotIds?.length >= 2) {
@@ -8386,11 +8403,11 @@ ${isUnder ? `Avec ${t.emoji}${t.name}, ce n'était pas la voiture la plus rapide
 
   // ── 6. RUMEURS CONTEXTUELLES ──────────────────────────────
   // Bloquées sur le dernier GP : pas de rumeurs "à suivre" quand la saison est terminée.
+  // Bloquées sur les 5 premiers GPs : trop tôt pour licencier ou attirer l'attention des top teams.
   // Déclenchées par les résultats réels : DNFs, surperformance, sous-performance
   const contextualRumors = [];
-  if (isSeasonFinal) {
-    // Sur le dernier GP, on saute complètement le bloc rumeurs contextuelles.
-    // Le mercato sera ouvert par la cérémonie — pas besoin d'anticiper ici.
+  if (isSeasonFinal || doneRaces <= 5) {
+    // Pas de rumeurs contextuelles en tout début de saison — rien n'est établi.
   } else {
 
   for (const pilot of allPilots) {
@@ -12922,8 +12939,46 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
         }
       } else if (!currentRival) {
         // Pas encore de rival — si 2+ contacts cette course, déclarer la rivalité
+        // ── CAP GLOBAL DES RIVALITÉS ACTIVES ──────────────────────────────────
+        // On limite à 4 paires simultanées max (réduit depuis 5) pour garder le fil narratif lisible.
+        // Si le cap est atteint, on élimine d'abord la rivalité la plus froide (heat le plus bas)
+        // parmi celles avec 0 contact depuis 3+ GPs (dormante), avant d'en créer une nouvelle.
+        const MAX_RIVAL_PAIRS = 4;
         const newTotal = (me.rivalContacts || 0) + count;
         if (count >= 2 || newTotal >= 2) {
+          // Compter les paires actives (chaque paire = 2 entrées, on compte les IDs uniques)
+          const activePilots = await Pilot.find({ rivalId: { $ne: null }, teamId: { $ne: null } }).select('_id rivalId rivalHeat rivalDeclaredAt').lean();
+          const pairKeys = new Set();
+          for (const ap of activePilots) {
+            const pk = [String(ap._id), String(ap.rivalId)].sort().join('_');
+            pairKeys.add(pk);
+          }
+          if (pairKeys.size >= MAX_RIVAL_PAIRS) {
+            // Chercher une rivalité dormante à purger :
+            // heat < 25 OU pas de contact depuis 3+ GPs (seuil abaissé depuis heat<20 / 4GPs)
+            const coldPilots = activePilots.filter(ap =>
+              (ap.rivalHeat || 0) < 25 &&
+              (ap.rivalDeclaredAt === null || (gpIndex - (ap.rivalDeclaredAt || 0)) >= 3)
+            );
+            if (coldPilots.length >= 2) {
+              // Trouver la paire la plus froide
+              const coldPairKeys = new Set();
+              for (const ap of coldPilots) {
+                const pk = [String(ap._id), String(ap.rivalId)].sort().join('_');
+                coldPairKeys.add(pk);
+              }
+              // Purger la première paire froide trouvée
+              const coldKey = [...coldPairKeys][0];
+              if (coldKey) {
+                const [cA, cB] = coldKey.split('_');
+                await Pilot.findByIdAndUpdate(cA, { $set: { rivalId: null, rivalContacts: 0, rivalHeat: 0, rivalDeclaredAt: null } });
+                await Pilot.findByIdAndUpdate(cB, { $set: { rivalId: null, rivalContacts: 0, rivalHeat: 0, rivalDeclaredAt: null } });
+              }
+            } else {
+              // Toutes les rivalités sont chaudes — on ne déclare pas de nouvelle paire
+              continue;
+            }
+          }
           const initialHeat = Math.min(40, heatGained); // démarre entre 12 et 40 selon gravité
           await Pilot.findByIdAndUpdate(myId, {
             rivalId         : theirId,
@@ -12940,8 +12995,11 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
 
   // ── Forcer un article rivalité si les rivaux se sont touchés ce GP ──
   // (indépendamment de la chance normale de publication)
+  // Limité à 1 seul article par GP pour éviter le flood quand plusieurs paires se touchent.
   if (rivalCollisionThisRace.size > 0 && channel) {
+    let rivalArticlePosted = false;
     for (const key of rivalCollisionThisRace) {
+      if (rivalArticlePosted) break;
       const [idA, idB] = key.split('_');
       const pA = await Pilot.findById(idA).lean();
       const pB = await Pilot.findById(idB).lean();
@@ -12951,6 +13009,7 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
       if (!tA || !tB) continue;
       const article = genRivalryArticle(pA, pB, tA, tB, pA.rivalContacts, raceResults[0]?.circuit || '', season?.year || new Date().getFullYear(), pA.rivalHeat || 0);
       await NewsArticle.create({ ...article, raceId, pilotIds: [pA._id, pB._id], teamIds: [tA._id, tB._id] });
+      rivalArticlePosted = true;
     }
   }
 
@@ -15352,9 +15411,7 @@ const commands = [
   new SlashCommandBuilder().setName('admin_mercato_repair')
     .setDescription('[ADMIN] Génère des offres pour les pilotes libres sans offre en cours (mercato actif)')
     .addBooleanOption(o => o.setName('force')
-      .setDescription('Si true : génère aussi pour les pilotes qui ont déjà des offres (recalcul complet)'))
-    .addStringOption(o => o.setName('pilote')
-      .setDescription('Cibler un pilote précis par nom — relance le ripple sans dupliquer les offres existantes')),
+      .setDescription('Si true : génère aussi pour les pilotes qui ont déjà des offres (recalcul complet)')),
 
   new SlashCommandBuilder().setName('pilotes_libres')
     .setDescription('Liste les pilotes sans équipe pendant le mercato'),
@@ -15939,7 +15996,10 @@ async function handleInteraction(interaction) {
 
       // ── Même logique coefRang que /focus_weekend display ─────────
       const safeRankPctBtn = (totalPilots > 0 && pilotRank > 0) ? pilotRank / totalPilots : 0.5;
-      const coefRangBtn    = 0.25 + Math.pow(safeRankPctBtn, 0.6) * 2.55;
+      const rawCoefRangBtn = 0.25 + Math.pow(safeRankPctBtn, 0.6) * 2.55;
+      const gpsDoneBtn     = await Race.countDocuments({ seasonId: season._id, status: 'done' });
+      const earlyFactorBtn = gpsDoneBtn <= 5 ? Math.max(0, (gpsDoneBtn - 1) / 5) : 1.0;
+      const coefRangBtn    = 1.0 + (rawCoefRangBtn - 1.0) * earlyFactorBtn;
 
       const diffMap = {
         win           : Math.min(0.95, 0.15 + rankPct * 0.7  + teamRankPct * 0.15),
@@ -17150,9 +17210,8 @@ async function handleInteraction(interaction) {
     const embed  = new EmbedBuilder().setTitle('🏎️ Écuries F1').setColor('#FF1801');
     for (const t of teams) {
       const tp = pilots.filter(p => String(p.teamId) === String(t._id));
-      const avg = Math.round((t.vitesseMax + t.drs + t.refroidissement + t.dirtyAir + t.conservationPneus + t.vitesseMoyenne) / 6);
       embed.addFields({
-        name: `${t.emoji} ${t.name}  ·  Perf moy. **${avg}/100**`,
+        name: `${t.emoji} ${t.name}`,
         value: tp.length ? tp.map(p => `• ${p.name}`).join('\n') : '*Aucun pilote*',
         inline: false,
       });
@@ -18748,10 +18807,15 @@ async function handleInteraction(interaction) {
     // Courbe concave : P1 → ×0.25 (très peu)  |  Dernier → ×2.80 (beaucoup)
     // safeRankPct : fallback 0.5 si pas encore de standings (début de saison)
     const safeRankPct = (totalPilots > 0 && pilotRank > 0) ? pilotRank / totalPilots : 0.5;
-    const coefRang    = 0.25 + Math.pow(safeRankPct, 0.6) * 2.55;
+    const rawCoefRang = 0.25 + Math.pow(safeRankPct, 0.6) * 2.55;
     //   P1  (rPct≈0.05) → coef ≈ 0.59   P5  (rPct≈0.25) → coef ≈ 1.26
     //   P10 (rPct≈0.50) → coef ≈ 1.93   P15 (rPct≈0.75) → coef ≈ 2.40
     //   P20 (rPct=1.00) → coef ≈ 2.80
+    // Sur les 5 premiers GPs : le classement n'est pas représentatif.
+    // On atténue progressivement le coefRang vers 1.0 pour éviter des récompenses aberrantes.
+    const gpsDone = await Race.countDocuments({ seasonId: season._id, status: 'done' });
+    const earlyFactor = gpsDone <= 5 ? Math.max(0, (gpsDone - 1) / 5) : 1.0; // 0→ GP1, 0.8→ GP5, 1.0→ GP6+
+    const coefRang = 1.0 + (rawCoefRang - 1.0) * earlyFactor; // interpolé vers 1.0 en début de saison
 
     // ── Définir les objectifs et leur difficulté relative ─────
     // difficulty : 0 (trivial) → 1 (quasi impossible)
@@ -20260,108 +20324,6 @@ async function handleInteraction(interaction) {
   if (commandName === 'admin_mercato_repair') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
-
-    // ── Mode pilote ciblé : relance le ripple pour un pilote précis ───────────
-    const piloteQuery = interaction.options.getString('pilote');
-    if (piloteQuery) {
-      const season = await Season.findOne({ status: { $in: ['transfer', 'active', 'finished'] } }).sort({ year: -1 });
-      if (!season) return interaction.editReply({ content: '❌ Aucune saison trouvée.', ephemeral: true });
-
-      const fp = await Pilot.findOne({ name: { $regex: piloteQuery, $options: 'i' } });
-      if (!fp) return interaction.editReply({ content: `❌ Pilote introuvable : \`${piloteQuery}\``, ephemeral: true });
-
-      const allTeams = await Team.find().lean();
-      const constrStandings = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
-      const teamRankMap = new Map(constrStandings.map((s, i) => [String(s.teamId), i + 1]));
-      const totalTeams = allTeams.length;
-      const relOv = overallRating(fp);
-
-      const pilotCountByTeam = new Map();
-      for (const t of allTeams) {
-        pilotCountByTeam.set(String(t._id), await Pilot.countDocuments({ teamId: t._id }));
-      }
-
-      let created = 0;
-      const lines = [];
-
-      for (const t of allTeams) {
-        // Skip si offre déjà pending/under_review pour ce pilote dans cette équipe
-        const already = await TransferOffer.exists({ teamId: t._id, pilotId: fp._id, status: { $in: ['pending', 'under_review'] } });
-        if (already) { lines.push(`⏭️ **${t.emoji||''}${t.name}** — offre déjà en cours`); continue; }
-
-        const pilotsInTeam = pilotCountByTeam.get(String(t._id)) ?? 2;
-        const isUrgentNeed = pilotsInTeam < 2;
-        const tRank = teamRankMap.get(String(t._id)) || Math.ceil(totalTeams / 2);
-        const isTopTeam = tRank <= Math.ceil(totalTeams / 3);
-        const budgetRatio = t.budget / 100;
-
-        // Même logique de proba que le ripple (avec les nouvelles valeurs boostées)
-        let interestProb;
-        if (isUrgentNeed) {
-          interestProb = pilotsInTeam === 0 ? 1.0 : (relOv >= 75 ? 0.97 : relOv >= 65 ? 0.92 : 0.85);
-        } else {
-          interestProb = isTopTeam
-            ? (relOv >= 78 ? 0.80 : relOv >= 70 ? 0.60 : 0.30)
-            : (relOv >= 78 ? 0.65 : relOv >= 68 ? 0.70 : 0.55);
-        }
-        if (Math.random() > interestProb) { lines.push(`⚪ **${t.emoji||''}${t.name}** — pas intéressée`); continue; }
-
-        // Équipe complète : vérifier upgrade minimal
-        let replacedId = null;
-        if (!isUrgentNeed) {
-          const pilotsInTeamDocs = await Pilot.find({ teamId: t._id }).lean();
-          const worstDoc = [...pilotsInTeamDocs].sort((a, b) => overallRating(a) - overallRating(b))[0];
-          if (!worstDoc || relOv < overallRating(worstDoc) + 2) { lines.push(`⚪ **${t.emoji||''}${t.name}** — pas assez de gain`); continue; }
-          if (Math.random() > (isTopTeam ? 0.45 : 0.30)) { lines.push(`⚪ **${t.emoji||''}${t.name}** — domino refusé`); continue; }
-          replacedId = worstDoc._id;
-        }
-
-        const ovAttr = Math.pow(relOv / 75, 1.5);
-        const urgenceBonus = pilotsInTeam === 0 ? rand(1.30, 1.50) : pilotsInTeam === 1 ? rand(1.20, 1.35) : 1.0;
-        const salaireBase = Math.round(clamp((t.budget / 100) * 150 * ovAttr * (1 + ((t.prestige ?? 50) - 50) / 50 * 0.15) * urgenceBonus * rand(0.92, 1.10), 40, 480));
-        const existingInT = await Pilot.find({ teamId: t._id, _id: { $ne: replacedId } }).lean();
-        const offStatus = existingInT.length === 0 ? 'numero1' : relOv >= overallRating(existingInT[0]) ? 'numero1' : 'numero2';
-        const statusMul = offStatus === 'numero1' ? 1.20 : 1.0;
-        const coinMul = parseFloat(clamp(budgetRatio * rand(0.9, 1.45) * (isUrgentNeed ? rand(1.05, 1.20) : 1), 0.65, 2.3).toFixed(2));
-        const primeVMax = Math.round((t.budget / 100) * (isUrgentNeed ? 200 : 165));
-        const primeV = Math.round(clamp((190 - tRank * 12) * rand(0.7, 1.1) * budgetRatio, 0, primeVMax) * (isUrgentNeed ? rand(1.10, 1.30) : 1));
-        const seasons = isUrgentNeed ? (relOv >= 80 ? 2 : 1) : 1;
-        const expiresInMs = isUrgentNeed ? 3 * 24 * 60 * 60 * 1000 : 5 * 24 * 60 * 60 * 1000;
-
-        await TransferOffer.create({
-          teamId: t._id, pilotId: fp._id,
-          status: 'pending',
-          offerType: replacedId ? 'poaching' : 'free_agent',
-          compensationAmount: 0,
-          replacedPilotId: replacedId || null,
-          salaireBase: Math.max(40, Math.round(salaireBase * statusMul)),
-          seasons, coinMultiplier: coinMul,
-          primeVictoire: Math.max(0, primeV),
-          primePodium: Math.round(primeV * rand(0.22, 0.42)),
-          driverStatus: offStatus,
-          expiresAt: new Date(Date.now() + expiresInMs),
-        });
-        created++;
-        lines.push(`✅ **${t.emoji||''}${t.name}** — offre générée (${Math.round(salaireBase * statusMul)}🪙 × ${seasons}S, ${offStatus}${replacedId ? ', domino' : ''})`);
-
-        // DM pilote
-        try {
-          if (fp.discordId) {
-            const du = await client.users.fetch(fp.discordId).catch(() => null);
-            const dmCh = du ? await du.createDM().catch(() => null) : null;
-            if (dmCh) await dmCh.send(`📬 **${t.emoji||''}${t.name}** s'intéresse à toi ! Nouvelle offre reçue — utilise \`/offres\` pour la consulter.`).catch(() => {});
-          }
-        } catch(_) {}
-      }
-
-      const embed = new EmbedBuilder()
-        .setTitle(`🔧 Ripple ciblé — ${fp.name}`)
-        .setColor('#FF6600')
-        .setDescription(`**${created}** offre(s) générée(s) pour **${fp.name}** *(ov ${relOv})*\n\n` + lines.join('\n'))
-        .setFooter({ text: 'Les offres déjà existantes n\'ont pas été dupliquées.' });
-      return interaction.editReply({ embeds: [embed], ephemeral: true });
-    }
-    // ─────────────────────────────────────────────────────────────────────────
 
     // getActiveSeason() ne cherche que status:'active' — ici on cherche aussi 'transfer' et 'finished'
     const season = await Season.findOne({ status: { $in: ['transfer', 'active', 'finished'] } }).sort({ year: -1 });
@@ -22652,14 +22614,15 @@ async function runQualifying(override, gpIndex = null) {
       q3State, weather,
     };
     const qualiArticles = genPostQualiArticles(qualiDataForNews, qualiNewsAllPilots, qualiNewsAllTeams,
-      qualiNewsStandings, race, season, qualiNewsConstr);
+      qualiNewsStandings, race, season, qualiNewsConstr, qualiNewsProgress);
 
     // ── Scénarios titre entre quali et course ────────────
     // Déclenché si ≤ 8 GPs restants (élargi vs post-race qui était ≤5)
+    // Et seulement hors début de saison (< 4 GPs joués = rien d'établi)
     const qualiNewsGpsLeft = qualiNewsTotalRaces - qualiNewsProgress;
     const qualiPilotMap = new Map(qualiNewsAllPilots.map(p => [String(p._id), p]));
     const qualiTeamMap  = new Map(qualiNewsAllTeams.map(t => [String(t._id), t]));
-    if (qualiNewsGpsLeft <= 8 && qualiNewsGpsLeft > 0 && Math.random() < 0.75) {
+    if (qualiNewsGpsLeft <= 8 && qualiNewsGpsLeft > 0 && qualiNewsProgress > 4 && Math.random() < 0.75) {
       try {
         const titleScenarios = genTitleScenariosArticles(qualiNewsStandings, qualiPilotMap, qualiTeamMap, qualiNewsGpsLeft, season.year);
         if (titleScenarios.length > 0) qualiArticles.push(titleScenarios[0]);
@@ -22673,7 +22636,9 @@ async function runQualifying(override, gpIndex = null) {
 
     // Pause courte pour laisser le classement final s'afficher avant les articles
     await new Promise(r => setTimeout(r, 3000));
-    for (const article of qualiArticles) {
+    // Max 2 articles post-quali pour éviter le flood combiné avec les autres systèmes
+    const qualiArticlesToPost = qualiArticles.slice(0, 2);
+    for (const article of qualiArticlesToPost) {
       try {
         const saved = await NewsArticle.create({ ...article, triggered: 'post_quali', publishedAt: new Date(), raceId: race._id });
         await publishNews(saved, channel);
