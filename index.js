@@ -782,6 +782,26 @@ function randInt(min, max)  { return Math.floor(rand(min, max + 1)); }
 function pick(arr)          { return arr[Math.floor(Math.random() * arr.length)]; }
 function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
+// ── constrChampSalaryFactor — pondération salariale selon le classement constructeur ──
+// Un champion constructeur peut séduire sur le prestige seul → offre moins généreuse.
+// Un bas-de-tableau doit aligner plus d'argent pour convaincre → offre gonflée.
+// rank   : position au classement constructeurs (1 = champion)
+// nTeams : nombre total d'équipes
+function constrChampSalaryFactor(rank, nTeams) {
+  if (!rank || !nTeams || nTeams < 2) return 1.0;
+  const pct = (rank - 1) / (nTeams - 1); // 0.0 = champion, 1.0 = lanterne rouge
+  // Champion    (pct ≈ 0.00) → ×0.88  — le prestige remplace la surenchère financière
+  // Top-tiers   (pct ≤ 0.30) → ×0.93  — position enviable, pas besoin de surpayer
+  // Mid-field   (pct ≤ 0.55) → ×1.00  — neutre
+  // Bas-tableau (pct ≤ 0.80) → ×1.15  — désespoir, il faut convaincre financièrement
+  // Lanterne    (pct ≈ 1.00) → ×1.28  — prime de recrutement maximale
+  if (pct <= 0.05) return 0.88;
+  if (pct <= 0.30) return 0.93;
+  if (pct <= 0.55) return 1.00;
+  if (pct <= 0.80) return 1.15;
+  return 1.28;
+}
+
 // ─── Note Générale FIFA-style ─────────────────────────────
 function overallRating(pilot) {
   return Math.round(
@@ -1955,6 +1975,13 @@ function wornThresholdFor(tireCompound, team, pilot) {
 function shouldPit(driver, lapsRemaining, gapAhead, totalLaps, scActive = false, currentLap = 0) {
   const { tireWear, tireCompound, pilot, team, tireAge, pitStops, pitStrategy, overcutMode } = driver;
 
+  // ── Pit d'urgence immédiat si pièce endommagée ─────────────
+  // pendingRepair = 'aileron' | 'suspension' | 'puncture_repair'
+  // Bypass TOUS les checks de stratégie — on ne peut pas rouler 15 tours avec un aileron cassé
+  if (driver.pendingRepair && lapsRemaining > 3 && (pitStops || 0) < 3) {
+    return { pit: true, reason: 'tires_worn' }; // reason tires_worn pour déclencher le pit normalement
+  }
+
   // ── Pit sous SC — logique smart ─────────────────
   if (scActive && lapsRemaining > 6 && (pitStops || 0) < 3) {
     // Anti double-pit : jamais piter 2 tours consécutifs sous SC
@@ -2193,9 +2220,9 @@ function checkIncident(pilot, team, lap = 1, totalLaps = 50, reliabilityMalus = 
 
   // reliabilityMalus appliqué sur la probabilité mécanique uniquement (mécaniciens, pas les pilotes)
   // Coefficients calibrés pour ~7% de DNF/course sur le plateau (vs 17% avant)
-  // mechCoeff 0.003 (était 0.007) · crashCoeff 0.0007 (était 0.0007) · puncture 0.0004/tour (était 0.002)
-  const reliabF  = (100 - team.refroidissement) / 100 * 0.003 * lapMultiplier * (1 + reliabilityMalus);
-  const crashF   = (((100 - pilot.controle) / 100 * 0.0004) + ((100 - pilot.reactions) / 100 * 0.0003)) * lapMultiplier;
+  // mechCoeff 0.0018 (était 0.003) · crashCoeff réduit · puncture 0.0003/tour
+  const reliabF  = (100 - team.refroidissement) / 100 * 0.0018 * lapMultiplier * (1 + reliabilityMalus);
+  const crashF   = (((100 - pilot.controle) / 100 * 0.00025) + ((100 - pilot.reactions) / 100 * 0.0002)) * lapMultiplier;
   if (roll < reliabF)            return { type: 'MECHANICAL', msg: `💥 Problème mécanique` };
   if (roll < reliabF + crashF)   return { type: 'CRASH',      msg: `💥 Accident` };
   if (roll < 0.0004)             return { type: 'PUNCTURE',   msg: `🫧 Crevaison` };
@@ -11882,6 +11909,32 @@ const exitNeighborStr = neighborAhead && neighborBehind
 
     // ── Commentary obligatoire chaque tour ───────────────────
     // Toujours un message, même si rien ne se passe
+
+    // ── Second check SC — pour les forceSC générés par les batailles ──
+    // Les batailles sont traitées APRÈS le premier check SC (ligne ~10560),
+    // donc un double crash de bataille serait manqué sans ce second passage.
+    const hasForcedSCBattle = events.some(e => e.forceSC);
+    if (hasForcedSCBattle && scState.state === 'NONE') {
+      scState = { state: 'SC', lapsLeft: 4 };
+      scActive = true;
+      // Bunching SC immédiat
+      const aliveSCB = drivers.filter(d => !d.dnf).sort((a,b) => a.totalTime - b.totalTime);
+      if (aliveSCB.length > 1) {
+        const leaderTimeB = aliveSCB[0].totalTime;
+        for (let i = 1; i < aliveSCB.length; i++) {
+          aliveSCB[i].totalTime = leaderTimeB + i * 1500;
+        }
+        aliveSCB.forEach((d, i) => { d.pos = i + 1; d.lastPos = i + 1; });
+      }
+      const causeB = lapDnfs.length > 0 ? lapDnfs[lapDnfs.length - 1] : null;
+      const causeBStr = causeB ? ` suite à l'abandon de **${causeB.driver.pilot.name}**` : ` suite au double crash`;
+      events.push({ priority: 9, gif: pickGif('safety_car'), text: pick([
+        `🚨 **SAFETY CAR DÉPLOYÉ !**${causeBStr}\nLe peloton se reforme — les écarts sont effacés. Tout est à refaire !`,
+        `🚨 **SC IN !**${causeBStr}. La voiture de sécurité prend la tête — deux voitures immobilisées sur la piste.`,
+        `🚨 **SAFETY CAR !** T${lap}${causeBStr}. Les commissaires nettoient la piste.`,
+      ]) });
+    }
+
    const atmo = atmosphereLine(ranked, lap, totalLaps, weather, scState, gpStyle, justRestarted);
     if (atmo) events.push({ priority: events.length === 0 ? 3 : 1, text: atmo });
 
@@ -13718,9 +13771,13 @@ async function announcePoachingRipple(releasedPilot, oldTeam, newPilotJoining, r
       } else {
         // Équipe complète : intérêt renforcé pour un free agent récent (mercato actif)
         // Pas besoin de compensation comme un poaching → seuil plus bas
+        const tRankProb     = teamRankMapNow.get(String(t._id)) || Math.ceil(totalTeamsNow / 2);
+        const isBottomTeam  = tRankProb > Math.ceil(totalTeamsNow * 2 / 3);
+        // Un bas-de-tableau cherche activement à se renforcer → probabilité boostée
+        const desperationBonus = isBottomTeam ? 0.12 : 0;
         interestProb = isTopTeamNow
           ? (relOv >= 78 ? 0.80 : relOv >= 70 ? 0.60 : 0.30)
-          : (relOv >= 78 ? 0.65 : relOv >= 68 ? 0.70 : 0.55);
+          : (relOv >= 78 ? 0.65 + desperationBonus : relOv >= 68 ? 0.70 + desperationBonus : 0.55 + desperationBonus);
       }
       if (Math.random() > interestProb) continue;
 
@@ -13752,7 +13809,12 @@ async function announcePoachingRipple(releasedPilot, oldTeam, newPilotJoining, r
         : pilotsInTeam === 1 ? rand(1.20, 1.35)
         : 1.0;
 
-      const salaireBase = Math.round(clamp(budgetCapPer * ovAttr * presBonus * urgenceBonus * rand(0.92, 1.10), 40, 480));
+      // Facteur championnat constructeur : un champion peut séduire sur le prestige (offre réduite),
+      // un bas-de-tableau doit aligner de l'argent pour attirer des pilotes (offre gonflée).
+      const tRankForFactor = teamRankMapNow.get(String(t._id)) || Math.ceil(totalTeamsNow / 2);
+      const champFactor = constrChampSalaryFactor(tRankForFactor, totalTeamsNow);
+
+      const salaireBase = Math.round(clamp(budgetCapPer * ovAttr * presBonus * urgenceBonus * champFactor * rand(0.92, 1.10), 40, 480));
 
       // Durée du contrat : équipe urgente propose plus long pour rassurer
       const seasons = isUrgentNeed
@@ -14068,6 +14130,11 @@ async function runPoachingIA(season) {
       const contract = contractByPilot.get(String(p._id));
       if (!contract) continue;
 
+      // ── Anti-poaching immédiat : pilote qui vient de signer ce mercato ──
+      // seasonsRemaining === seasonsDuration = contrat pas encore décrémenter = signé lors du mercato actuel
+      // Un pilote qui vient de signer ne peut pas être poaché dans la foulée
+      if (contract.seasonsRemaining >= contract.seasonsDuration && contract.seasonsDuration >= 1) continue;
+
       const pOv = overallRating(p);
       // Seuil OV relatif à la grille : aggressive vise le top 33%, les autres le top 55%
       if (poachProfile === 'aggressive' && pOv < OV_THRESHOLD_AGGRESSIVE) continue;
@@ -14158,11 +14225,14 @@ async function runPoachingIA(season) {
 
       // Probabilité d'envoyer l'offre (filtre final de décision)
       const deltaBonus = Math.min(0.25, delta * 0.04);
+      // Bas-de-tableau : motivation plus forte à poacher pour remonter le classement
+      const isBottomRecruiting  = recruitingRank > Math.ceil(pTotalTeams * 2 / 3);
+      const desperationPoach    = isBottomRecruiting ? 0.12 : 0;
       const poachProbability = isTopRecruiting
         ? (pilotCurrentTeamRank > Math.ceil(pTotalTeams / 2) ? 0.70 + deltaBonus : 0.50 + deltaBonus)
         : isMidRecruiting
         ? (pilotCurrentTeamRank > Math.ceil(pTotalTeams * 2 / 3) ? 0.55 + deltaBonus : 0.38 + deltaBonus)
-        : 0.35 + deltaBonus; // bas de tableau : plus prudent
+        : 0.35 + deltaBonus + desperationPoach; // bas de tableau : plus actif qu'avant
       if (Math.random() > poachProbability) continue;
 
       // Pas de doublon
@@ -14177,7 +14247,9 @@ async function runPoachingIA(season) {
       const budgetCapPerPilotP = (recruitingTeam.budget / 100) * 150;
       const ovAttractivenessP  = Math.pow(pOv / 75, 1.5);
       const prestigeBonusP     = 1 + ((recruitingTeam.prestige ?? 50) - 50) / 50 * 0.15;
-      const salaireBaseP       = Math.round(clamp(budgetCapPerPilotP * ovAttractivenessP * prestigeBonusP * rand(0.90, 1.20), 50, 450));
+      // Facteur championnat constructeur : champion attire sur le prestige (−), bas-tableau aligne l'argent (+)
+      const champFactorP  = constrChampSalaryFactor(recruitingRank, pTotalTeams);
+      const salaireBaseP  = Math.round(clamp(budgetCapPerPilotP * ovAttractivenessP * prestigeBonusP * champFactorP * rand(0.90, 1.20), 50, 450));
       const coinMultiplierP    = parseFloat(clamp(budgetRatioR * rand(0.9, 1.5), 0.7, 2.2).toFixed(2));
       const primeVictoireMaxP  = Math.round((recruitingTeam.budget / 100) * 180);
       const primeVictoireP     = Math.round(clamp((200 - teamRankForSalary * 12) * rand(0.7, 1.2) * budgetRatioR, 0, primeVictoireMaxP));
@@ -14318,9 +14390,17 @@ async function startTransferPeriod() {
         if (Math.random() > renewChance) continue;
         const existOffer = await TransferOffer.findOne({ pilotId: tp._id, teamId: team._id, status: 'pending' });
         if (existOffer) continue;
+        // Renouvellement : salaire basé STRICTEMENT sur le contrat qui expire,
+        // modulé par la performance. Champ → +30%, Overperf → +15%, Solid → +0%, Flop → -18%.
+        // Plancher = contrat actuel (sauf flop). Plafond = 40% du budget équipe.
         const perfMultiplier = perf.isChamp ? 1.30 : perf.isOverperf ? 1.15 : perf.isSolid ? 1.00 : 0.82;
-        const baseSalaire    = Math.round((expContract.salaireBase || 100) * perfMultiplier);
-        const salaireRenew   = Math.max(5, Math.min(team.budget * 0.40, baseSalaire));
+        const salaireActuel  = expContract.salaireBase || 100;
+        const baseSalaire    = Math.round(salaireActuel * perfMultiplier);
+        // Plancher = salaire actuel (ne jamais offrir moins sauf flop avéré)
+        const salaireFloorRenew = perf.isFlop ? Math.round(salaireActuel * 0.82) : salaireActuel;
+        // Facteur championnat constructeur : champion stabilise sans surpayer, bas-tableau fidélise avec l'argent
+        const champFactorRenew = constrChampSalaryFactor(teamRankLocal, totalTeams);
+        const salaireRenew   = Math.max(salaireFloorRenew, Math.min(team.budget * 0.40, Math.round(baseSalaire * champFactorRenew)));
         const dureeRenew     = perf.isChamp ? 3 : perf.isOverperf ? 2 : 1;
         // Calcul coinMultiplier et primes — identique à la 1ère vague pour cohérence log ↔ /offres
         const budgetRatioRenew     = team.budget / 100;
@@ -14443,19 +14523,27 @@ async function startTransferPeriod() {
       .sort((a, b) => b.score - a.score);
 
     // ── Nombre de candidats ciblés ────────────────────────────
-    // Les riches font des offres plus sélectives (top 3 seulement)
-    // Les pauvres font plus d'offres (ils ont besoin d'espoir que quelqu'un accepte)
-    const offerCount = prefersPeakPerformers
-      ? Math.min(3, ranked.length)
-      : prefersYoungTalent
-        ? Math.min(6, ranked.length)
-        : Math.min(4, ranked.length);
+    // Chaque slot disponible → 2 candidats ciblés max (1 prioritaire + 1 secours).
+    // Les pauvres légèrement plus ouverts (3/slot) pour augmenter leurs chances.
+    // On évite le spam de 6-8 offres par équipe qui dilue le marché.
+    const offersPerSlot = prefersYoungTalent ? 3 : 2;
+    const offerCount = Math.min(offersPerSlot * slotsAvailable, ranked.length);
 
-    const targets = ranked.slice(0, offerCount * slotsAvailable); // plus de candidats si 2 slots
+    const targets = ranked.slice(0, offerCount); // N candidats selon slots
 
     for (const { pilot, score } of targets) {
       // ── Calibration du contrat ─────────────────────────────
       const ov = overallRating(pilot);
+
+      // ── Contrat actuel du pilote (même expiré) : ancre le salaire ──────
+      // Un pilote qui gagne déjà bien ne peut pas recevoir une offre inférieure
+      // sans que ça ne signale un downgrade. On lit le dernier contrat actif
+      // (seasonsRemaining >= 0 ; il vient d'être décrémenté donc ≤ 0 = vient d'expirer).
+      const pilotLastContract = await Contract.findOne(
+        { pilotId: pilot._id },
+        { salaireBase: 1, coinMultiplier: 1, primeVictoire: 1 }
+      ).sort({ _id: -1 }).lean();
+      const pilotCurrentSalary = pilotLastContract?.salaireBase || 0;
 
       // ── Calibration du contrat selon budget réel de l'écurie ──────────
       // Budget 100 (base) → masse salariale totale tolérable ~300 PLcoins/course (2 pilotes)
@@ -14471,9 +14559,23 @@ async function startTransferPeriod() {
       const ovAttractiveness    = Math.pow(ov / 75, 1.5);    // exponentiel : ov 90 vaut 1.8×, ov 60 = 0.6×
       // Bonus prestige : une équipe au prestige élevé attire les meilleurs → peut offrir +15% de salaire max
       const prestigeBonus       = 1 + ((team.prestige ?? 50) - 50) / 50 * 0.15; // 0 prestige → ×0.85, 100 → ×1.15
-      const salaireBase = Math.round(
-        clamp(budgetCapPerPilot * ovAttractiveness * prestigeBonus * rand(0.85, 1.15), 40, 450)
+      // Facteur championnat constructeur : champion attire sur le prestige (−), bas-tableau aligne l'argent (+)
+      const champFactorFA = constrChampSalaryFactor(teamRank, totalTeams);
+      // ── Ancrage sur le salaire actuel du pilote ──────────────────────
+      // Règle : l'offre doit être au minimum égale au salaire actuel (même équipe / équipe concurrente)
+      // Surperf → bonus +15~30% ; grosse perf → jusqu'à +40%
+      const pilotStandingForSalary = allStandings.find(s => String(s.pilotId) === String(pilot._id));
+      const teamRankForSalary = teamRankMap.get(String(team._id)) || Math.ceil(totalTeams / 2);
+      const lastTeamRankForSalary = pilot.lastSeasonRank ? Math.round(pilot.lastSeasonRank * totalTeams / 20) : null;
+      const perfForSalary = evalPilotPerf(pilot, team, pilotStandingForSalary, teamRankForSalary, totalTeams, lastTeamRankForSalary);
+      const salaryPerfBonus = perfForSalary.isChamp ? 1.35 : perfForSalary.isOverperf ? 1.18 : perfForSalary.isFlop ? 0.88 : 1.00;
+      // Seuil plancher = salaire actuel × bonus perf (jamais moins que l'actuel sauf flop)
+      const salaryFloor = Math.round(pilotCurrentSalary * salaryPerfBonus);
+      const salaireBaseRaw = Math.round(
+        clamp(budgetCapPerPilot * ovAttractiveness * prestigeBonus * champFactorFA * rand(0.85, 1.15), 40, 450)
       );
+      // L'offre est le MAX entre le calcul budget et le plancher salarial de l'actuel
+      const salaireBase = Math.max(salaireBaseRaw, salaryFloor);
 
       // Multiplicateur : les riches peuvent offrir plus de coins par course en %
       // Cap à 2.2× pour ne pas dérégler les PLcoins
@@ -14555,6 +14657,75 @@ async function startTransferPeriod() {
       console.log(`[MERCATO] 📤 OFFRE — ${team.emoji||''}${team.name} → ${pilot.name} | ${Math.max(50, finalSalaireBase)}🪙/course × ${seasons} saison(s) | statut: ${offeredStatus||'N/A'} | ×${coinMultiplier}`);
     }
   }
+
+  // ── COVERAGE PASS : garantir qu'aucun pilote libre n'est ignoré ─────────
+  // Après la boucle principale, vérifier si des pilotes libres n'ont reçu aucune offre.
+  // La meilleure équipe avec slot disponible leur envoie une offre garantie.
+  try {
+    const covAllTeams   = await Team.find().lean();
+    const covConstrSt   = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const covTRankMap   = new Map(covConstrSt.map((s, i) => [String(s.teamId), i + 1]));
+    const covStandings  = await Standing.find({ seasonId: season._id }).lean();
+
+    for (const freePilot of freePilots) {
+      const existingOfferCount = await TransferOffer.countDocuments({ pilotId: freePilot._id, status: 'pending' });
+      if (existingOfferCount > 0) continue; // déjà couvert
+
+      // Trouver la meilleure équipe avec slot disponible
+      let bestTeamForCov = null;
+      let bestScoreForCov = -Infinity;
+      for (const t of covAllTeams) {
+        const slots = 2 - await Pilot.countDocuments({ teamId: t._id });
+        if (slots <= 0) continue;
+        const alreadySent = await TransferOffer.exists({ teamId: t._id, pilotId: freePilot._id, status: { $in: ['pending','accepted','under_review'] } });
+        if (alreadySent) continue;
+        const sc = computeTeamScore(freePilot, t, covStandings);
+        if (sc > bestScoreForCov) { bestScoreForCov = sc; bestTeamForCov = t; }
+      }
+      if (!bestTeamForCov) continue;
+
+      const covOv        = overallRating(freePilot);
+      const covBR        = bestTeamForCov.budget / 100;
+      const covCap       = covBR * 150;
+      const covOvAtt     = Math.pow(covOv / 75, 1.5);
+      const covPrestige  = 1 + ((bestTeamForCov.prestige ?? 50) - 50) / 50 * 0.15;
+      // Ancrage salaire actuel
+      const covLastCtr   = await Contract.findOne({ pilotId: freePilot._id }).sort({ _id: -1 }).lean();
+      const covCurSalary = covLastCtr?.salaireBase || 0;
+      const covTRankVal  = covTRankMap.get(String(bestTeamForCov._id)) || Math.ceil(covAllTeams.length / 2);
+      const covPerf      = evalPilotPerf(freePilot, bestTeamForCov,
+        covStandings.find(s => String(s.pilotId) === String(freePilot._id)),
+        covTRankVal, covAllTeams.length, null);
+      const covPerfBonus = covPerf.isChamp ? 1.35 : covPerf.isOverperf ? 1.18 : covPerf.isFlop ? 0.88 : 1.00;
+      const covFloor     = Math.round(covCurSalary * covPerfBonus);
+      const covSalaireRaw = Math.round(clamp(covCap * covOvAtt * covPrestige * rand(0.85, 1.10), 40, 450));
+      const covSalaire   = Math.max(covSalaireRaw, covFloor);
+      const covMult      = parseFloat(clamp(covBR * rand(0.9, 1.4), 0.7, 2.0).toFixed(2));
+      const covPVMax     = Math.round(covBR * 180);
+      const covPV        = Math.round(clamp((200 - covTRankVal * 12) * rand(0.65, 1.1) * covBR, 0, covPVMax));
+      const covPP        = Math.round(covPV * rand(0.25, 0.4));
+      const covExpiry    = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const covExistPilots = await Pilot.find({ teamId: bestTeamForCov._id }).lean();
+      const covStatus    = covExistPilots.length === 1
+        ? (covOv >= overallRating(covExistPilots[0]) ? 'numero1' : 'numero2')
+        : 'numero1';
+      const covStatMul   = covStatus === 'numero1' ? 1.20 : 1.0;
+      const covFinalSal  = Math.max(50, Math.round(covSalaire * covStatMul));
+
+      await TransferOffer.create({
+        teamId: bestTeamForCov._id, pilotId: freePilot._id,
+        coinMultiplier: covMult,
+        primeVictoire:  Math.max(0, covPV),
+        primePodium:    Math.max(0, covPP),
+        salaireBase:    covFinalSal,
+        seasons:        1,
+        driverStatus:   covStatus,
+        status:         'pending',
+        expiresAt:      covExpiry,
+      });
+      console.log(`[MERCATO] 📤 COVERAGE — ${bestTeamForCov.emoji||''}${bestTeamForCov.name} → ${freePilot.name} | ${covFinalSal}🪙/course × 1 saison (coverage pass)`);
+    }
+  } catch(e) { console.error('[coverage pass]', e.message); }
 
   // ── POACHING : délégué à la fonction standalone ─────────────────────────
   await runPoachingIA(season).catch(e => console.error('[poaching IA]', e.message));
@@ -14747,6 +14918,10 @@ async function resolveTeamDeliberations() {
       }
 
       // Scorer chaque candidat — exclure déjà signés dans ce round ou ailleurs
+      // ── Priorité renouvellement ───────────────────────────────────────────
+      // Un pilote en renouvellement (même équipe) est prioritaire sur les autres
+      // candidats EN DÉLIBÉRATION : si son offre est under_review, il passe en tête
+      // du scoring, sauf si son perf est flop (auquel cas le score brut s'applique).
       const scored = (await Promise.all(candidates.map(async o => {
         const p = await Pilot.findById(o.pilotId).lean();
         // Un pilote poaché peut encore avoir un teamId à ce stade (sera libéré lors de la signature)
@@ -14754,7 +14929,24 @@ async function resolveTeamDeliberations() {
         if (!p) return null;
         if (!isPoachOffer && p.teamId) return null; // free_agent doit être libre
         if (signedThisRound.has(String(p._id))) return null; // déjà signé ce round
-        return { offer: o, pilot: p, score: computeTeamScore(p, team, allStandings) };
+        let sc = computeTeamScore(p, team, allStandings);
+        // Bonus renouvellement : pilote déjà dans l'écurie (ou dont le contrat vient d'expirer dans cette équipe)
+        const wasInThisTeam = p.teamId && String(p.teamId) === String(teamId);
+        const lastCtrForTeam = await Contract.findOne({ pilotId: p._id, teamId: teamId }).sort({ _id: -1 }).lean();
+        const isRenewalCandidate = wasInThisTeam || (lastCtrForTeam != null);
+        if (isRenewalCandidate) {
+          // Évaluer la perf pour moduler le bonus
+          const renewStanding = allStandings.find(s => String(s.pilotId) === String(p._id));
+          const renewPerf = evalPilotPerf(p, team, renewStanding,
+            teamRankMap ? (teamRankMap.get(String(teamId)) || Math.ceil((await Team.countDocuments()) / 2)) : 5,
+            (await Team.countDocuments()) || 10, null);
+          // Flop = pas de bonus priorité, on laisse le marché décider
+          if (!renewPerf.isFlop) {
+            const renewBonus = renewPerf.isChamp ? 9999 : renewPerf.isOverperf ? 500 : renewPerf.isSolid ? 200 : 0;
+            sc += renewBonus;
+          }
+        }
+        return { offer: o, pilot: p, score: sc };
       }))).filter(Boolean).sort((a, b) => b.score - a.score);
 
       const chosen   = scored.slice(0, slotsOpen);
