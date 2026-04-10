@@ -14884,6 +14884,12 @@ async function resolveTeamDeliberations() {
   const season = await getActiveSeason();
   const allStandings = season ? await Standing.find({ seasonId: season._id }).lean() : [];
 
+  // ── teamRankMap : classement constructeurs (nécessaire pour evalPilotPerf) ──
+  const constrStandingsDelibr = season
+    ? await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean()
+    : [];
+  const teamRankMap = new Map(constrStandingsDelibr.map((s, i) => [String(s.teamId), i + 1]));
+
   // ── Trier les équipes par score de leur meilleur candidat ────
   // Évite que deux équipes signent le même pilote en même temps :
   // l'équipe qui lui offre le meilleur score passe en premier,
@@ -14938,7 +14944,7 @@ async function resolveTeamDeliberations() {
           // Évaluer la perf pour moduler le bonus
           const renewStanding = allStandings.find(s => String(s.pilotId) === String(p._id));
           const renewPerf = evalPilotPerf(p, team, renewStanding,
-            teamRankMap ? (teamRankMap.get(String(teamId)) || Math.ceil((await Team.countDocuments()) / 2)) : 5,
+            teamRankMap.get(String(teamId)) || Math.ceil((await Team.countDocuments()) / 2),
             (await Team.countDocuments()) || 10, null);
           // Flop = pas de bonus priorité, on laisse le marché décider
           if (!renewPerf.isFlop) {
