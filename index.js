@@ -19663,45 +19663,50 @@ async function handleInteraction(interaction) {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
 
-    const reviews = await TransferOffer.find({ status: 'under_review' }).lean();
-    if (!reviews.length)
-      return interaction.editReply({ content: '⚠️ Aucune candidature en cours de délibération.', ephemeral: true });
+    try {
+      const reviews = await TransferOffer.find({ status: 'under_review' }).lean();
+      if (!reviews.length)
+        return interaction.editReply({ content: '⚠️ Aucune candidature en cours de délibération.', ephemeral: true });
 
-    // Compter les équipes concernées avant de lancer
-    const teamsInvolved = new Set(reviews.map(r => String(r.teamId)));
+      const teamsInvolved = new Set(reviews.map(r => String(r.teamId)));
 
-    // Passer toutes les deadlines dans le passé en une seule opération
-    // → resolveTeamDeliberations() les traitera toutes dans le même appel,
-    //   dans l'ordre de leur meilleur score (équitable, comme le cron)
-    await TransferOffer.updateMany(
-      { status: 'under_review' },
-      { reviewDeadline: new Date(Date.now() - 1000) }
-    );
+      // Message intermédiaire pour signaler que ça tourne
+      await interaction.editReply({ content: `⏳ Délibération de **${teamsInvolved.size}** équipe(s) en cours...` });
 
-    await resolveTeamDeliberations();
+      await TransferOffer.updateMany(
+        { status: 'under_review' },
+        { reviewDeadline: new Date(Date.now() - 1000) }
+      );
 
-    // Rapport post-délibération
-    const allTeams = await Team.find().lean();
-    const lines = [];
-    for (const teamId of teamsInvolved) {
-      const t = allTeams.find(x => String(x._id) === teamId);
-      if (!t) continue;
-      const pilots = await Pilot.find({ teamId: t._id }).lean();
-      const names = pilots.map(p => `${p.name}`).join(', ') || '*aucun*';
-      lines.push(`${t.emoji || '🏎️'} **${t.name}** → ${names}`);
+      await resolveTeamDeliberations();
+
+      // Rapport post-délibération
+      const allTeams = await Team.find().lean();
+      const lines = [];
+      for (const teamId of teamsInvolved) {
+        const t = allTeams.find(x => String(x._id) === teamId);
+        if (!t) continue;
+        const pilots = await Pilot.find({ teamId: t._id }).lean();
+        const names = pilots.map(p => p.name).join(', ') || '*aucun*';
+        lines.push(`${t.emoji || '🏎️'} **${t.name}** → ${names}`);
+      }
+
+      return interaction.editReply({
+        content: null,
+        embeds: [new EmbedBuilder()
+          .setTitle('⚡ Délibération globale forcée')
+          .setColor('#F1C40F')
+          .setDescription(
+            `**${reviews.length}** candidature(s) traitée(s) · **${teamsInvolved.size}** équipe(s)\n\n` +
+            `*Ordre : équipe avec le meilleur candidat en premier (identique au cron)*\n\n` +
+            lines.join('\n')
+          )
+        ],
+      });
+    } catch(e) {
+      console.error('[admin_force_deliberation_all]', e.message);
+      return interaction.editReply({ content: `❌ Erreur : ${e.message}` }).catch(() => {});
     }
-
-    return interaction.editReply({
-      embeds: [new EmbedBuilder()
-        .setTitle('⚡ Délibération globale forcée')
-        .setColor('#F1C40F')
-        .setDescription(
-          `**${reviews.length}** candidature(s) traitée(s) · **${teamsInvolved.size}** équipe(s)\n\n` +
-          `*Ordre de traitement : équipe avec le meilleur candidat en premier (identique au cron automatique)*\n\n` +
-          lines.join('\n')
-        )
-      ],
-    });
   }
 
   // ── /admin_new_season ─────────────────────────────────────
