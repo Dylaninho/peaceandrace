@@ -15780,7 +15780,7 @@ const commands = [
     .addStringOption(o => o.setName('ecurie').setDescription('Nom de l\'écurie').setRequired(true)),
 
   new SlashCommandBuilder().setName('admin_force_deliberation_all')
-    .setDescription('[ADMIN] Force la délibération de TOUTES les écuries simultanément (équitable — même ordre que le cron)'),
+    .setDescription('[ADMIN] Force la délibération de toutes les écuries simultanément (équitable)'),
 
   new SlashCommandBuilder().setName('admin_assigner_pilotes')
     .setDescription('[ADMIN] Assigne 2 pilotes existants à une écurie (créée via /admin_creer_ecurie)')
