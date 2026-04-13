@@ -19661,26 +19661,35 @@ async function handleInteraction(interaction) {
   // ── /admin_force_deliberation_all ─────────────────────────
   if (commandName === 'admin_force_deliberation_all') {
     if (!interaction.member.permissions.has('Administrator'))
-      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
 
     try {
-      const reviews = await TransferOffer.find({ status: 'under_review' }).lean();
-      if (!reviews.length)
-        return interaction.editReply({ content: '⚠️ Aucune candidature en cours de délibération.', ephemeral: true });
+      // Inclure pending ET under_review — les pending n'ont pas encore été acceptées par les joueurs
+      // mais on veut forcer la délibération de tout ce qui est en attente
+      const allPending = await TransferOffer.find({ status: { $in: ['pending', 'under_review'] } }).lean();
+      if (!allPending.length)
+        return interaction.editReply({ content: '⚠️ Aucune offre en attente ou en délibération.' });
 
-      const teamsInvolved = new Set(reviews.map(r => String(r.teamId)));
+      const teamsInvolved = new Set(allPending.map(r => String(r.teamId)));
 
-      // Message intermédiaire pour signaler que ça tourne
       await interaction.editReply({ content: `⏳ Délibération de **${teamsInvolved.size}** équipe(s) en cours...` });
 
+      // 1. Forcer toutes les pending en under_review avec deadline passée
+      // (simule que tous les joueurs ont accepté + deadline expirée)
+      const now = new Date(Date.now() - 1000);
+      await TransferOffer.updateMany(
+        { status: 'pending' },
+        { status: 'under_review', reviewDeadline: now }
+      );
+      // 2. Passer les deadlines des under_review existants dans le passé
       await TransferOffer.updateMany(
         { status: 'under_review' },
-        { reviewDeadline: new Date(Date.now() - 1000) }
+        { reviewDeadline: now }
       );
 
       await resolveTeamDeliberations();
 
-      // Rapport post-délibération
+      // Rapport
       const allTeams = await Team.find().lean();
       const lines = [];
       for (const teamId of teamsInvolved) {
@@ -19697,7 +19706,7 @@ async function handleInteraction(interaction) {
           .setTitle('⚡ Délibération globale forcée')
           .setColor('#F1C40F')
           .setDescription(
-            `**${reviews.length}** candidature(s) traitée(s) · **${teamsInvolved.size}** équipe(s)\n\n` +
+            `**${allPending.length}** offre(s) traitée(s) · **${teamsInvolved.size}** équipe(s)\n\n` +
             `*Ordre : équipe avec le meilleur candidat en premier (identique au cron)*\n\n` +
             lines.join('\n')
           )
