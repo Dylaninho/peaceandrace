@@ -15779,6 +15779,9 @@ const commands = [
     .setDescription('[ADMIN] Force la résolution immédiate de la délibération d\'une écurie')
     .addStringOption(o => o.setName('ecurie').setDescription('Nom de l\'écurie').setRequired(true)),
 
+  new SlashCommandBuilder().setName('admin_force_deliberation_all')
+    .setDescription('[ADMIN] Force la délibération de TOUTES les écuries simultanément (équitable — même ordre que le cron)'),
+
   new SlashCommandBuilder().setName('admin_assigner_pilotes')
     .setDescription('[ADMIN] Assigne 2 pilotes existants à une écurie (créée via /admin_creer_ecurie)')
     .addStringOption(o => o.setName('ecurie').setDescription('Nom exact de l\'écurie').setRequired(true))
@@ -16418,7 +16421,7 @@ async function handleInteraction(interaction) {
     'accepter_offre','refuser_offre','admin_set_photo','admin_reset_pilot','admin_help',
     'f1','admin_news_force','concept','admin_apply_last_race','admin_fix_emojis','admin_set_personalities','affinites',
     'admin_replan','admin_evolve_cars','admin_reset_rivalites','admin_set_intro','admin_test_intro',
-       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes', 'admin_set_dev_focus', 'admin_force_deliberation', 'admin_fix_contracts'].includes(commandName);
+       'action_paddock', 'admin_queue', 'admin_mercato_repair', 'admin_mercato_log', 'admin_toggle_pilotes', 'admin_grille_next', 'admin_masse_salariale', 'admin_creer_ecurie', 'admin_assigner_pilotes', 'admin_set_dev_focus', 'admin_force_deliberation', 'admin_force_deliberation_all', 'admin_fix_contracts'].includes(commandName);
   if (!NO_DEFER.includes(commandName)) {
     await interaction.deferReply({ ephemeral: isEphemeral });
   }
@@ -19650,6 +19653,52 @@ async function handleInteraction(interaction) {
         .setDescription(
           `${reviews.length} candidature(s) traitée(s) immédiatement.\n\n` +
           `🏎️ Pilotes actuels dans l'équipe : ${signedNames}`
+        )
+      ],
+    });
+  }
+
+  // ── /admin_force_deliberation_all ─────────────────────────
+  if (commandName === 'admin_force_deliberation_all') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.', ephemeral: true });
+
+    const reviews = await TransferOffer.find({ status: 'under_review' }).lean();
+    if (!reviews.length)
+      return interaction.editReply({ content: '⚠️ Aucune candidature en cours de délibération.', ephemeral: true });
+
+    // Compter les équipes concernées avant de lancer
+    const teamsInvolved = new Set(reviews.map(r => String(r.teamId)));
+
+    // Passer toutes les deadlines dans le passé en une seule opération
+    // → resolveTeamDeliberations() les traitera toutes dans le même appel,
+    //   dans l'ordre de leur meilleur score (équitable, comme le cron)
+    await TransferOffer.updateMany(
+      { status: 'under_review' },
+      { reviewDeadline: new Date(Date.now() - 1000) }
+    );
+
+    await resolveTeamDeliberations();
+
+    // Rapport post-délibération
+    const allTeams = await Team.find().lean();
+    const lines = [];
+    for (const teamId of teamsInvolved) {
+      const t = allTeams.find(x => String(x._id) === teamId);
+      if (!t) continue;
+      const pilots = await Pilot.find({ teamId: t._id }).lean();
+      const names = pilots.map(p => `${p.name}`).join(', ') || '*aucun*';
+      lines.push(`${t.emoji || '🏎️'} **${t.name}** → ${names}`);
+    }
+
+    return interaction.editReply({
+      embeds: [new EmbedBuilder()
+        .setTitle('⚡ Délibération globale forcée')
+        .setColor('#F1C40F')
+        .setDescription(
+          `**${reviews.length}** candidature(s) traitée(s) · **${teamsInvolved.size}** équipe(s)\n\n` +
+          `*Ordre de traitement : équipe avec le meilleur candidat en premier (identique au cron automatique)*\n\n` +
+          lines.join('\n')
         )
       ],
     });
