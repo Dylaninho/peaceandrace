@@ -22201,9 +22201,7 @@ async function runPractice(override, gpIndex = null) {
     console.log(`[runPractice] ❌ Aucune course trouvée (slot=${slot}, heure Paris=${nowStr}) — abandon.`);
     return;
   }
-  const raceIsToday = await isRaceDay(race, override);
-  console.log(`[runPractice] 🔍 Course : ${race.circuit} | slot BDD=${race.slot} | scheduledDate=${race.scheduledDate} | status=${race.status} | isRaceDay=${raceIsToday}`);
-  if (!raceIsToday) { console.log('[runPractice] ❌ Pas le bon jour — abandon.'); return; }
+  console.log(`[runPractice] 🔍 Course : ${race.circuit} | slot BDD=${race.slot} | scheduledDate=${race.scheduledDate} | status=${race.status}`);
   if (race.status !== 'upcoming' && !override) {
     console.log(`[runPractice] ⏭️ Déjà fait pour ${race.circuit} slot=${race.slot} (status=${race.status})`);
     return;
@@ -22498,7 +22496,6 @@ async function runQualifying(override, gpIndex = null) {
   if (!race) { console.log(`[runQualifying] ❌ Aucune course trouvée (slot=${slot}, heure Paris=${nowStr2}) — abandon.`); return; }
   console.log(`[runQualifying] 🔍 Course : ${race.circuit} | slot BDD=${race.slot} | scheduledDate=${race.scheduledDate} | status=${race.status}`);
   if (!race) return;
-  if (!await isRaceDay(race, override)) return;
   if (race.status !== 'practice_done' && !override) {
     console.log(`[runQualifying] Mauvais status pour ${race.circuit} (status=${race.status})`);
     return;
@@ -23095,10 +23092,6 @@ async function runRace(override, gpIndex = null) {
   }
   if (race.status !== 'quali_done' && !override) {
     console.log(`[runRace] ❌ Course ${race.circuit} pas encore qualifiée (status=${race.status}) — abandon.`);
-    return;
-  }
-  if (!await isRaceDay(race, override)) {
-    console.log(`[runRace] ❌ Pas le bon jour pour ${race.circuit} (scheduledDate=${race.scheduledDate}) — abandon.`);
     return;
   }
   console.log(`[runRace] ✅ Lancement course ${race.circuit} (status=${race.status}, slot=${race.slot ?? 'N/A'})`);
