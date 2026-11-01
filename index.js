@@ -29,6 +29,38 @@ const GUILD_ID     = process.env.GUILD_ID;
 const MONGO_URI    = process.env.MONGODB_URI || 'mongodb://localhost:27017/f1bot';
 const RACE_CHANNEL = process.env.RACE_CHANNEL_ID;
 const PORT         = process.env.PORT || 3000;
+
+// ============================================================
+//  ⚙️  RÉGLAGES REFONTE « FIN DE SIMULATION » (tout se règle ici)
+// ============================================================
+// Règlement : nouvelle réglementation seulement quand le règlement en cours a duré exactement N saisons.
+// (mettre 0 ou 999 pour ne plus jamais en avoir)
+const REG_CHANGE_EVERY = 6;
+// GP : on ne poste que les moments marquants (priorité d'événement >= seuil)
+const HIGHLIGHT_MIN_PRIORITY = 8;   // 8 = changement de tête, accrochage, abandon, SC, pit avec dégâts...
+const QUIET_DIGEST_EVERY     = 12;  // si rien de marquant pendant N tours → point course (top 5)
+const RACE_MSG_DELAY_MS      = 4500; // pause entre deux messages de course (avant : 9000)
+// DMs automatiques (mercato / entraînement) : désactivés, tout est silencieux
+const DMS_ENABLED = false;
+// Dès que le mercato auto est fini : annonce de la grille puis lancement automatique de la saison suivante
+const AUTO_START_NEXT_SEASON = true;
+const NEXT_SEASON_DELAY_MS   = 60 * 1000; // pause entre la révélation de grille et l'annonce de la nouvelle saison
+// Évolution des pilotes en fin de saison (entraînement auto puis régression naturelle)
+const EVO = {
+  maxAutoGainPerStat : 2,      // gain max par stat via l'entraînement auto (PLcoins) sur une saison
+  physical   : ['reactions', 'adaptabilite', 'depassement', 'freinage'],   // déclinent vite
+  experience : ['controle', 'gestionPneus', 'defense'],                    // déclinent lentement
+  physChance : 0.85, physMin : 1, physMax : 3,
+  expChance  : 0.65, expMin  : 1, expMax  : 2,
+  accelPerSeason : 0.06,       // le déclin s'accélère de 6 % par saison déjà jouée…
+  maxAccel       : 1.8,        // …plafonné à ×1.8
+  floorStat      : 30,         // une stat ne descend jamais sous 30
+};
+
+async function dmUser(id) {
+  if (!DMS_ENABLED) return null;
+  return client.users.fetch(id);
+}
 // ── Intro vidéo GP ───────────────────────────────────────────
 // INTRO_VIDEO_URL  : URL directe vers un MP4 (Discord CDN, hébergement perso...)
 //                    Discord intègre et joue la vidéo automatiquement inline.
@@ -547,6 +579,8 @@ const SeasonSchema = new mongoose.Schema({
   secondWaveSentAt  : { type: Date, default: null },
   gridRevealedAt    : { type: Date, default: null },
   contractsDecremented : { type: Boolean, default: false },
+  evolutionApplied     : { type: Boolean, default: false },  // entraînement + régression de fin de saison déjà appliqués
+  autoMercatoDoneAt    : { type: Date, default: null },       // mercato automatique terminé
 });
 const Season = mongoose.model('Season', SeasonSchema);
 
@@ -10060,7 +10094,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     } catch(e) {
       console.error('[simulateRace] send error:', e.message, '— Code:', e.code || 'N/A');
     }
-    await sleep(9000); // toujours attendre, même en cas d'erreur Discord
+    await sleep(RACE_MSG_DELAY_MS); // toujours attendre, même en cas d'erreur Discord
   };
 
   const sendEmbed = async (embed) => {
@@ -10070,7 +10104,7 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
     } catch(e) {
       console.error('[simulateRace] sendEmbed error:', e.message, '— Code:', e.code || 'N/A');
     }
-    await sleep(9000);
+    await sleep(RACE_MSG_DELAY_MS);
   };
 
   // ══════════════════════════════════════════════════════════
@@ -10212,6 +10246,11 @@ async function simulateRace(race, grid, pilots, teams, contracts, channel, seaso
   const raceKey = String(race._id);
   global.activeRaces.set(raceKey, { abort: () => { raceAborted = true; } });
   console.log(`[simulateRace] 🏁 Boucle démarrée — ${totalLaps} tours, ${drivers.length} pilotes`);
+
+  // ── MODE MOMENTS MARQUANTS ─────────────────────────────────
+  // Le moteur calcule toujours tous les tours, mais on ne poste que ce qui compte.
+  let lastPostedLap = 0;
+  const skippedEvents = []; // événements notables des tours non postés (repris dans le point course)
 
   for (let lap = 1; lap <= totalLaps; lap++) {
     if (raceAborted) {
@@ -11943,8 +11982,9 @@ const exitNeighborStr = neighborAhead && neighborBehind
     const eventsText = events.map(e => e.text).join('\n\n');
     const topGif = events.find(e => e.gif)?.gif ?? null;
 
-    const showFullStandings = (lap % 10 === 0) || lap === totalLaps;
-    const showTop5          = (lap % 5 === 0 && !showFullStandings) || (scActive && prevScState !== 'NONE');
+    const quietTooLong      = (lap - lastPostedLap) >= QUIET_DIGEST_EVERY;
+    const showFullStandings = (lap === totalLaps) || (lap === Math.round(totalLaps / 2));
+    const showTop5          = ((lap % 10 === 0 || quietTooLong) && !showFullStandings) || (scActive && prevScState !== 'NONE');
 
     // ── Indicateur pneu : compound + barre d'usure 5 blocs ───
     // Format :  🔴 S ▰▰▰▱▱  (Soft, 60% usé)
@@ -12069,6 +12109,26 @@ const exitNeighborStr = neighborAhead && neighborBehind
           return `**P${i+1}** ${d.team.emoji} **${d.pilot.name}**${penTag(d)} — ${gapStr} ${tireWearLabel(d)}`;
         }).join('\n');
     }
+    // ── Filtre « moments marquants » ────────────────────────
+    const maxPrio = events.reduce((m, e) => Math.max(m, e.priority || 0), 0);
+    const isHighlightLap = maxPrio >= HIGHLIGHT_MIN_PRIORITY
+      || lap === 1 || lap === totalLaps
+      || showFullStandings || quietTooLong
+      || (scActive && prevScState !== 'NONE');
+    if (!isHighlightLap) {
+      // Tour calme : on garde en mémoire le meilleur événement pour le prochain point course
+      for (const e of events) if (e.text && (e.priority || 0) >= 5) skippedEvents.push({ lap, priority: e.priority, text: e.text });
+      continue;
+    }
+    // Point course : on rappelle les 2 faits les plus marquants des tours non postés
+    let recapText = '';
+    if (skippedEvents.length && maxPrio < HIGHLIGHT_MIN_PRIORITY) {
+      const best = [...skippedEvents].sort((a, b) => b.priority - a.priority).slice(0, 2).sort((a, b) => a.lap - b.lap);
+      recapText = best.map(e => '↪️ ' + e.text).join('\n\n');
+    }
+    skippedEvents.length = 0;
+    lastPostedLap = lap;
+
     // GIF d'abord — apparaît avant le commentaire pour éviter le décalage
     if (topGif && channel) {
       try { await sendWithTimeout(() => channel.send(topGif), 'topGif'); } catch(e) { console.error('[simulateRace] topGif error:', e.message); }
@@ -12079,7 +12139,7 @@ const exitNeighborStr = neighborAhead && neighborBehind
     const header = `**⏱ Tour ${lap}/${totalLaps}**` +
       (scState.state === 'SC'  ? ` 🚨 **SAFETY CAR**` : '') +
       (scState.state === 'VSC' ? ` 🟡 **VSC**`        : '');
-    await send([header, eventsText, standingsText].filter(Boolean).join('\n'));
+    await send([header, recapText, eventsText, standingsText].filter(Boolean).join('\n'));
   }
 
   global.activeRaces?.delete(raceKey);
@@ -12684,7 +12744,7 @@ async function getAllPilotsWithTeams() {
 // Pour chaque pilote ayant activé autoAmelioration, dépense TOUT le solde
 // disponible en achetant des upgrades sur la stat la plus basse en boucle.
 // Notifie le joueur en DM avec le récapitulatif complet.
-async function runAutoAmelioration(raceResults, raceDoc, channel = null) {
+async function runAutoAmelioration(raceResults, raceDoc, channel = null, opts = {}) {
   const gridCtx = await buildGridContext();
   const STATS_KEYS = ['depassement','freinage','defense','adaptabilite','reactions','controle','gestionPneus'];
   const STATS_LABELS = {
@@ -12696,7 +12756,8 @@ async function runAutoAmelioration(raceResults, raceDoc, channel = null) {
   for (const r of raceResults) {
     try {
       let pilot = await Pilot.findById(r.pilotId).lean();
-      if (!pilot || !pilot.autoAmelioration) continue;
+      if (!pilot || (!pilot.autoAmelioration && !opts.force)) continue;
+      const gainedThisRun = {}; // stat → points gagnés (plafond opts.maxGainPerStat)
 
       // ── Boucle : dépense tout le solde disponible ───────────
       const upgradeLog = []; // { stat, from, to, cost }
@@ -12706,7 +12767,7 @@ async function runAutoAmelioration(raceResults, raceDoc, channel = null) {
       while (loopGuard++ < 1000) {
         // Trouver la stat la plus basse (hors stats déjà à MAX)
         const statsSorted = STATS_KEYS
-          .filter(k => (pilot[k] ?? 50) < MAX_STAT)
+          .filter(k => (pilot[k] ?? 50) < MAX_STAT && (gainedThisRun[k] || 0) < (opts.maxGainPerStat ?? Infinity))
           .sort((a, b) => (pilot[a] ?? 50) - (pilot[b] ?? 50));
 
         if (!statsSorted.length) break; // toutes les stats sont à MAX
@@ -12732,6 +12793,7 @@ async function runAutoAmelioration(raceResults, raceDoc, channel = null) {
           ...(unlockSpec ? { specialization: targetStat } : {}),
         };
 
+        gainedThisRun[targetStat] = (gainedThisRun[targetStat] || 0) + 1;
         upgradeLog.push({ stat: targetStat, from: currentVal, to: currentVal + 1, cost, unlockSpec });
         totalSpent += cost;
       }
@@ -12756,7 +12818,7 @@ async function runAutoAmelioration(raceResults, raceDoc, channel = null) {
 
       // ── Notif DM récapitulatif ───────────────────────────────
       try {
-        const discordUser = await client.users.fetch(pilot.discordId).catch(() => null);
+        const discordUser = await dmUser(pilot.discordId).catch(() => null);
         if (discordUser) {
           // Regrouper les upgrades par stat pour un résumé lisible
           const statSummary = {};
@@ -13071,9 +13133,7 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
 
   // ── Auto-amélioration : upgrade automatique des stats les plus basses ─────
   // Déclenché pour tous les pilotes qui ont activé autoAmelioration = true
-  try {
-    await runAutoAmelioration(raceResults, raceDoc, channel);
-  } catch(e) { console.error('[autoAmelioration]', e.message); }
+  // (désactivé : l'entraînement est maintenant automatique et silencieux, une fois par saison — voir runSeasonEvolution)
 
   // ── Récapitulatif de fin de saison ───────────────────────
   // Si c'était le dernier GP de la saison et qu'un channel est fourni,
@@ -13103,23 +13163,8 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
               return;
             }
             await Season.findByIdAndUpdate(season._id, { transferStartedAt: new Date() });
-            const expiredCount = await startTransferPeriod();
             const ch = await client.channels.fetch(RACE_CHANNEL).catch(() => channel);
-            if (ch) await ch.send(`🔄 **MERCATO OUVERT** — ${expiredCount} contrat(s) expiré(s). Utilisez \`/offres\` pour voir vos propositions.`);
-            // 2ème vague automatique — 3 jours après la 1ère
-            setTimeout(async () => {
-              try {
-                const ch2 = await client.channels.fetch(RACE_CHANNEL).catch(() => null);
-                const waveCount = await startSecondTransferWave(ch2);
-                if (ch2) {
-                  if (waveCount) {
-                    await ch2.send(`🔄 **MERCATO — 2ème vague** — ${waveCount} nouvelle(s) offre(s) pour les pilotes encore libres. Utilisez \`/offres\` pour consulter.`);
-                  } else {
-                    await ch2.send('✅ **Mercato clôturé** — Tous les pilotes libres ont trouvé une écurie. La grille est complète !');
-                  }
-                }
-              } catch(e) { console.error('[second wave auto]', e.message); }
-            }, 3 * 24 * 60 * 60 * 1000); // 3 jours après la 1ère vague
+            await runAutoMercato(ch);
           } catch(e) { console.error('[applyRaceResults ceremony]', e.message); }
         }, 5 * 60 * 1000); // 5 min → conf de presse (3 min) a le temps de finir
       }
@@ -13130,7 +13175,15 @@ async function applyRaceResults(raceResults, raceId, season, collisions = [], ch
 async function createNewSeason() {
   const lastSeason = await Season.findOne().sort({ year: -1 });
   const year   = lastSeason ? lastSeason.year + 1 : new Date().getFullYear();
-  const regSet = lastSeason ? (lastSeason.year % 4 === 3 ? lastSeason.regulationSet + 1 : lastSeason.regulationSet) : 1;
+  // FIX : avant, `if (regSet > 1)` déclenchait une nouvelle réglementation à CHAQUE saison dès que
+  // regulationSet valait 2+. Maintenant : un seul changement quand le règlement en cours a duré
+  // exactement REG_CHANGE_EVERY saisons (égalité stricte → pas de rattrapage surprise).
+  let regBumped = false;
+  if (lastSeason && REG_CHANGE_EVERY > 0 && REG_CHANGE_EVERY < 999) {
+    const seasonsOnThisReg = await Season.countDocuments({ regulationSet: lastSeason.regulationSet });
+    regBumped = seasonsOnThisReg === REG_CHANGE_EVERY;
+  }
+  const regSet = lastSeason ? (lastSeason.regulationSet || 1) + (regBumped ? 1 : 0) : 1;
 
   // ── FIX : archiver TOUTES les saisons non-active avant d'en créer une nouvelle ──
   // Sans ça, les anciennes saisons restent en status 'transfer' indéfiniment,
@@ -13146,7 +13199,7 @@ async function createNewSeason() {
 
   const season = await Season.create({ year, status: 'active', regulationSet: regSet });
 
-  if (regSet > 1) await applyRegulationChange(season);
+  if (regBumped) await applyRegulationChange(season);
 
   // Reset duels coéquipiers pour la nouvelle saison
   await Pilot.updateMany({}, { teammateDuelWins: 0, teamStatus: null });
@@ -13423,7 +13476,7 @@ async function notifyOffersExpiredDM(offersOrIds, reason) {
     for (const [pilotId, pilotOffers] of byPilot) {
       const fp = await Pilot.findById(pilotId).lean();
       if (!fp?.discordId) continue;
-      const discordUser = await client.users.fetch(fp.discordId).catch(() => null);
+      const discordUser = await dmUser(fp.discordId).catch(() => null);
       if (!discordUser) continue;
       const dmCh = await discordUser.createDM().catch(() => null);
       if (!dmCh) continue;
@@ -13697,7 +13750,7 @@ async function announcePoachingRipple(releasedPilot, oldTeam, newPilotJoining, r
     // DM au pilote libéré
     try {
       if (releasedPilot.discordId) {
-        const du = await client.users.fetch(releasedPilot.discordId).catch(() => null);
+        const du = await dmUser(releasedPilot.discordId).catch(() => null);
         const dmCh = du ? await du.createDM().catch(() => null) : null;
         if (dmCh) await dmCh.send(
           `📋 **Ton contrat a été rompu.**\n\n` +
@@ -13862,7 +13915,7 @@ async function announcePoachingRipple(releasedPilot, oldTeam, newPilotJoining, r
       // DM au pilote libéré
       try {
         if (releasedPilot.discordId) {
-          const du = await client.users.fetch(releasedPilot.discordId).catch(() => null);
+          const du = await dmUser(releasedPilot.discordId).catch(() => null);
           const dmCh = du ? await du.createDM().catch(() => null) : null;
           if (dmCh) {
             const urgLine = isUrgentNeed
@@ -14296,7 +14349,7 @@ async function runPoachingIA(season) {
   for (const { offer, pilot, recruitingTeam } of createdOffers) {
     try {
       if (!pilot.discordId) continue;
-      const discordUser = await client.users.fetch(pilot.discordId).catch(() => null);
+      const discordUser = await dmUser(pilot.discordId).catch(() => null);
       if (!discordUser) continue;
       const dmCh = await discordUser.createDM().catch(() => null);
       if (!dmCh) continue;
@@ -14786,7 +14839,7 @@ async function startTransferPeriod() {
       const pilot    = await Pilot.findById(pilotId);
       if (!pilot?.discordId) continue;
       const discordUser = await (async () => {
-        try { return await client.users.fetch(pilot.discordId); } catch { return null; }
+        try { return await dmUser(pilot.discordId); } catch { return null; }
       })();
       if (!discordUser) continue;
       const dmCh = await discordUser.createDM().catch(() => null);
@@ -14837,7 +14890,7 @@ async function notifyDeliberationRejected(offers, team, reason) {
       await TransferOffer.findByIdAndUpdate(offer._id, { status: 'review_rejected' });
       const fp = await Pilot.findById(offer.pilotId).lean();
       if (!fp?.discordId) continue;
-      const du = await client.users.fetch(fp.discordId).catch(() => null);
+      const du = await dmUser(fp.discordId).catch(() => null);
       if (!du) continue;
       const dmCh = await du.createDM().catch(() => null);
       if (!dmCh) continue;
@@ -14881,7 +14934,7 @@ async function resolveTeamDeliberations() {
     byTeam.get(key).push(o);
   }
 
-  const season = await getActiveSeason();
+  const season = (await getActiveSeason()) || (await Season.findOne({ status: 'transfer' }).sort({ year: -1 }));
   const allStandings = season ? await Standing.find({ seasonId: season._id }).lean() : [];
 
   // ── teamRankMap : classement constructeurs (nécessaire pour evalPilotPerf) ──
@@ -15037,7 +15090,7 @@ async function resolveTeamDeliberations() {
         // DM élu
         try {
           if (pilot.discordId) {
-            const du = await client.users.fetch(pilot.discordId).catch(() => null);
+            const du = await dmUser(pilot.discordId).catch(() => null);
             const dmCh = du ? await du.createDM().catch(() => null) : null;
             if (dmCh) {
               const poachLine = offer.offerType === 'poaching' && offer.compensationAmount > 0
@@ -15168,7 +15221,7 @@ async function resolveTeamDeliberations() {
         // DM au pilote
         try {
           if (pilot.discordId) {
-            const du = await client.users.fetch(pilot.discordId).catch(() => null);
+            const du = await dmUser(pilot.discordId).catch(() => null);
             const dmCh = du ? await du.createDM().catch(() => null) : null;
             if (dmCh) await dmCh.send(
               `📬 **Nouvelle offre d'urgence !** ${team.emoji} **${team.name}** te propose un contrat.
@@ -15193,8 +15246,9 @@ async function resolveTeamDeliberations() {
 }
 
 async function startSecondTransferWave(channel) {
-  const season = await getActiveSeason();
-  if (!season || season.status !== 'transfer') return;
+  // FIX : getActiveSeason() ne cherche que status:'active' → cette fonction ne faisait jamais rien pendant le mercato.
+  const season = await Season.findOne({ status: 'transfer' }).sort({ year: -1 });
+  if (!season) return 0;
 
   // Pilotes toujours sans équipe ET sans offre pending
   const freePilots = await Pilot.find({ teamId: null });
@@ -15790,6 +15844,14 @@ const commands = [
 
   new SlashCommandBuilder().setName('admin_grid_economy')
     .setDescription('[ADMIN] Distribution grille, coûts upgrades par pilote et équilibre économique'),
+
+  new SlashCommandBuilder().setName('admin_auto_mercato')
+    .setDescription('[ADMIN] Lance le mercato 100% automatique (évolution pilotes, offres, signatures, grille)')
+    .addBooleanOption(o => o.setName('force').setDescription('Relancer même si le mercato auto a déjà tourné').setRequired(false)),
+
+  new SlashCommandBuilder().setName('admin_evolution')
+    .setDescription('[ADMIN] Applique l\'évolution de fin de saison (entraînement auto + régression des pilotes)')
+    .addBooleanOption(o => o.setName('force').setDescription('Réappliquer même si déjà appliquée cette saison').setRequired(false)),
 ];
 
 // ============================================================
@@ -16954,6 +17016,7 @@ async function handleInteraction(interaction) {
   // Quand activé : après chaque course, l'IA upgrage la stat la plus basse si le joueur
   // a assez de PLcoins. Désactivé par défaut.
   if (commandName === 'amelioration_auto') {
+    return interaction.editReply({ content: '🤖 Les évolutions de pilotes sont désormais **automatiques** (entraînement et vieillissement en fin de saison). Cette commande est désactivée.' });
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
     if (!pilot) {
@@ -16988,6 +17051,7 @@ async function handleInteraction(interaction) {
     return interaction.editReply({ embeds: [embed] });
   }  // ── /ameliorer ────────────────────────────────────────────
   if (commandName === 'ameliorer') {
+    return interaction.editReply({ content: '🤖 Les évolutions de pilotes sont désormais **automatiques** (entraînement et vieillissement en fin de saison). Cette commande est désactivée.' });
     const pilotIndex = interaction.options.getInteger('pilote') || 1;
     const pilot = await getPilotForUser(interaction.user.id, pilotIndex);
     if (!pilot) {
@@ -19659,6 +19723,34 @@ async function handleInteraction(interaction) {
   }
 
   // ── /admin_force_deliberation_all ─────────────────────────
+  // ── /admin_auto_mercato ───────────────────────────────────
+  if (commandName === 'admin_auto_mercato') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
+    const force = interaction.options.getBoolean('force') || false;
+    await interaction.editReply({ content: '⏳ Mercato automatique en cours…' });
+    const res = await runAutoMercato(interaction.channel, { force });
+    const msg = res.ok
+      ? `✅ Mercato automatique terminé — ${res.free} pilote(s) sans écurie${res.forced ? ` (${res.forced} placé(s) d'office)` : ''}.${res.newSeasonYear ? ` Saison ${res.newSeasonYear} lancée.` : ''}`
+      : res.reason === 'already_done' ? '⚠️ Le mercato auto a déjà tourné pour cette saison (utilise `force:true`).'
+      : res.reason === 'already_running' ? '⚠️ Le mercato auto est déjà en cours.'
+      : `❌ Échec : ${res.reason}`;
+    return interaction.editReply({ content: msg });
+  }
+
+  // ── /admin_evolution ──────────────────────────────────────
+  if (commandName === 'admin_evolution') {
+    if (!interaction.member.permissions.has('Administrator'))
+      return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
+    const force = interaction.options.getBoolean('force') || false;
+    const season = await Season.findOne({ status: { $in: ['transfer', 'active', 'finished'] } }).sort({ year: -1 });
+    if (!season) return interaction.editReply({ content: '❌ Aucune saison trouvée.' });
+    const res = await runSeasonEvolution(season, { force });
+    return interaction.editReply({ content: res.skipped
+      ? '⚠️ Évolution déjà appliquée pour cette saison (utilise `force:true`).'
+      : `✅ Évolution appliquée — ${res.touched}/${res.total} pilote(s) en régression (perte totale ${res.totalLoss} pts, accélération ×${res.accel.toFixed(2)}).` });
+  }
+
   if (commandName === 'admin_force_deliberation_all') {
     if (!interaction.member.permissions.has('Administrator'))
       return interaction.editReply({ content: '❌ Commande réservée aux admins.' });
@@ -20699,7 +20791,7 @@ async function handleInteraction(interaction) {
       // DM le pilote
       try {
         if (fp.discordId && offersForPilot > 0) {
-          const du = await client.users.fetch(fp.discordId).catch(() => null);
+          const du = await dmUser(fp.discordId).catch(() => null);
           if (du) {
             const dmCh = await du.createDM().catch(() => null);
             if (dmCh) await dmCh.send(`📬 **Nouvelle offre !** **${fp.name}** vient de recevoir **${offersForPilot}** proposition(s) de contrat. Utilise \`/offres\` pour les consulter.`);
@@ -23432,69 +23524,11 @@ async function runRace(override, gpIndex = null) {
     await Season.findByIdAndUpdate(season._id, { transferStartedAt: new Date() });
 
     setTimeout(async () => {
-      const expiredCount = await startTransferPeriod();
-
       try {
-        const ch = await client.channels.fetch(RACE_CHANNEL);
-
-        // Résumé des offres générées par l'IA
-        const allOffers  = await TransferOffer.find({ status: 'pending' });
-        const allTeams2  = await Team.find();
-        const allPilots2 = await Pilot.find({ _id: { $in: allOffers.map(o => o.pilotId) } });
-        const teamMap2   = new Map(allTeams2.map(t => [String(t._id), t]));
-        const pilotMap2  = new Map(allPilots2.map(p => [String(p._id), p]));
-
-        // Grouper les offres par pilote pour avoir un aperçu du marché
-        const offersByPilot = new Map();
-        for (const o of allOffers) {
-          const key = String(o.pilotId);
-          if (!offersByPilot.has(key)) offersByPilot.set(key, []);
-          offersByPilot.get(key).push(o);
-        }
-
-        let marketDesc = '';
-        for (const [pilotId, offers] of offersByPilot) {
-          const pilot    = pilotMap2.get(pilotId);
-          if (!pilot) continue;
-          const ov       = overallRating(pilot);
-          const tier     = ratingTier(ov);
-          const teamNames = offers.map(o => {
-            const t = teamMap2.get(String(o.teamId));
-            return t ? `${t.emoji} ${t.name}` : '?';
-          }).join(', ');
-          marketDesc += `${tier.badge} **${pilot.name}** *(${ov})* — ${offers.length} offre(s) : ${teamNames}\n`;
-        }
-
-        const transferEmbed = new EmbedBuilder()
-          .setTitle('🔄 MERCATO OUVERT — Les écuries ont fait leurs offres !')
-          .setColor('#FF6600')
-          .setDescription(
-            `**${expiredCount}** contrat(s) expiré(s) · **${allOffers.length}** offre(s) générées par le bot\n` +
-            `Les pilotes libres ont **7 jours** pour accepter ou refuser.\n\n` +
-            `📋 Utilisez \`/offres\` pour voir vos propositions de contrat.\n\u200B`
-          )
-          .addFields({
-            name: '📊 État du marché',
-            value: (marketDesc.length > 1024 ? marketDesc.slice(0, 1000) + `\n*...+ ${(marketDesc.match(/\n/g)||[]).length - (marketDesc.slice(0,1000).match(/\n/g)||[]).length} pilote(s) non affichés*` : marketDesc) || '*Aucun pilote libre*',
-          })
-          .setFooter({ text: 'Les offres sont générées automatiquement par le bot selon le budget et les besoins de chaque écurie.' });
-
-        await ch.send({ embeds: [transferEmbed] });
-
-        // ── DEUXIÈME VAGUE — 3 jours après la 1ère vague ──────────
-        // Pour les pilotes qui ont tout refusé ou ignoré leurs offres
-        setTimeout(async () => {
-          try {
-            const ch2 = await client.channels.fetch(RACE_CHANNEL);
-            const waveCount = await startSecondTransferWave(ch2);
-            if (!waveCount) {
-              // Tous les pilotes libres ont un siège — pas de 2ème vague nécessaire
-              await ch2.send('✅ **Mercato clôturé** — Tous les pilotes libres ont trouvé une écurie. La grille est complète !');
-            }
-          } catch(e) { console.error('Second transfer wave error:', e.message); }
-        }, 3 * 24 * 60 * 60 * 1000); // 3 jours après la 1ère vague
-      } catch(e) { console.error('Transfer announcement error:', e.message); }
-    }, 24 * 60 * 60 * 1000);
+        const ch = await client.channels.fetch(RACE_CHANNEL).catch(() => channel);
+        await runAutoMercato(ch); // ignoré si déjà fait par l'autre déclencheur
+      } catch(e) { console.error('[runRace auto-mercato]', e.message); }
+    }, 15 * 60 * 1000);
   }
   } catch(e) {
     console.error(`[runRace] ❌ CRASH FATAL — ${race?.circuit || '?'} :`, e.message);
@@ -23519,6 +23553,287 @@ async function runRace(override, gpIndex = null) {
 // ── Flag global pour pause du scheduler ──────────────────────
 global.schedulerPaused = false;
 
+// ============================================================
+// 🧬  ÉVOLUTION DES PILOTES — fin de saison, 100 % automatique et silencieuse
+//     1) entraînement auto (PLcoins dépensés, plafonné par stat)
+//     2) régression naturelle : tous les pilotes sont en fin de carrière
+// ============================================================
+async function runSeasonEvolution(season, { force = false } = {}) {
+  const fresh = await Season.findById(season._id);
+  if (fresh?.evolutionApplied && !force) {
+    console.log('[Évolution] Déjà appliquée pour cette saison — skip.');
+    return { skipped: true };
+  }
+
+  const STATS_KEYS = ['depassement','freinage','defense','adaptabilite','reactions','controle','gestionPneus'];
+
+  // 1) Entraînement automatique (tous les pilotes, sans DM, gain plafonné)
+  try {
+    const all = await Pilot.find().select('_id').lean();
+    await runAutoAmelioration(all.map(p => ({ pilotId: p._id })), null, null,
+      { force: true, silent: true, maxGainPerStat: EVO.maxAutoGainPerStat });
+  } catch (e) { console.error('[Évolution] entraînement auto:', e.message); }
+
+  // 2) Régression naturelle — s'accélère légèrement au fil des saisons
+  const seasonsBefore = await Season.countDocuments({ status: 'finished' });
+  const accel = Math.min(EVO.maxAccel, 1 + EVO.accelPerSeason * seasonsBefore);
+  const pilots = await Pilot.find().lean();
+  let totalLoss = 0, touched = 0;
+
+  for (const p of pilots) {
+    const form = rand(0.6, 1.4); // « forme de l'année » : tous ne déclinent pas au même rythme
+    const set = {};
+    for (const key of STATS_KEYS) {
+      const phys = EVO.physical.includes(key);
+      const chance = phys ? EVO.physChance : EVO.expChance;
+      if (Math.random() > chance) continue;
+      let loss = randInt(phys ? EVO.physMin : EVO.expMin, phys ? EVO.physMax : EVO.expMax);
+      loss = Math.round(loss * accel * form);
+      if (p.specialization === key) loss = Math.floor(loss / 2); // la spécialité résiste mieux
+      if (loss <= 0) continue;
+      const cur = p[key] ?? 50;
+      const next = Math.max(EVO.floorStat, cur - loss);
+      if (next !== cur) { set[key] = next; totalLoss += cur - next; }
+    }
+    if (Object.keys(set).length) {
+      await Pilot.findByIdAndUpdate(p._id, { $set: set });
+      touched++;
+    }
+  }
+
+  await Season.findByIdAndUpdate(season._id, { evolutionApplied: true });
+  console.log(`[Évolution] ✅ ${touched}/${pilots.length} pilote(s) en régression — perte totale ${totalLoss} pts (accélération ×${accel.toFixed(2)}).`);
+  return { touched, total: pilots.length, totalLoss, accel };
+}
+
+// ============================================================
+// 🤖  MERCATO 100 % AUTOMATIQUE
+//     contrats → offres IA → poaching → choix des pilotes → délibérations → 2ᵉ vague → grille
+//     Un seul message public à la fin (révélation de grille + bilan). Aucun DM.
+// ============================================================
+global.autoMercatoRunning = false;
+
+// Score d'une offre vue par le PILOTE (salaire, rang/prestige de l'écurie, statut, loyauté, ego)
+function pilotOfferScore(offer, team, teamRank, totalTeams, pilot, maxSalary, wasInTeam) {
+  const w        = Math.max(0, Math.min(100, pilot.personality?.ego ?? 50)) / 100; // ego haut → statut/prestige > salaire
+  const salNorm  = maxSalary > 0 ? (offer.salaireBase / maxSalary) * 100 : 50;
+  const rankNorm = totalTeams > 1 ? (1 - (teamRank - 1) / (totalTeams - 1)) * 100 : 50;
+  const prestige = team.prestige ?? 50;
+  const status   = offer.driverStatus === 'numero1' ? (10 + 15 * w) : 0;
+  const loyalty  = wasInTeam ? 8 : 0;
+  const length   = (offer.seasons || 1) >= 2 ? 3 : 0;
+  return salNorm * (0.40 - 0.15 * w) + rankNorm * (0.30 + 0.10 * w) + prestige * 0.15
+       + status + loyalty + length + rand(-4, 4);
+}
+
+// Un pilote sous contrat accepte-t-il une offre de poaching ?
+function pilotAcceptsPoach(pilot, offer, newTeam, curTeam, curContract, newRank, curRank) {
+  const ego       = pilot.personality?.ego ?? 50;
+  const prestigeG = (newTeam.prestige ?? 50) - (curTeam?.prestige ?? 50);
+  const salRatio  = offer.salaireBase / Math.max(1, curContract?.salaireBase || 100);
+  const rankGain  = (curRank || 5) - (newRank || 5); // > 0 : la nouvelle écurie est mieux classée
+  const score = prestigeG * 0.6 + (salRatio - 1) * 40 + rankGain * 3 + (ego - 50) * 0.1 - 10; // -10 = loyauté
+  return score > 0 && Math.random() < 0.85;
+}
+
+// Dernier recours : complète la grille si des pilotes restent libres alors qu'il reste des sièges
+async function forceFillGrid(season) {
+  const freeP = await Pilot.find({ teamId: null }).lean();
+  if (!freeP.length) return 0;
+  const teams = await Team.find().lean();
+  const constr = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+  const rankMap = new Map(constr.map((s, i) => [String(s.teamId), i + 1]));
+  const activeC = await Contract.find({ active: true }).lean();
+  const avgSal = activeC.length ? Math.round(activeC.reduce((a, c) => a + (c.salaireBase || 100), 0) / activeC.length) : 100;
+
+  freeP.sort((a, b) => overallRating(b) - overallRating(a));
+  let filled = 0;
+  for (const p of freeP) {
+    // meilleure écurie (au classement) qui a encore un siège
+    const candidates = [];
+    for (const t of teams) {
+      const n = await Pilot.countDocuments({ teamId: t._id });
+      if (n < 2) candidates.push(t);
+    }
+    if (!candidates.length) break;
+    candidates.sort((a, b) => (rankMap.get(String(a._id)) || 99) - (rankMap.get(String(b._id)) || 99));
+    const team = candidates[0];
+    const mates = await Pilot.find({ teamId: team._id }).lean();
+    let status = 'numero1';
+    if (mates.length === 1) {
+      if (overallRating(p) < overallRating(mates[0])) { status = 'numero2'; if (!mates[0].teamStatus) await Pilot.findByIdAndUpdate(mates[0]._id, { teamStatus: 'numero1' }); }
+      else await Pilot.findByIdAndUpdate(mates[0]._id, { teamStatus: 'numero2' });
+    }
+    await Contract.updateMany({ pilotId: p._id, active: true }, { active: false });
+    await Contract.create({ pilotId: p._id, teamId: team._id, seasonsDuration: 1, seasonsRemaining: 1,
+      coinMultiplier: 1.0, primeVictoire: 0, primePodium: 0, salaireBase: avgSal });
+    await Pilot.findByIdAndUpdate(p._id, { teamId: team._id, teamStatus: status });
+    await recordTeamHistory(p._id, null, team, season?.year ?? null).catch(() => {});
+    await TransferOffer.updateMany({ pilotId: p._id, status: { $in: ['pending', 'under_review'] } }, { status: 'expired' });
+    console.log(`[AUTO-MERCATO] 🧷 Siège attribué d'office — ${p.name} → ${team.name}`);
+    filled++;
+  }
+  return filled;
+}
+
+// ── Lancement automatique de la saison suivante (premier GP le lendemain) ──
+async function launchNextSeason(channel) {
+  const tag = '[AUTO-SEASON]';
+  if (await Season.findOne({ status: 'active' })) { console.log(tag, 'Une saison active existe déjà — skip.'); return null; }
+  // Grille complète : exactement 2 pilotes par écurie, aucun pilote libre
+  const teams = await Team.find().lean();
+  for (const t of teams) {
+    if ((await Pilot.countDocuments({ teamId: t._id })) !== 2) { console.log(tag, `Grille incomplète (${t.name}) — saison non lancée.`); return null; }
+  }
+  if (await Pilot.countDocuments({ teamId: null })) { console.log(tag, 'Pilote(s) sans écurie — saison non lancée.'); return null; }
+
+  await sleep(NEXT_SEASON_DELAY_MS);
+  const season = await createNewSeason();
+  registerCommands(false).catch(e => console.error(tag, 'registerCommands:', e.message));
+
+  const first = await Race.findOne({ seasonId: season._id, index: 0 }).lean();
+  if (channel) {
+    const when = first?.scheduledDate
+      ? new Date(first.scheduledDate).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/Paris' })
+      : 'demain';
+    const embed = new EmbedBuilder()
+      .setTitle(`🏁 SAISON ${season.year} — C'EST PARTI !`)
+      .setColor('#FF1801')
+      .setDescription(
+        `La grille est bouclée et le calendrier **${season.year}** est en ligne : **${CIRCUITS.length} Grands Prix**.\n\n` +
+        `🚦 **Premier GP : ${first ? first.emoji + ' ' + first.circuit : 'à venir'}** — ${when}, essais libres à 11h.`
+      );
+    await channel.send({ embeds: [embed] }).catch(() => {});
+    setTimeout(() => {
+      generatePreseasonPressConf(season, channel).catch(e => console.error('PreseasonPress error:', e.message));
+    }, 30000);
+  }
+  console.log(`${tag} ✅ Saison ${season.year} créée automatiquement.`);
+  return season;
+}
+
+async function runAutoMercato(channel, { force = false } = {}) {
+  if (global.autoMercatoRunning) return { ok: false, reason: 'already_running' };
+  global.autoMercatoRunning = true;
+  const tag = '[AUTO-MERCATO]';
+  try {
+    let season = await Season.findOne({ status: 'transfer' }).sort({ year: -1 })
+              || await Season.findOne({ status: 'active' });
+    if (!season) return { ok: false, reason: 'no_season' };
+    if (season.autoMercatoDoneAt && !force) return { ok: false, reason: 'already_done' };
+
+    // 1) Évolution des pilotes (entraînement + régression) — une fois par saison
+    await runSeasonEvolution(season).catch(e => console.error(tag, 'évolution:', e.message));
+
+    // 2) Ouverture du mercato : contrats, renouvellements IA, offres, poaching
+    if (season.status === 'active') {
+      if (!season.transferStartedAt) await Season.findByIdAndUpdate(season._id, { transferStartedAt: new Date() });
+      await startTransferPeriod();
+    }
+    season = await Season.findById(season._id);
+    console.log(`${tag} 🔄 Mercato ouvert (saison ${season.year}).`);
+
+    const teams      = await Team.find().lean();
+    const teamMap    = new Map(teams.map(t => [String(t._id), t]));
+    const constr     = await ConstructorStanding.find({ seasonId: season._id }).sort({ points: -1 }).lean();
+    const rankMap    = new Map(constr.map((s, i) => [String(s.teamId), i + 1]));
+    const totalTeams = teams.length;
+    const rankOf     = id => rankMap.get(String(id)) || Math.ceil(totalTeams / 2);
+    const PAST       = () => new Date(Date.now() - 1000);
+
+    // 3) Poaching : les pilotes sous contrat répondent d'abord (libère des sièges en cascade)
+    const poachOffers = await TransferOffer.find({ status: 'pending', offerType: 'poaching' }).lean();
+    const poachByPilot = new Map();
+    for (const o of poachOffers) {
+      const k = String(o.pilotId);
+      if (!poachByPilot.has(k)) poachByPilot.set(k, []);
+      poachByPilot.get(k).push(o);
+    }
+    for (const [pid, offs] of poachByPilot) {
+      const pilot = await Pilot.findById(pid).lean();
+      const curContract = pilot ? await Contract.findOne({ pilotId: pid, active: true }).lean() : null;
+      const curTeam = pilot?.teamId ? teamMap.get(String(pilot.teamId)) : null;
+      let chosen = null;
+      if (pilot && curContract) {
+        const sorted = [...offs].sort((a, b) => b.salaireBase - a.salaireBase);
+        for (const o of sorted) {
+          const nt = teamMap.get(String(o.teamId));
+          if (nt && pilotAcceptsPoach(pilot, o, nt, curTeam, curContract, rankOf(o.teamId), curTeam ? rankOf(curTeam._id) : 5)) { chosen = o; break; }
+        }
+      }
+      for (const o of offs) {
+        if (chosen && String(o._id) === String(chosen._id))
+          await TransferOffer.findByIdAndUpdate(o._id, { status: 'under_review', reviewDeadline: PAST() });
+        else await TransferOffer.findByIdAndUpdate(o._id, { status: 'rejected' });
+      }
+    }
+    await resolveTeamDeliberations().catch(e => console.error(tag, 'poaching:', e.message));
+
+    // 4) Pilotes libres : chacun postule à sa meilleure offre, les écuries tranchent, on boucle
+    for (let round = 1; round <= 8; round++) {
+      const freeP = await Pilot.find({ teamId: null }).lean();
+      let applied = 0;
+      for (const p of freeP) {
+        const offs = await TransferOffer.find({ pilotId: p._id, status: 'pending', offerType: { $ne: 'poaching' } }).lean();
+        if (!offs.length) continue;
+        const maxSal = Math.max(...offs.map(o => o.salaireBase || 0));
+        const scored = [];
+        for (const o of offs) {
+          const t = teamMap.get(String(o.teamId));
+          if (!t) continue;
+          const full = (await Pilot.countDocuments({ teamId: t._id })) >= 2;
+          if (full) continue;
+          const wasIn = !!(await Contract.exists({ pilotId: p._id, teamId: t._id }));
+          scored.push({ o, s: pilotOfferScore(o, t, rankOf(t._id), totalTeams, p, maxSal, wasIn) });
+        }
+        if (!scored.length) continue;
+        scored.sort((a, b) => b.s - a.s);
+        await TransferOffer.findByIdAndUpdate(scored[0].o._id, { status: 'under_review', reviewDeadline: PAST() });
+        applied++;
+      }
+      if (applied) await resolveTeamDeliberations().catch(e => console.error(tag, 'délibération:', e.message));
+
+      const stillFree = await Pilot.countDocuments({ teamId: null });
+      if (!stillFree) break;
+      const seatsOpen = teams.length * 2 - (await Pilot.countDocuments({ teamId: { $ne: null } }));
+      if (seatsOpen <= 0) break;
+      if (!applied) {
+        // plus aucune offre exploitable → 2ᵉ vague d'urgence (silencieuse : channel = null)
+        const wave = await startSecondTransferWave(null).catch(e => { console.error(tag, '2ᵉ vague:', e.message); return 0; });
+        console.log(`${tag} 🔁 2ᵉ vague d'urgence : ${wave || 0} offre(s).`);
+        if (!wave) break;
+      }
+    }
+
+    // 5) Dernier recours : sièges attribués d'office
+    const forced = await forceFillGrid(season);
+    if (forced) console.log(`${tag} 🧷 ${forced} pilote(s) placé(s) d'office.`);
+
+    // 6) Nettoyage + marquage + révélation de grille (seul message public)
+    await TransferOffer.updateMany({ status: { $in: ['pending', 'under_review'] } }, { status: 'expired' });
+    await Season.findByIdAndUpdate(season._id, { secondWaveSentAt: new Date(), autoMercatoDoneAt: new Date() });
+    const fresh = await Season.findById(season._id);
+    if (channel && !fresh.gridRevealedAt) {
+      await revealFinalGrid(fresh, channel);
+      await Season.findByIdAndUpdate(season._id, { gridRevealedAt: new Date() });
+    }
+    const left = await Pilot.countDocuments({ teamId: null });
+    console.log(`${tag} ✅ Mercato terminé — ${left} pilote(s) sans écurie.`);
+
+    // 7) Grille annoncée → saison suivante lancée automatiquement (1er GP le lendemain)
+    let newSeason = null;
+    if (AUTO_START_NEXT_SEASON && left === 0) {
+      newSeason = await launchNextSeason(channel).catch(e => { console.error(tag, 'nouvelle saison:', e.message); return null; });
+    }
+    return { ok: true, free: left, forced, newSeasonYear: newSeason?.year ?? null };
+  } catch (e) {
+    console.error(tag, 'ERREUR:', e);
+    return { ok: false, reason: e.message };
+  } finally {
+    global.autoMercatoRunning = false;
+  }
+}
+
 // ── Cron de maintenance mercato (toutes les heures) ─────────────
 // Expire les offres périmées · relance les vagues si le bot a redémarré pendant le mercato
 async function transferMaintenanceTick() {
@@ -23539,6 +23854,7 @@ async function transferMaintenanceTick() {
   await resolveTeamDeliberations().catch(e => console.error('[Mercato] resolveTeamDeliberations:', e.message));
 
   // 2. Vérifier si une saison est en mode transfer et si les vagues doivent être (re)lancées
+  if (global.autoMercatoRunning) return; // le mercato automatique est en cours
   const season = await Season.findOne({ status: 'transfer' });
   if (!season || !season.transferStartedAt) return;
 
